@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { RefreshCw, Filter, XCircle, CheckCircle, Download } from "lucide-react"
-import { exportJSON, exportCSV } from "@/lib/export"
+import { RefreshCw, Filter, XCircle, CheckCircle, Download } from 'lucide-react'
 import type { RequestLog } from '@/lib/types'
+import { exportCSV, exportJSON } from '@/lib/export'
 
 const COLUMNS = [
   { id: 'time', label: '时间', visible: true, locked: true },
@@ -23,10 +23,6 @@ function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
   return n.toString()
-}
-
-  if (n >= 0.01) return `$${n.toFixed(4)}`
-  return `$${n.toFixed(6)}`
 }
 
 export default function Logs() {
@@ -76,15 +72,22 @@ export default function Logs() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold">请求日志</h2>
-        <button onClick={() => exportCSV(filtered, "request-logs")} className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700"><Download className="h-4 w-4" />导出 CSV</button>
-          <button onClick={() => exportJSON(filtered, "request-logs")} className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700"><Download className="h-4 w-4" />导出 JSON</button>
+        <div className="flex gap-2">
+          <button onClick={() => exportCSV(filtered, 'request-logs')}
+            className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700">
+            <Download className="h-4 w-4" />CSV
+          </button>
+          <button onClick={() => exportJSON(filtered, 'request-logs')}
+            className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700">
+            <Download className="h-4 w-4" />JSON
+          </button>
           <button onClick={loadLogs} disabled={refreshing}
-          className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700 disabled:opacity-50">
-          <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />刷新
-        </button>
+            className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700 disabled:opacity-50">
+            <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />刷新
+          </button>
+        </div>
       </div>
 
-      {/* 筛选栏 */}
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
         <Filter className="h-4 w-4 text-gray-400" />
         <input value={filterModel} onChange={e => setFilterModel(e.target.value)} placeholder="筛选模型..."
@@ -107,7 +110,6 @@ export default function Logs() {
         <span className="ml-auto text-xs text-gray-400">显示 {filtered.length} / {logs.length} 条</span>
       </div>
 
-      {/* 表格 */}
       <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
         <table className="w-full text-left text-sm">
           <thead>
@@ -132,7 +134,7 @@ export default function Logs() {
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{formatTokens(log.output_tokens)}</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-purple-600">{formatTokens(log.cache_read_tokens)}</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-indigo-600">{formatTokens(log.cache_creation_tokens)}</td>
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{formatTokens(log.cache_hit_rate * 100)}%</td>
+                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{(log.cache_hit_rate * 100).toFixed(1)}%</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{log.output_speed_tps.toFixed(0)} t/s</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{log.duration_s.toFixed(1)}s</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{log.status_code}</td>
