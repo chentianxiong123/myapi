@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Plus, Trash2, ChevronDown, ChevronRight, Key, Layers, Globe } from 'lucide-react'
+import { Plus, Trash2, ChevronDown, ChevronRight, Key, Layers, Globe, Zap, RefreshCw } from 'lucide-react'
 import { toast } from '@/components/Toast'
 import StatusBar from '@/components/StatusBar'
 import { postJSON } from '@/lib/api'
@@ -11,6 +11,8 @@ export default function Providers() {
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const [activeProtocol, setActiveProtocol] = useState<Record<number, ModelProtocol>>({})
   const [busy, setBusy] = useState(false)
+  const [testingKeys, setTestingKeys] = useState<Set<string>>(new Set())
+  const [testResults, setTestResults] = useState<Map<string, 'ok' | 'fail'>>(new Map())
 
   useEffect(() => {
     loadProviders()
@@ -130,6 +132,29 @@ export default function Providers() {
     setProviders(newProviders)
   }
 
+  // 测试上游密钥连通性（以密钥为粒度，学 new-api 测试通道）
+  async function testKey(pidx: number, kidx: number) {
+    const p = providers[pidx]
+    const key = p.keys[kidx]?.['api-key']
+    const id = `${pidx}-${kidx}`
+    if (!key) { toast('请先填密钥'); return }
+    setTestingKeys(s => new Set(s).add(id))
+    try {
+      // 探测上游 /models（学 new-api test channel：用 key 调 base_url 的 /models）
+      const base = p.base_url.replace(/\/$/, '')
+      const res = await fetch(`${base}/models`, {
+        headers: { Authorization: `Bearer ${key}` },
+      })
+      setTestResults(m => new Map(m).set(id, res.ok ? 'ok' : 'fail'))
+      toast(res.ok ? `${p.name} 密钥可用` : `${p.name} 密钥不可用（${res.status}）`)
+    } catch {
+      setTestResults(m => new Map(m).set(id, 'fail'))
+      toast(`${p.name} 测试失败（网络/跨域）`)
+    } finally {
+      setTestingKeys(s => { const ns = new Set(s); ns.delete(id); return ns })
+    }
+  }
+
   async function saveConfig() {
     setBusy(true)
     try {
@@ -216,6 +241,15 @@ export default function Providers() {
                           placeholder="sk-..."
                           className="flex-1 rounded border border-gray-300 px-2 py-1 text-sm font-mono dark:border-gray-600 dark:bg-gray-700"
                         />
+                        <button
+                          onClick={() => testKey(idx, kidx)}
+                          disabled={testingKeys.has(`${idx}-${kidx}`)}
+                          title="测试密钥连通性"
+                          className={`flex items-center gap-1 rounded border px-2 py-1 text-xs ${testResults.get(`${idx}-${kidx}`) === 'ok' ? 'border-green-200 bg-green-50 text-green-700 dark:bg-green-900/20' : testResults.get(`${idx}-${kidx}`) === 'fail' ? 'border-red-200 bg-red-50 text-red-600 dark:bg-red-900/20' : 'border-gray-300 hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700'}`}
+                        >
+                          {testingKeys.has(`${idx}-${kidx}`) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
+                          {testResults.get(`${idx}-${kidx}`) === 'ok' ? '可用' : testResults.get(`${idx}-${kidx}`) === 'fail' ? '失败' : '测试'}
+                        </button>
                         <button onClick={() => removeKey(idx, kidx)} className="text-red-500 hover:text-red-700">
                           <Trash2 className="h-3 w-3" />
                         </button>

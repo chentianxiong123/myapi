@@ -21,6 +21,7 @@ export const MODEL_PROTOCOLS: Array<{ id: ModelProtocol; label: string; path: st
 
 // 对外暴露的模型（按 alias 分组）
 export interface ExposedModel {
+  id?: string
   alias: string
   providers: Array<{
     provider_name: string
