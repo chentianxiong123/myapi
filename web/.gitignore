@@ -1,0 +1,15 @@
+# 依赖
+node_modules
+
+# 构建产物
+dist
+coverage
+
+# Playwright 测试产物
+test-results
+playwright-report
+blob-report
+
+# 编辑器/系统
+.DS_Store
+*.local
