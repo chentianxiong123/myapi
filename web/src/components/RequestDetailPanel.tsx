@@ -37,7 +37,6 @@ export default function RequestDetailPanel({ log, onClose }: Props) {
     { label: '总时长', value: `${log.duration_s.toFixed(1)}s` },
     { label: '输出速度', value: `${log.output_speed_tps.toFixed(0)} tok/s` },
     { label: '', value: '' },
-    { label: '成本', value: formatCost(log.cost) },
     { label: '状态码', value: String(log.status_code) },
     { label: '流式', value: log.is_stream ? '是' : '否' },
     ...(log.error ? [{ label: '错误', value: log.error }] : []),

@@ -43,13 +43,9 @@ export default function Dashboard() {
         total_cache_creation_tokens: tcc, total_cache_read_tokens: tcr,
         real_total_tokens: ti + to + tcc + tcr,
         cache_hit_rate: tcr / (ti + tcc + tcr),
-        total_cost: 12.345678, avg_ttft_ms: 245, avg_latency_ms: 890,
         avg_speed_tps: 45, active_providers: 2, total_providers: 3,
       })
       setProviders([
-        { name: 'SenseNova', base_url: '', status: 'healthy', total_requests: 800, avg_ttft_ms: 180, error_rate: 0.01, weight: 8, total_input_tokens: 800000, total_output_tokens: 300000, total_cache_read_tokens: 600000, total_cache_creation_tokens: 80000, cache_hit_rate: 0.72, total_cost: 8.23 },
-        { name: 'pie-xian', base_url: '', status: 'healthy', total_requests: 400, avg_ttft_ms: 320, error_rate: 0.03, weight: 2, total_input_tokens: 400000, total_output_tokens: 150000, total_cache_read_tokens: 250000, total_cache_creation_tokens: 40000, cache_hit_rate: 0.65, total_cost: 3.89 },
-        { name: 'iamhc', base_url: '', status: 'cooldown', total_requests: 34, avg_ttft_ms: 0, error_rate: 1.0, weight: 0, total_input_tokens: 45000, total_output_tokens: 6000, total_cache_read_tokens: 40000, total_cache_creation_tokens: 3000, cache_hit_rate: 0.89, total_cost: 0.22 },
       ])
       setTrend(Array.from({ length: 24 }, (_, i) => ({
         time: `${String(i).padStart(2, '0')}:00`,
@@ -59,7 +55,6 @@ export default function Dashboard() {
         input_tokens: Math.floor(Math.random() * 50000) + 10000,
         output_tokens: Math.floor(Math.random() * 20000) + 5000,
         cache_read_tokens: Math.floor(Math.random() * 40000) + 8000,
-        cost: Math.random() * 0.5 + 0.1,
       })))
       setLogs(Array.from({ length: 20 }, (_, i) => {
         const input = Math.floor(Math.random() * 3000) + 100
@@ -79,7 +74,6 @@ export default function Dashboard() {
           cache_read_tokens: cache_read, cache_creation_tokens: cache_creation,
           cache_hit_rate: (cache_read / (input + cache_creation)) || 0,
           real_total_tokens: input + output + cache_creation + cache_read,
-          cost: Math.random() * 0.05 + 0.001,
           ttft_ms: error ? 0 : Math.floor(Math.random() * 300) + 100,
           latency_ms: latency, duration_s: duration,
           output_speed_tps: output / duration,
@@ -151,13 +145,10 @@ export default function Dashboard() {
             </thead>
             <tbody>
               {Object.entries(
-                logs.reduce<Record<string, { count: number; input: number; output: number; cache_hit: number[]; cost: number }>>((acc, log) => {
-                  if (!acc[log.model]) acc[log.model] = { count: 0, input: 0, output: 0, cache_hit: [], cost: 0 }
                   acc[log.model].count++
                   acc[log.model].input += log.input_tokens
                   acc[log.model].output += log.output_tokens
                   acc[log.model].cache_hit.push(log.cache_hit_rate)
-                  acc[log.model].cost += log.cost
                   return acc
                 }, {})
               ).map(([model, s]) => (
@@ -169,7 +160,6 @@ export default function Dashboard() {
                   <td className="py-2 font-mono text-xs">
                     {(s.cache_hit.reduce((a, b) => a + b, 0) / s.cache_hit.length * 100).toFixed(1)}%
                   </td>
-                  <td className="py-2 font-mono text-xs">${s.cost.toFixed(4)}</td>
                 </tr>
               ))}
             </tbody>

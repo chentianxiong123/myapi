@@ -43,7 +43,6 @@ export default function StatsHero({ stats, loading }: Props) {
     },
     {
       label: '总成本',
-      value: formatCost(stats.total_cost),
       sub: '累计',
       icon: Coins,
       color: 'text-yellow-600 bg-yellow-50 dark:bg-yellow-900/20',

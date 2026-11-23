@@ -33,7 +33,6 @@ export interface StatsSummary {
   real_total_tokens: number            // input + output + cache_creation + cache_read
   cache_hit_rate: number               // cache_read / (input + cache_creation + cache_read)
   // 成本
-  total_cost: number
   // 延迟
   avg_ttft_ms: number                  // 首字时间
   avg_latency_ms: number               // 总延迟
@@ -57,7 +56,6 @@ export interface ProviderStat {
   total_cache_read_tokens: number
   total_cache_creation_tokens: number
   cache_hit_rate: number
-  total_cost: number
 }
 
 // 请求日志（学 cc-switch RequestLog，完整版）
@@ -78,7 +76,6 @@ export interface RequestLog {
   cache_hit_rate: number               // 缓存命中率
   real_total_tokens: number            // 真实总 tokens
   // 成本
-  cost: number                         // 成本（美元）
   // 延迟/速度
   ttft_ms: number                      // 首字时间（毫秒）
   latency_ms: number                   // 总延迟（毫秒）
@@ -99,7 +96,6 @@ export interface TrendPoint {
   input_tokens: number
   output_tokens: number
   cache_read_tokens: number
-  cost: number
 }
 
 // Sync 相关（学旧前端 + cc-switch）

@@ -13,7 +13,6 @@ const COLUMNS = [
   { id: 'cache_read', label: '缓存读', visible: true },
   { id: 'cache_write', label: '缓存写', visible: false },
   { id: 'hit_rate', label: '命中率', visible: false },
-  { id: 'cost', label: '成本', visible: true },
   { id: 'speed', label: '速度', visible: false },
   { id: 'duration', label: '时长', visible: false },
   { id: 'status_code', label: '状态码', visible: false },
@@ -26,7 +25,6 @@ function formatTokens(n: number): string {
   return n.toString()
 }
 
-function formatCost(n: number): string {
   if (n >= 0.01) return `$${n.toFixed(4)}`
   return `$${n.toFixed(6)}`
 }
@@ -135,7 +133,6 @@ export default function Logs() {
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-purple-600">{formatTokens(log.cache_read_tokens)}</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-indigo-600">{formatTokens(log.cache_creation_tokens)}</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{formatTokens(log.cache_hit_rate * 100)}%</td>
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{formatCost(log.cost)}</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{log.output_speed_tps.toFixed(0)} t/s</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{log.duration_s.toFixed(1)}s</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{log.status_code}</td>

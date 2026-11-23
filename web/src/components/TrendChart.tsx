@@ -8,7 +8,6 @@ interface Props {
 }
 
 type ChartType = 'area' | 'bar'
-type Metric = 'requests' | 'tokens' | 'cost'
 
 export default function TrendChart({ data, loading }: Props) {
   const [chartType, setChartType] = useState<ChartType>('area')
@@ -23,7 +22,6 @@ export default function TrendChart({ data, loading }: Props) {
   const metrics = {
     requests: { key: 'requests', label: '请求数', color: '#2563eb' },
     tokens: { key: 'input_tokens', label: 'Tokens', color: '#7c3aed' },
-    cost: { key: 'cost', label: '成本', color: '#059669' },
   }
   const m = metrics[metric]
 
