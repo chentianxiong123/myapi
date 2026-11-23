@@ -39,11 +39,8 @@ export interface ExposedModel {
   id?: string
   alias: string
   kind?: ModelKind
-  providers: Array<{
-    provider_name: string
-    real_name: string
-    weight: number
-  }>
+  // 模型级路由规则（调用变体）：允许不带 key、不同代理、独立额度
+  routes: ModelRoute[]
 }
 
 // 统计概览（学 cc-switch UsageSummary）
@@ -256,3 +253,16 @@ export const PROXY_STRATEGIES: Array<{ id: 'round-robin' | 'random' | 'none'; la
   { id: 'random', label: '随机（random）' },
   { id: 'none', label: '固定第一个（none）' },
 ]
+
+// 模型级路由规则（调用变体，学 LiteLLM deployment + 9router combo）
+// 同一模型可多个 route：不同 key（可空=不带 key）/不同代理（IPv4/IPv6）/独立额度
+export interface ModelRoute {
+  id: string
+  name: string            // 变体名（如 带key-ipv4 / 无key-ipv6）
+  provider_name: string   // 渠道（上游）
+  real_name: string       // 上游真实模型名
+  key: string             // 密钥（空 = 不带 key 请求）
+  proxy: string           // 代理 URL（IPv4/IPv6；空=直连）
+  weight: number          // 路由权重（权重高调用多）
+  quota: number           // 独立额度（已用 tokens，独立算额度）
+}
