@@ -25,15 +25,6 @@ interface GatewayConfig {
     session_affinity: boolean
     passthrough_headers: boolean
   }
-  // 下发器配置（抄旧前端）
-  context_window: number
-  max_tokens: number
-  auto_compact_token_limit: number
-  default_input_modes: string[]
-  image_models: string[]
-  include_models: string[]
-  exclude_models: string[]
-  strategy: 'replace' | 'merge'
 }
 
 export default function Config() {
@@ -62,14 +53,6 @@ export default function Config() {
           },
         ],
         routing: { strategy: 'latency-based', session_affinity: true, passthrough_headers: true },
-        context_window: 256000,
-        max_tokens: 16384,
-        auto_compact_token_limit: 200000,
-        default_input_modes: ['text'],
-        image_models: [],
-        include_models: [],
-        exclude_models: [],
-        strategy: 'replace',
       })
     }
   }
@@ -203,87 +186,6 @@ export default function Config() {
               <option value="true">开启</option>
               <option value="false">关闭</option>
             </select>
-          </div>
-        </div>
-      </div>
-
-      {/* 下发器配置（抄旧前端）*/}
-      <div className="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
-        <h3 className="mb-4 text-sm font-semibold">全局配置（下发到 Agent）</h3>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">全局上下文窗口</label>
-            <input
-              type="number"
-              value={config.context_window}
-              onChange={e => setConfig({ ...config, context_window: parseInt(e.target.value) || 0 })}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">全局最大输出</label>
-            <input
-              type="number"
-              value={config.max_tokens}
-              onChange={e => setConfig({ ...config, max_tokens: parseInt(e.target.value) || 0 })}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">Codex 自动压缩阈值</label>
-            <input
-              type="number"
-              value={config.auto_compact_token_limit}
-              onChange={e => setConfig({ ...config, auto_compact_token_limit: parseInt(e.target.value) || 0 })}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">同步策略</label>
-            <select
-              value={config.strategy}
-              onChange={e => setConfig({ ...config, strategy: e.target.value as any })}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
-            >
-              <option value="replace">replace（全盘对齐）</option>
-              <option value="merge">merge（合并）</option>
-            </select>
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">默认输入模式（逗号分隔）</label>
-            <input
-              value={config.default_input_modes.join(', ')}
-              onChange={e => setConfig({ ...config, default_input_modes: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
-              placeholder="text"
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">识图模型通配（逗号分隔）</label>
-            <input
-              value={config.image_models.join(', ')}
-              onChange={e => setConfig({ ...config, image_models: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
-              placeholder="* 或 sensenova-*"
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">模型白名单（逗号，空=全部）</label>
-            <input
-              value={config.include_models.join(', ')}
-              onChange={e => setConfig({ ...config, include_models: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
-              placeholder="留空 = 全部"
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">模型黑名单（逗号）</label>
-            <input
-              value={config.exclude_models.join(', ')}
-              onChange={e => setConfig({ ...config, exclude_models: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
-              placeholder="如 *.preview"
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
-            />
           </div>
         </div>
       </div>

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   Plus, Trash2, RefreshCw, Check, Diff, Play, Server,
-  Key, Lock, Network, ChevronDown, ChevronRight, Terminal, FolderOpen, StickyNote
+  Key, Lock, Network, ChevronDown, ChevronRight, Terminal, FolderOpen, StickyNote, Settings
 } from 'lucide-react'
 import { toast } from '@/components/Toast'
 import StatusBar from '@/components/StatusBar'
@@ -27,6 +27,29 @@ interface AdapterInstance {
   path: string
 }
 
+// 全局 Agent 配置（下发到所有 agent 客户端，原在设置页，按需移到下发页）
+interface AgentGlobalConfig {
+  context_window: number
+  max_tokens: number
+  auto_compact_token_limit: number
+  default_input_modes: string[]
+  image_models: string[]
+  include_models: string[]
+  exclude_models: string[]
+  strategy: 'replace' | 'merge'
+}
+
+const DEFAULT_AGENT_CONFIG: AgentGlobalConfig = {
+  context_window: 256000,
+  max_tokens: 16384,
+  auto_compact_token_limit: 200000,
+  default_input_modes: ['text'],
+  image_models: [],
+  include_models: [],
+  exclude_models: [],
+  strategy: 'replace',
+}
+
 export default function Sync() {
   const [hosts, setHosts] = useState<Host[]>([])
   const [instances, setInstances] = useState<Record<string, AdapterInstance[]>>({})
@@ -34,6 +57,7 @@ export default function Sync() {
   const [expandedHosts, setExpandedHosts] = useState<Set<number>>(new Set())
   const [busy, setBusy] = useState(false)
   const [logs, setLogs] = useState<string[]>([])
+  const [agentConfig, setAgentConfig] = useState<AgentGlobalConfig>(DEFAULT_AGENT_CONFIG)
 
   useEffect(() => { loadSyncConfig() }, [])
 
@@ -43,6 +67,7 @@ export default function Sync() {
       const data = await res.json()
       setHosts(data.hosts || [])
       setInstances(data.instances || {})
+      if (data.agentConfig) setAgentConfig(data.agentConfig)
     } catch {
       setHosts([
         { name: 'win11', host: '192.168.31.12', port: 22, user: 'a1', auth_type: 'key', key_path: '~/.ssh/id_ed25519', password: '', ssh_alias: 'win11', platform: 'win', notes: '主力开发机' },
@@ -107,6 +132,10 @@ export default function Sync() {
     setBusy(true); addLog(`同步 ${adapter}...`)
     try { await new Promise(r => setTimeout(r, 500)); addLog(`✓ ${adapter} 已同步`); toast(`${adapter} 已同步`) }
     finally { setBusy(false) }
+  }
+
+  function updateAgentConfig(field: keyof AgentGlobalConfig, value: any) {
+    setAgentConfig(c => ({ ...c, [field]: value }))
   }
 
   const totalInstances = Object.values(instances).reduce((s, a) => s + a.length, 0)
@@ -196,6 +225,43 @@ export default function Sync() {
               )}
             </div>
           ))}
+        </div>
+      </div>
+
+      {/* 全局 Agent 配置（下发到所有 agent 客户端）*/}
+      <div className="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="flex items-center gap-2 text-sm font-semibold"><Settings className="h-4 w-4" />全局 Agent 配置（下发到所有客户端）</h3>
+          <button onClick={() => setAgentConfig(DEFAULT_AGENT_CONFIG)} className="text-xs text-gray-400 hover:text-gray-600">重置</button>
+        </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div><label className="mb-1 block text-xs text-gray-500">全局上下文窗口</label>
+            <input type="number" value={agentConfig.context_window} onChange={e => updateAgentConfig('context_window', parseInt(e.target.value) || 0)}
+              className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" /></div>
+          <div><label className="mb-1 block text-xs text-gray-500">全局最大输出</label>
+            <input type="number" value={agentConfig.max_tokens} onChange={e => updateAgentConfig('max_tokens', parseInt(e.target.value) || 0)}
+              className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" /></div>
+          <div><label className="mb-1 block text-xs text-gray-500">自动压缩阈值</label>
+            <input type="number" value={agentConfig.auto_compact_token_limit} onChange={e => updateAgentConfig('auto_compact_token_limit', parseInt(e.target.value) || 0)}
+              className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" /></div>
+          <div><label className="mb-1 block text-xs text-gray-500">同步策略</label>
+            <select value={agentConfig.strategy} onChange={e => updateAgentConfig('strategy', e.target.value)}
+              className="w-full rounded border border-gray-300 px-2 py-1 text-xs dark:border-gray-600 dark:bg-gray-700">
+              <option value="replace">replace（全盘对齐）</option>
+              <option value="merge">merge（合并）</option>
+            </select></div>
+          <div><label className="mb-1 block text-xs text-gray-500">默认输入模式（逗号分隔）</label>
+            <input value={agentConfig.default_input_modes.join(', ')} onChange={e => updateAgentConfig('default_input_modes', e.target.value.split(',').map(s => s.trim()).filter(Boolean))} placeholder="text"
+              className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" /></div>
+          <div><label className="mb-1 block text-xs text-gray-500">识图模型通配（逗号分隔）</label>
+            <input value={agentConfig.image_models.join(', ')} onChange={e => updateAgentConfig('image_models', e.target.value.split(',').map(s => s.trim()).filter(Boolean))} placeholder="* 或 sensenova-*"
+              className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" /></div>
+          <div><label className="mb-1 block text-xs text-gray-500">模型白名单（逗号，空=全部）</label>
+            <input value={agentConfig.include_models.join(', ')} onChange={e => updateAgentConfig('include_models', e.target.value.split(',').map(s => s.trim()).filter(Boolean))} placeholder="留空 = 全部"
+              className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" /></div>
+          <div><label className="mb-1 block text-xs text-gray-500">模型黑名单（逗号）</label>
+            <input value={agentConfig.exclude_models.join(', ')} onChange={e => updateAgentConfig('exclude_models', e.target.value.split(',').map(s => s.trim()).filter(Boolean))} placeholder="如 *.preview"
+              className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" /></div>
         </div>
       </div>
 
