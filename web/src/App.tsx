@@ -8,6 +8,7 @@ import Providers from './pages/Providers'
 import Models from './pages/Models'
 import Logs from './pages/Logs'
 import Sync from './pages/Sync'
+import SettingsPage from './pages/Settings'
 import Toast from './components/Toast'
 
 const tabs = [
@@ -44,11 +45,9 @@ export default function App() {
             <span>cpa-sync</span>
           </div>
           <div className="flex-1" />
-          {/* 主题切换 */}
           <button onClick={toggleTheme} className="rounded p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700">
             {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           </button>
-          {/* 语言切换 */}
           <button onClick={toggleLanguage} className="flex items-center gap-1 rounded p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700">
             <Languages className="h-4 w-4" />
             <span className="text-xs">{i18n.language === 'zh' ? '中' : 'EN'}</span>
