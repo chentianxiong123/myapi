@@ -58,9 +58,9 @@ Windows：`python -m venv .venv; .venv\Scripts\pip install pyyaml`
 - `openclaw`：win11 `~/.openclaw/openclaw.json`
 - `hermes`：win11 `%LOCALAPPDATA%\hermes\config.yaml`
 
-## 和 cpa-sync（中心模式）的区别
+## 和 myapi（中心模式）的区别
 
-| | agent-sync（本机） | cpa-sync（中心） |
+| | agent-sync（本机） | myapi（中心） |
 |---|---|---|
 | 跑在哪 | 目标机 | 中心机 |
 | 连接 | 无 SSH | SSH 进目标机 |

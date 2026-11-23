@@ -1,4 +1,4 @@
-//! 同步核心逻辑（对照 cpa-sync CLI 的 check / apply）
+//! 同步核心逻辑（对照 myapi CLI 的 check / apply）
 use crate::adapters::{self, Adapter, Rendered};
 use crate::core::config::{build_provider_ir, filter_models, SyncConfig};
 use crate::core::cpa_client::CPAClient;
@@ -43,7 +43,7 @@ async fn pull_target(cfg: &SyncConfig) -> Result<(ProviderIR, usize), String> {
     Ok((ir, total))
 }
 
-/// 对应 cpa-sync check
+/// 对应 myapi check
 pub async fn check(cfg_path: &str) -> Value {
     check_hosts(cfg_path, &[]).await
 }
@@ -81,8 +81,8 @@ pub async fn check_hosts(cfg_path: &str, only_hosts: &[String]) -> Value {
     })
 }
 
-/// 对应 cpa-sync apply
-/// 对应 cpa-sync apply
+/// 对应 myapi apply
+/// 对应 myapi apply
 pub async fn apply(cfg_path: &str, dry_run: bool, sync_only: &[String]) -> Value {
     apply_hosts(cfg_path, dry_run, sync_only, &[]).await
 }
@@ -134,7 +134,7 @@ pub async fn apply_hosts(cfg_path: &str, dry_run: bool, sync_only: &[String], on
     })
 }
 
-/// 对应 cpa-sync models：只打印会同步的模型清单
+/// 对应 myapi models：只打印会同步的模型清单
 pub async fn models(cfg_path: &str) -> Value {
     let cfg = match SyncConfig::load(config_path(cfg_path.to_string()).as_deref()) {
         Ok(c) => c,
@@ -154,12 +154,12 @@ pub async fn models(cfg_path: &str) -> Value {
     json!({"ok": true, "models_total": total, "kept": list.len(), "models": list})
 }
 
-/// 对应 cpa-sync probe：探测选中 host 上的 agent 安装情况
+/// 对应 myapi probe：探测选中 host 上的 agent 安装情况
 pub fn probe(cfg_path: &str, hosts_csv: &str) -> Value {
     crate::core::probe::probe(cfg_path, hosts_csv)
 }
 
-/// 对应 cpa-sync list：列出全部 agent 的实例（不发网络）
+/// 对应 myapi list：列出全部 agent 的实例（不发网络）
 pub fn list(cfg_path: &str) -> Value {
     let cfg = match SyncConfig::load(config_path(cfg_path.to_string()).as_deref()) {
         Ok(c) => c,
@@ -174,7 +174,7 @@ pub fn list(cfg_path: &str) -> Value {
     json!({"ok": true, "instances": out})
 }
 
-/// 对应 cpa-sync CLI 入口（面板「同步」按钮走这里）
+/// 对应 myapi CLI 入口（面板「同步」按钮走这里）
 pub async fn run_central(cmd: &str) -> (i32, String) {
     let arg = if cmd.is_empty() { "check" } else { cmd };
     let v = if arg.starts_with("apply") {
@@ -201,7 +201,7 @@ pub async fn run_client(cmd: &str) -> (i32, String) {
 async fn cli_apply(_p: &str) -> Value { apply("", false, &[]).await }
 async fn cli_models(_p: &str) -> Value { models("").await }
 
-/// 对应 cpa-sync doctor：连接检查 + 白名单校验 + adapter 健康（纯读诊断）
+/// 对应 myapi doctor：连接检查 + 白名单校验 + adapter 健康（纯读诊断）
 pub async fn doctor(cfg_path: &str) -> Value {
     let cfg = match SyncConfig::load(config_path(cfg_path.to_string()).as_deref()) {
         Ok(c) => c,

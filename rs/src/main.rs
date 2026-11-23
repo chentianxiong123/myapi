@@ -1,4 +1,4 @@
-//! cpa-sync Rust 版（对照 web/app.py：单进程面板 + API + 静态）
+//! myapi Rust 版（对照 web/app.py：单进程面板 + API + 静态）
 mod api;
 mod cli;
 mod adapters;
@@ -99,8 +99,8 @@ async fn post_run(Json(p): Json<Value>) -> axum::Json<Value> {
     axum::Json(serde_json::json!({"ok": true, "code": r.get("code").cloned().unwrap_or_default(), "output": r.get("output").cloned().unwrap_or_default()}))
 }
 
-/// 命令行入口（对照 cpa-sync / agent-sync CLI）：
-/// cpa-sync check|models|list|apply [--config PATH]
+/// 命令行入口（对照 myapi / agent-sync CLI）：
+/// myapi check|models|list|apply [--config PATH]
 /// 不带子命令时按 web 面板启动（向后兼容）
 async fn maybe_cli(args: &[String]) -> bool {
     let first = args.iter().find(|a| !a.starts_with('-'));
@@ -143,7 +143,7 @@ async fn main() {
         .route("/api/probe", post(post_probe))
         .route("/api/probe/cache", get(get_probe_cache).post(post_probe_cache))
         .route("/api/panel/config", get(|| async { axum::Json(api::get_panel_config()) }).post(post_panel_config))
-        .route("/api/version", get(|| async { let v = api::get_version(); axum::Json(serde_json::json!({"ok": true, "cpa_sync": v.get("cpa_sync").cloned().unwrap_or_default(), "agent_sync": v.get("agent_sync").cloned().unwrap_or_default(), "adapters": v.get("adapters").cloned().unwrap_or_default()})) }))
+        .route("/api/version", get(|| async { let v = api::get_version(); axum::Json(serde_json::json!({"ok": true, "myapi": v.get("myapi").cloned().unwrap_or_default(), "agent_sync": v.get("agent_sync").cloned().unwrap_or_default(), "adapters": v.get("adapters").cloned().unwrap_or_default()})) }))
         .route("/api/nodes/config", post(post_nodes_config))
         .route("/api/nodes/diff", post(post_nodes_diff))
         .route("/api/nodes/sync", post(post_nodes_sync))
@@ -162,7 +162,7 @@ async fn main() {
         .fallback_service(ServeDir::new(root().join("web").join("static")))
         .with_state(state);
     let addr = format!("127.0.0.1:{}", api::gateway_cfg().panel_port);
-    println!("cpa-sync-rs → http://{addr}");
+    println!("myapi-rs → http://{addr}");
     axum::serve(tokio::net::TcpListener::bind(&addr).await.expect("bind 失败"), app)
         .await.expect("serve");
 }

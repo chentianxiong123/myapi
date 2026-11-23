@@ -10,8 +10,8 @@ use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff};
 
 const CPA_ID: &str = "cpa";
 const CPA_TYPE: &str = "openai-compat"; // crush 旧 catwalk 值；main/catwalk v3 是 completions
-const BEGIN_MARK: &str = "# --- cpa-sync cpa provider BEGIN ---";
-const END_MARK: &str = "# --- cpa-sync cpa provider END ---";
+const BEGIN_MARK: &str = "# --- myapi provider BEGIN ---";
+const END_MARK: &str = "# --- myapi provider END ---";
 
 pub struct CrushAdapter { pub path: String, pub io: RemoteIO }
 

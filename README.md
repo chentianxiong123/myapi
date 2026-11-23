@@ -1,19 +1,19 @@
 # myapi —— 个人 LLM 网关
 
-> **主线 = Rust**（`rs/`，CLI + Web 面板一体，`cpa-sync-rs`）。
+> **主线 = Rust**（`rs/`，CLI + Web 面板一体，`myapi-rs`）。
 > Python 版已归档到 **`old/`**（保留作参考，不再维护/不再主线）。
 
 把 **CPA (cli-proxy-api)** 配置同步到所有 agent 应用。两套工具：
 
-- **`cpa-sync`（中心模式）**：在中心机跑，中央配置为唯一事实来源，一键下发到各接入机（ssh/scp）。
+- **`myapi`（中心模式）**：在中心机跑，中央配置为唯一事实来源，一键下发到各接入机（ssh/scp）。
 - **`agent-sync`（客户端模式）**：拷到目标机跑，**无 SSH**，目标机自己连 CPA 拉模型、写本机 agent 文件。
 
-**一句话**：中央配置 = 唯一事实来源；中心机用 `cpa-sync` 下发，各目标机也可用 `agent-sync` 自拉。
+**一句话**：中央配置 = 唯一事实来源；中心机用 `myapi` 下发，各目标机也可用 `agent-sync` 自拉。
 
 ## 架构
 
 ```
-             ┌─ cpa-sync sync ─┬─ pi.py       → 本机 ~/.pi/agent/models.json
+             ┌─ myapi sync ─┬─ pi.py       → 本机 ~/.pi/agent/models.json
              │                  ├─ opencode.py → 本机 ~/.config/opencode/opencode.json
              │                  ├─ claude.py   → cc-switch providers (app_type=claude)
              │                  ├─ codex.py    → cc-switch providers (app_type=codex)
@@ -52,14 +52,14 @@ codex 用带 `/v1` 的 base_url（OpenAI 格式）+ `wire_api=responses`。
 ## 用法
 
 ```bash
-cd /mnt/shared/my-project/cpa-sync
-./cpa-sync models                  # CPA 暴露的全部模型
-./cpa-sync list                    # 各 adapter 当前状态
-./cpa-sync check [adapter...]      # dry-run：只对比不写
-./cpa-sync apply [adapter...] -y   # 真正同步（自动备份）
-./cpa-sync sync  [adapter...] -y   # 交互式同步向导
-./cpa-sync doctor                  # 诊断连接/配置
-./cpa-sync --version               # 版本
+cd /mnt/shared/my-project/myapi
+./myapi models                  # CPA 暴露的全部模型
+./myapi list                    # 各 adapter 当前状态
+./myapi check [adapter...]      # dry-run：只对比不写
+./myapi apply [adapter...] -y   # 真正同步（自动备份）
+./myapi sync  [adapter...] -y   # 交互式同步向导
+./myapi doctor                  # 诊断连接/配置
+./myapi --version               # 版本
 ```
 
 ## 中央配置（`config/cpa-config.yaml`，真实值，不进仓库）
@@ -81,7 +81,7 @@ cpa:
 strategy: replace            # replace = 全盘对齐，不留旧模型
 ```
 
-**统一管理**：`context_window` / `auto_compact_token_limit` 由中央配置控制，改一处 → `cpa-sync sync` → 所有 agent 统一。
+**统一管理**：`context_window` / `auto_compact_token_limit` 由中央配置控制，改一处 → `myapi sync` → 所有 agent 统一。
 
 **识图能力匹配**：三个层级，优先级从低到高：
 
@@ -103,7 +103,7 @@ strategy: replace            # replace = 全盘对齐，不留旧模型
 
 ## 两套工具分工
 
-| | `cpa-sync`（中心） | `agent-sync`（客户端） |
+| | `myapi`（中心） | `agent-sync`（客户端） |
 |---|---|---|
 | 跑在哪 | 中心机 | 目标机 |
 | 连接 | SSH 进目标机 | 无 SSH |
@@ -114,12 +114,12 @@ strategy: replace            # replace = 全盘对齐，不留旧模型
 
 ## 目录
 
-cpa-sync/
-├── cpa-sync              # CLI 入口（中心模式）
+myapi/
+├── myapi              # CLI 入口（中心模式）
 ├── agent-sync            # CLI 入口（客户端模式，无 SSH）
 ├── agent-sync.sh/.ps1    # 客户端启动器（macOS/Linux / Windows）
-├── cpa-sync-web          # Web 控制面板启动器（venv python）
-├── cpa-sync-nginx        # nginx 网关安装器（渲染 gateway.yaml → /etc/nginx/conf.d）
+├── myapi-web          # Web 控制面板启动器（venv python）
+├── myapi-nginx        # nginx 网关安装器（渲染 gateway.yaml → /etc/nginx/conf.d）
 ├── core/                 # ir / cpa_client / config / remote
 ├── adapters/             # base + pi/opencode/claude/codex/omp/dsh/picoclaw/crush/openclaw/hermes
 ├── web/                  # Web 控制面板（app.py 面板 + nginx.conf 模板 + static/）
@@ -150,7 +150,7 @@ python3 -m pytest tests/    # 跑测试
 - 启动：
   ```bash
   .venv/bin/python web/app.py   # 面板（默认 0.0.0.0:17834）
-  ./cpa-sync-nginx install      # 渲染 gateway.yaml → /etc/nginx/conf.d/cpa-sync.conf → reload
+  ./myapi-nginx install      # 渲染 gateway.yaml → /etc/nginx/conf.d/myapi.conf → reload
   ```
 - 配置：`config/gateway.yaml`（真实值，不进仓库）；模板 `config/gateway.yaml.example`；渲染入口 `scripts/render_gateway.py`。
 
@@ -169,7 +169,7 @@ nginx (1 进程 ~55MB)
 - **远程访问**：`http://192.168.31.204:17835`（局域网任一设备浏览器可开，完整面板功能）
 - **app.py 仍绑本机** `127.0.0.1:17834`——远程全靠 nginx 反代，面板本身不暴露到局域网
 
-### 开关（`config/gateway.yaml`，改后跑 `./cpa-sync-nginx install` 重载）
+### 开关（`config/gateway.yaml`，改后跑 `./myapi-nginx install` 重载）
 
 | 配置 | 作用 | 默认 |
 |---|---|---|
@@ -206,7 +206,7 @@ master_process off;    # 单进程直接服务（无独立 worker）
 | worker_processes 1 | 2 | 11.6MB |
 | **+ master_process off** | **1** | **2.8MB** |
 
-- `./cpa-sync-nginx install` 已固化这两个指令并重启（无需手改）
+- `./myapi-nginx install` 已固化这两个指令并重启（无需手改）
 - 副作用：改配置必须 `stop/start`（reload 不生效）；单进程单点（崩了跑一次 install 回来）
 - 完整手册：桌面《nginx调优-压worker单进程.md》
 
@@ -214,7 +214,7 @@ master_process off;    # 单进程直接服务（无独立 worker）
 ## GUI（PySide6）
 
 ```bash
-./cpa-sync-gui          # 启动图形界面
+./myapi-gui          # 启动图形界面
 ```
 
 GUI 是 CLI 的图形外壳（复用全部 cmd_* 逻辑，零重复）：

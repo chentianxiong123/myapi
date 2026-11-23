@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cpa-sync Web 控制面板启动器 —— 用 venv 的 python 跑 web/app.py
+# myapi Web 控制面板启动器 —— 用 venv 的 python 跑 web/app.py
 set -e
 cd "$(dirname "$0")"
 if [ ! -x ".venv/bin/python" ]; then

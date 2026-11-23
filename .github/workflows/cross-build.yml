@@ -77,16 +77,16 @@ jobs:
 
       - name: 校验产物
         run: |
-          BIN=${{ github.workspace }}/rs/target/${{ matrix.target }}/release/cpa-sync
-          find . -type f -name cpa-sync -path '*release*' -exec ls -lh {} \;
+          BIN=${{ github.workspace }}/rs/target/${{ matrix.target }}/release/myapi
+          find . -type f -name myapi -path '*release*' -exec ls -lh {} \;
           file "$BIN"
           test -x "$BIN"
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: cpa-sync-${{ matrix.target }}
-          path: rs/target/${{ matrix.target }}/release/cpa-sync
+          name: myapi-${{ matrix.target }}
+          path: rs/target/${{ matrix.target }}/release/myapi
           if-no-files-found: error
           compression-level: 1
 
@@ -166,21 +166,21 @@ jobs:
 
       - name: 校验产物
         run: |
-          find . -type f -name cpa-sync -path '*apple-darwin*release*' -exec file {} \;
+          find . -type f -name myapi -path '*apple-darwin*release*' -exec file {} \;
 
       - name: 上传 x86_64
         uses: actions/upload-artifact@v4
         with:
-          name: cpa-sync-x86_64-apple-darwin
-          path: rs/target/x86_64-apple-darwin/release/cpa-sync
+          name: myapi-x86_64-apple-darwin
+          path: rs/target/x86_64-apple-darwin/release/myapi
           if-no-files-found: error
           compression-level: 1
 
       - name: 上传 aarch64
         uses: actions/upload-artifact@v4
         with:
-          name: cpa-sync-aarch64-apple-darwin
-          path: rs/target/aarch64-apple-darwin/release/cpa-sync
+          name: myapi-aarch64-apple-darwin
+          path: rs/target/aarch64-apple-darwin/release/myapi
           if-no-files-found: error
           compression-level: 1
 
@@ -194,12 +194,12 @@ jobs:
       - name: 下载 macOS 产物（分目录，避免同名覆盖）
         uses: actions/download-artifact@v4
         with:
-          pattern: cpa-sync-*-apple-darwin
+          pattern: myapi-*-apple-darwin
           path: dist
 
       - name: ad-hoc 签名
         run: |
-          find dist -type f -name cpa-sync | while read f; do
+          find dist -type f -name myapi | while read f; do
             echo "-- 签名 $f --"
             codesign --force --sign - "$f"
             codesign --verify "$f" 2>&1 && echo "  验证通过" || echo "  (verify 警告，签名已完成)"
@@ -209,8 +209,8 @@ jobs:
       - name: 上传签名产物
         uses: actions/upload-artifact@v4
         with:
-          name: cpa-sync-macos-signed
-          path: dist/**/cpa-sync
+          name: myapi-macos-signed
+          path: dist/**/myapi
           if-no-files-found: error
           compression-level: 1
 
@@ -225,8 +225,8 @@ jobs:
           path: dist
       - name: 列表 + 校验和
         run: |
-          find dist -type f -name cpa-sync -exec ls -lh {} \;
-          for f in dist/*/cpa-sync; do
+          find dist -type f -name myapi -exec ls -lh {} \;
+          for f in dist/*/myapi; do
             printf "%s  " "$(sha256sum "$f" | cut -d' ' -f1)"
             echo "$f"
           done

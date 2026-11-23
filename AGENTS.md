@@ -1,6 +1,6 @@
-# cpa-sync 项目约定（pi 上下文）
+# myapi 项目约定（pi 上下文）
 
-cpa-sync 把 CPA (cli-proxy-api) 配置同步到各 agent 应用。核心约定：
+myapi 把 CPA (cli-proxy-api) 配置同步到各 agent 应用。核心约定：
 
 - **中央配置 `config/cpa-config.yaml` = 唯一事实来源**（真实值不入仓库，模板 `cpa-config.example.yaml`）。
 - **生成物不可手改**：`~/.pi/agent/models.json`、`~/.omp/agent/models.yml` 等是渲染产物，`strategy: replace` 会在 `apply` 时覆盖手改。要改就改中央配置或 `adapters/<name>.py`。

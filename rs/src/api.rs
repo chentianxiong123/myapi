@@ -454,7 +454,7 @@ pub fn probe_hosts(hosts_csv: &str) -> Value {
 /// 对应 get_version()
 pub fn get_version() -> Value {
     let mut ver = String::from("?");
-    if let Ok(text) = std::fs::read_to_string(root().join("cpa-sync")) {
+    if let Ok(text) = std::fs::read_to_string(root().join("myapi")) {
         for line in text.lines() {
             if let Some(rest) = line.strip_prefix("VERSION=") {
                 let v: String = rest.chars().filter(|c| *c != '"' && *c != ' ').collect();
@@ -462,7 +462,7 @@ pub fn get_version() -> Value {
             }
         }
     }
-    json!({"cpa_sync": ver, "agent_sync": "1.0.0", "adapters": crate::adapters::available_names().len()})
+    json!({"myapi": ver, "agent_sync": "1.0.0", "adapters": crate::adapters::available_names().len()})
 }
 
 /// 命令执行（对应 run_central/run_client/run_script）

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cpa-sync GUI 启动器 —— 用 venv 里的 PySide6 跑 GUI
+# myapi GUI 启动器 —— 用 venv 里的 PySide6 跑 GUI
 set -e
 cd "$(dirname "$0")"
 if [ ! -x ".venv/bin/python" ]; then

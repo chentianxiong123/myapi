@@ -119,9 +119,9 @@ class RemoteIO:
         if self.local:
             self._write_local(path, content)
             return
-        remote_tmp = f"{self.tmp_dir}/cpa_sync_{uuid.uuid4().hex[:8]}.tmp"
+        remote_tmp = f"{self.tmp_dir}/myapi_{uuid.uuid4().hex[:8]}.tmp"
         remote_tmp_scp = remote_tmp  # scp 目标统一正斜杠
-        local_tmp = os.path.join(tempfile.gettempdir(), f"cpa_sync_{uuid.uuid4().hex[:8]}.tmp")
+        local_tmp = os.path.join(tempfile.gettempdir(), f"myapi_{uuid.uuid4().hex[:8]}.tmp")
         try:
             with open(local_tmp, "w", encoding="utf-8") as f:
                 f.write(content)

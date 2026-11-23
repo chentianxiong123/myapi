@@ -1,4 +1,4 @@
-"""cpa-sync 核心逻辑单元测试。"""
+"""myapi 核心逻辑单元测试。"""
 from __future__ import annotations
 
 import json

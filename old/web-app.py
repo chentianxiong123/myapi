@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""cpa-sync Web 控制面板 —— 纯标准库实现（零新依赖）。
+"""myapi Web 控制面板 —— 纯标准库实现（零新依赖）。
 
-覆盖 cpa-sync 全部功能：
-- 中心模式命令（models/list/check/apply/doctor）—— 复用 cpa-sync cmd_*
+覆盖 myapi 全部功能：
+- 中心模式命令（models/list/check/apply/doctor）—— 复用 myapi cmd_*
 - 客户端模式命令（agent-sync list/check/apply/doctor）—— 复用 agent-sync main(argv)
 - 一次性脚本（omp_disable_providers / picoclaw_disable_builtin）
 - 配置读写（cpa-config.yaml：cpa/识图三层/strategy/hosts/adapter_instances/targets）
@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 # 复用 CLI（与 gui/app.py 同法：SourceFileLoader）
-_cli = SourceFileLoader("cpa_sync_cli", str(ROOT / "cpa-sync")).load_module()
+_cli = SourceFileLoader("myapi_cli", str(ROOT / "myapi")).load_module()
 _agent = SourceFileLoader("agent_sync_cli", str(ROOT / "agent-sync")).load_module()
 import adapters  # noqa: E402  # available_names() 动态发现
 
@@ -437,13 +437,13 @@ def get_version() -> dict:
     import re
     ver = "?"
     try:
-        with open(str(ROOT / "cpa-sync"), encoding="utf-8") as f:
+        with open(str(ROOT / "myapi"), encoding="utf-8") as f:
             m = re.search(r'VERSION\s*=\s*"([^"]+)"', f.read())
             if m:
                 ver = m.group(1)
     except Exception:  # noqa: BLE001
         pass
-    return {"cpa_sync": ver, "agent_sync": "1.0.0", "adapters": len(adapters.available_names())}
+    return {"myapi": ver, "agent_sync": "1.0.0", "adapters": len(adapters.available_names())}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -570,11 +570,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="cpa-sync Web 控制面板")
+    p = argparse.ArgumentParser(description="myapi Web 控制面板")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=17834)
     a = p.parse_args()
-    print(f"cpa-sync Web 控制面板 → http://{a.host}:{a.port}")
+    print(f"myapi Web 控制面板 → http://{a.host}:{a.port}")
     ThreadingHTTPServer((a.host, a.port), Handler).serve_forever()
     return 0
 

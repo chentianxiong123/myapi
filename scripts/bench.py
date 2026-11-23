@@ -6,7 +6,7 @@
 用法:
     python scripts/bench.py                     # 全自动探测
     python scripts/bench.py --profile debug     # 测 debug 构建
-    python scripts/bench.py --rust ./cpa-sync.exe --py-src /path/to/py-src
+    python scripts/bench.py --rust ./myapi.exe --py-src /path/to/py-src
     python scripts/bench.py --config config/cpa-config.yaml --cli-rounds 5
 
 路径全部可传参，不写死任何个人目录。探测顺序：命令行 > 环境变量 > 自动推导。
@@ -206,8 +206,8 @@ def find_rust_exe(profile: str) -> Path | None:
         dirs.append(Path(env))
     dirs.append(ROOT)
     for d in dirs:
-        for p in (d / "target" / profile / f"cpa-sync{suffix}",
-                  d / "target" / profile / "cpa-sync"):
+        for p in (d / "target" / profile / f"myapi{suffix}",
+                  d / "target" / profile / "myapi"):
             if p.exists():
                 return p
     return None
@@ -241,7 +241,7 @@ def main() -> None:
     py_src = Path(args.py_src) if args.py_src else ROOT
     config = Path(args.config) if args.config else next(
         (p for p in (ROOT / "config" / "cpa-config.yaml",
-                     Path.home() / "cpa-sync" / "config" / "cpa-config.yaml") if p.exists()),
+                     Path.home() / "myapi" / "config" / "cpa-config.yaml") if p.exists()),
         Path("cpa-config.yaml"))
     py = find_python_web(py_src)
 
@@ -273,7 +273,7 @@ def main() -> None:
 
     print("\n=== CLI check 耗时（同一 config）===")
     result["cli_rust"] = bench_cli(rust, [], config, args.cli_rounds) if rust else None
-    result["cli_python"] = (bench_cli(Path(sys.executable), ["cpa-sync", "--config", str(config)],
+    result["cli_python"] = (bench_cli(Path(sys.executable), ["myapi", "--config", str(config)],
                                       config, args.cli_rounds)
                             if py else None)
     for k in ("cli_rust", "cli_python"):

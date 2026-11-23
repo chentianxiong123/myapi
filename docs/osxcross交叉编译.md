@@ -1,13 +1,13 @@
 # osxcross 交叉编译 macOS —— 方法 + 归纳 + 踩坑
 
-> 2026-11-21 · cpa-sync（Rust + rusqlite bundled）
+> 2026-11-21 · myapi（Rust + rusqlite bundled）
 > 结论：**方案成立**，4 平台产物全出，macOS 500 分钟额度几乎不占（每次 push ≈1.5 分钟）
 
 ---
 
 ## 一、背景与目标
 
-cpa-sync 是 Rust 项目（CLI + web 面板，`rs/`），CI 交叉编译多平台产物。
+myapi 是 Rust 项目（CLI + web 面板，`rs/`），CI 交叉编译多平台产物。
 
 **问题**：原 CI `macos-latest` runner **全程编译** macOS，计费 **10x 系数**：
 - 7 次 push 烧掉 **274/500 分钟**（55%）
@@ -75,7 +75,7 @@ env:
 
 ```bash
 # 分目录下载（避免 x86_64/aarch64 同名覆盖）
-find dist -type f -name cpa-sync | while read f; do
+find dist -type f -name myapi | while read f; do
   codesign --force --sign - "$f"        # ad-hoc（免费，无需证书）
 done
 ```
@@ -114,7 +114,7 @@ run conclusion: success（5/5 job）
 | 2 | **lipo Linux 无** | 无法合并 universal | 产物分开，不合并 |
 | 3 | **codesign Linux 无** | Linux 上无法签名 | 签名挪到 macos-latest job |
 | 4 | **SDK 获取难** | Apple 许可限制 | joseluisq/macosx-sdks 社区托管 |
-| 5 | **merge-multiple 覆盖** | x86_64/aarch64 都叫 cpa-sync，后者覆盖前者 | 分目录下载 |
+| 5 | **merge-multiple 覆盖** | x86_64/aarch64 都叫 myapi，后者覆盖前者 | 分目录下载 |
 | 6 | **codesign --verify 严格失败** | "main executable failed strict validation" | verify 警告不中断 |
 | 7 | **rustc 版本 MSRV** | 依赖 `rust-version=1.86`，本地 1.85 编不了 | CI 用 `dtolnay/rust-toolchain@stable` |
 | 8 | **C 依赖** | rusqlite bundled 需 C 编译 | CC/CXX/linker 指 osxcross clang + `LIBZ_SYS_STATIC=1` |

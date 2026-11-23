@@ -6,13 +6,13 @@
 
 用法（路径全部参数化，不写死个人目录）:
     python tests/compare_mock.py \
-        --rust-exe ./target/release/cpa-sync \
+        --rust-exe ./target/release/myapi \
         --py-src . --workdir /tmp/cmp-mock [--mock-port 18317] [--keep]
 
 流程:
     1. 起 mock CPA（或复用 --mock-port 上已运行的）
     2. 生成 py.yaml / rs.yaml（路径指向 workdir/py 与 workdir/rs）
-    3. 双跑 apply：Python [python cpa-sync apply -y] / Rust [exe apply]
+    3. 双跑 apply：Python [python myapi apply -y] / Rust [exe apply]
     4. 8 个文件逐字段 diff + claude/codex sqlite 12 行 diff
     5. 汇总 一致/差异
 
@@ -213,7 +213,7 @@ def main() -> int:
     py_cfg = make_config(workdir, "py", a.mock_port)
     rs_cfg = make_config(workdir, "rs", a.mock_port)
     print(f"[run] Python apply -> {workdir}/py/")
-    c1, o1 = run_apply([str(a.python), "cpa-sync", "--config", str(py_cfg), "apply", "-y"], cwd=str(py_src))
+    c1, o1 = run_apply([str(a.python), "myapi", "--config", str(py_cfg), "apply", "-y"], cwd=str(py_src))
     print(f"[run] Rust apply   -> {workdir}/rs/")
     c2, o2 = run_apply([str(rust), "apply", "--config", str(rs_cfg)])
     if c1 != 0 or c2 != 0:
@@ -236,7 +236,7 @@ def main() -> int:
         c.commit(); c.close()
     env_py = dict(os.environ, CC_SWITCH_DB=str(py_db))
     env_rs = dict(os.environ, CC_SWITCH_DB=str(rs_db))
-    subprocess.run([str(a.python), "cpa-sync", "--config", str(py_cfg), "apply", "-y", "claude", "codex"],
+    subprocess.run([str(a.python), "myapi", "--config", str(py_cfg), "apply", "-y", "claude", "codex"],
                    cwd=str(py_src), env=env_py, capture_output=True, timeout=180)
     subprocess.run([str(rust), "apply", "claude", "codex", "--config", str(rs_cfg)],
                    env=env_rs, capture_output=True, timeout=180)

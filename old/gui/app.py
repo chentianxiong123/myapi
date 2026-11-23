@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""cpa-sync GUI —— PySide6 图形界面。
+"""myapi GUI —— PySide6 图形界面。
 
-作为 CLI 的图形外壳：复用 cpa-sync 的 cmd_* 全部逻辑，把输出导到界面。
+作为 CLI 的图形外壳：复用 myapi 的 cmd_* 全部逻辑，把输出导到界面。
 内置图形化配置编辑器（不用手写 YAML）+ agent 接入点一览。
 
 用法: .venv/bin/python gui/app.py
@@ -42,8 +42,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-# 复用 CLI（cpa-sync 无 .py 后缀，用 SourceFileLoader 加载）
-_cli = SourceFileLoader("cpa_sync_cli", str(ROOT / "cpa-sync")).load_module()
+# 复用 CLI（myapi 无 .py 后缀，用 SourceFileLoader 加载）
+_cli = SourceFileLoader("myapi_cli", str(ROOT / "myapi")).load_module()
 
 CONFIG_PATH = str(ROOT / "config" / "cpa-config.yaml")
 
@@ -225,11 +225,11 @@ class ConfigEditor(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("cpa-sync · CPA 配置同步")
+        self.setWindowTitle("myapi · CPA 配置同步")
         self.resize(980, 680)
         self._worker: Worker | None = None
         self._build_ui()
-        self.log("cpa-sync GUI 就绪。配置: " + CONFIG_PATH + "\n")
+        self.log("myapi GUI 就绪。配置: " + CONFIG_PATH + "\n")
 
     # ---- UI ----
     def _build_ui(self):

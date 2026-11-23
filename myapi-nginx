@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# cpa-sync 自带 nginx：把 web/nginx.conf 安装到系统 nginx 并 reload。
-# 用法: cpa-sync-nginx [install|remove]
-# install —— 渲染 config/gateway.yaml（上游 1~N 可配）→ /etc/nginx/conf.d/cpa-sync.conf → reload
+# myapi 自带 nginx：把 web/nginx.conf 安装到系统 nginx 并 reload。
+# 用法: myapi-nginx [install|remove]
+# install —— 渲染 config/gateway.yaml（上游 1~N 可配）→ /etc/nginx/conf.d/myapi.conf → reload
 # remove  —— 卸载配置 → reload
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-DEST=/etc/nginx/conf.d/cpa-sync.conf
+DEST=/etc/nginx/conf.d/myapi.conf
 
 case "${1:-install}" in
   install)
@@ -32,7 +32,7 @@ case "${1:-install}" in
   remove)
     sudo rm -f "$DEST"
     sudo nginx -s reload
-    echo "✓ 已移除 cpa-sync.conf"
+    echo "✓ 已移除 myapi.conf"
     ;;
   *)
     echo "用法: $0 [install|remove]"; exit 1;;

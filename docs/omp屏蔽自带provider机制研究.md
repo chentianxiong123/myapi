@@ -28,7 +28,7 @@ omp 启动时按这个数组过滤，不加载这些内置 provider。
 
 ## 复用脚本
 
-`cpa-sync/scripts/omp_disable_providers.py` —— 自动读 `rules.json` 的内置 provider 全集，写进 config.yml 的 `disabledProviders`（保留 `web` + 自定义 provider）。
+`myapi/scripts/omp_disable_providers.py` —— 自动读 `rules.json` 的内置 provider 全集，写进 config.yml 的 `disabledProviders`（保留 `web` + 自定义 provider）。
 
 ```bash
 # 本机

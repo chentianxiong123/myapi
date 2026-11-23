@@ -24,7 +24,7 @@
 
 ## 脚本行为
 
-`cpa-sync/scripts/picoclaw_disable_builtin.py` —— 删 `model_list` 里非保留 provider 条目（默认保留 `cpa`），备份 + 原子写，可选重启 picoclaw-gateway。
+`myapi/scripts/picoclaw_disable_builtin.py` —— 删 `model_list` 里非保留 provider 条目（默认保留 `cpa`），备份 + 原子写，可选重启 picoclaw-gateway。
 
 ```bash
 python3 scripts/picoclaw_disable_builtin.py --dry-run                 # 只打印

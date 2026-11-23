@@ -124,8 +124,8 @@ impl RemoteIO {
         if self.is_local() { return self.write_local(path, content); }
         let host = self.host.clone().unwrap_or_default();
         let rt = self.tmp_dir();
-        let remote_tmp = format!("{}/cpa_sync_{}.tmp", rt, rand8());
-        let local_tmp = std::env::temp_dir().join(format!("cpa_sync_{}.tmp", rand8()));
+        let remote_tmp = format!("{}/myapi_{}.tmp", rt, rand8());
+        let local_tmp = std::env::temp_dir().join(format!("myapi_{}.tmp", rand8()));
         std::fs::write(&local_tmp, content)?;
         let scp_dst = format!("{}:{}", host, remote_tmp);
         let mut c = Command::new("scp");

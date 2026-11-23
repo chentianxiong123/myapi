@@ -10,15 +10,15 @@
 
 ### 阶段 1：手动同步（痛苦）
 ```
-没有 cpa-sync 时：
+没有 myapi 时：
 - 改一次模型配置 → 手动登录每台电脑 → 手动改每个 agent 的配置文件
 - pi、opencode、claude、codex、omp、dsh、picoclaw、crush、openclaw、hermes...
 - 10+ 个工具 × N 台机器 = 噩梦
 ```
 
-### 阶段 2：cpa-sync（自动化）
+### 阶段 2：myapi（自动化）
 ```
-有了 cpa-sync：
+有了 myapi：
 - 中央配置（config.yaml）→ 一键下发到所有 agent
 - 10 个 adapter 自动写各agent 的配置文件
 - 但依赖上游 CPA（cli-proxy-api）作为"事实来源"
@@ -26,7 +26,7 @@
 
 ### 阶段 3：依赖上游的痛点（现在）
 ```
-cpa-sync 依赖 CPA 的问题：
+myapi 依赖 CPA 的问题：
 - CPA 配置简洁但功能有限（无延迟路由、无模型级权重）
 - new-api 功能多但配置复杂（关系式、要重启、映射一对一）
 - 9router/freellmapi 都不满足（都是按 tier/quota 切，不是按延迟/权重）
@@ -35,7 +35,7 @@ cpa-sync 依赖 CPA 的问题：
 
 ### 阶段 4：一体化（目标）
 ```
-cpa-sync 新版本：
+myapi 新版本：
 - 既是独立网关（不依赖 CPA/new-api）
   - 接收 OpenAI 兼容请求
   - 延迟感知路由（TTFT 快的优先）
@@ -87,7 +87,7 @@ cpa-sync 新版本：
 
 ## 差异化
 
-| 对比 | cpa-sync（新版）| cpa | new-api | cc-switch | LiteLLM |
+| 对比 | myapi（新版）| cpa | new-api | cc-switch | LiteLLM |
 |---|---|---|---|---|---|
 | **独立网关** | ✅ | ✅ | ✅ | ❌ | ✅ |
 | **配置下发器** | ✅ | ❌ | ❌ | ⚠️（桌面应用）| ❌ |
@@ -114,7 +114,7 @@ cpa-sync 新版本：
 ## 项目结构
 
 ```
-cpa-sync/
+myapi/
 ├── rs/                    # Rust 后端（网关 + 下发器）
 │   ├── src/
 │   │   ├── gateway/       # 网关核心（路由/透传/统计）
@@ -164,7 +164,7 @@ cpa-sync/
 
 ## 改名计划
 
-**当前**：cpa-sync（历史遗留，依赖 CPA）
+**当前**：myapi（历史遗留，依赖 CPA）
 **未来**：待定（可能叫 `llm-gateway`、`personal-router`、`agent-hub` 等）
 
 **改名条件**：

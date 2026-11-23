@@ -13,12 +13,12 @@ crushrc**——所以 cpa 必须写进 crushrc 才不会被 crush 覆盖。
 
 本适配器用 marker 段管理 cpa provider，保留 crushrc 其它内容：
 
-  # --- cpa-sync cpa provider BEGIN ---
+  # --- myapi cpa provider BEGIN ---
   provider add cpa --type openai-compat --base-url "..." --api-key "..."
   model add cpa/<id> --context-window N --default-max-tokens M
   model large cpa/<large>
   model small cpa/<small>
-  # --- cpa-sync cpa provider END ---
+  # --- myapi cpa provider END ---
 """
 from __future__ import annotations
 
@@ -34,8 +34,8 @@ DEFAULT_HOST = "meilan-phone1"
 DEFAULT_PATH = "/root/.config/crush/crushrc"
 CPA_ID = "cpa"
 CPA_TYPE = "openai-compat"  # 手机 crush v0.98.1 用旧 catwalk；main/catwalk v3 是 completions
-BEGIN_MARK = "# --- cpa-sync cpa provider BEGIN ---"
-END_MARK = "# --- cpa-sync cpa provider END ---"
+BEGIN_MARK = "# --- myapi cpa provider BEGIN ---"
+END_MARK = "# --- myapi cpa provider END ---"
 
 
 class CrushAdapter(Adapter):

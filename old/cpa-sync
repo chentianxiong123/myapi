@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""cpa-sync —— CPA 配置一键同步 CLI。
+"""myapi —— CPA 配置一键同步 CLI。
 
 用法:
-  cpa-sync models                  # 打印 CPA 暴露的全部模型
-  cpa-sync list                    # 列出各 adapter 当前状态 + 与目标差异
-  cpa-sync check [adapter...]      # dry-run：只对比不写
-  cpa-sync apply [adapter...]      # 真正同步（默认先备份）
-  cpa-sync doctor                  # 诊断连接/配置问题
+  myapi models                  # 打印 CPA 暴露的全部模型
+  myapi list                    # 列出各 adapter 当前状态 + 与目标差异
+  myapi check [adapter...]      # dry-run：只对比不写
+  myapi apply [adapter...]      # 真正同步（默认先备份）
+  myapi doctor                  # 诊断连接/配置问题
 
-项目根: /mnt/shared/cpa-sync
+项目根: /mnt/shared/myapi
 """
 from __future__ import annotations
 
@@ -317,9 +317,9 @@ def _resolve_choice(ans: str, need: list) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="cpa-sync", description="CPA 配置一键同步")
+    p = argparse.ArgumentParser(prog="myapi", description="CPA 配置一键同步")
     p.add_argument("--config", default=None, help="中央配置路径")
-    p.add_argument("--version", action="version", version=f"cpa-sync {VERSION}")
+    p.add_argument("--version", action="version", version=f"myapi {VERSION}")
     sub = p.add_subparsers(dest="cmd")
 
     s = sub.add_parser("models", help="打印 CPA 暴露的模型")

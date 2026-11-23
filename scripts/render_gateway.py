@@ -6,7 +6,7 @@ upstreams 数量可变（1~N 个 CPA），因此这是"可选模式"的单一渲
 
 用法:
     python3 scripts/render_gateway.py              # 打印到 stdout
-    python3 scripts/render_gateway.py --output /etc/nginx/conf.d/cpa-sync.conf
+    python3 scripts/render_gateway.py --output /etc/nginx/conf.d/myapi.conf
 """
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def render(cfg: dict, template: str) -> str:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="渲染 cpa-sync 网关 nginx 配置")
+    p = argparse.ArgumentParser(description="渲染 myapi 网关 nginx 配置")
     p.add_argument("--config", default=str(ROOT / "config" / "gateway.yaml"))
     p.add_argument("--template", default=str(ROOT / "web" / "nginx.conf"))
     p.add_argument("--output", help="输出文件路径；缺省打印到 stdout")

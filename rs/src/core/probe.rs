@@ -183,7 +183,7 @@ fn probe_host(host: &str, platform: &str, cfg: &SyncConfig) -> Value {
     })
 }
 
-/// 对应 cpa-sync probe：探测选中 host（逗号分隔）上的 agent 安装情况。
+/// 对应 myapi probe：探测选中 host（逗号分隔）上的 agent 安装情况。
 /// hosts 为空 = 探测 config.hosts 里全部 host。
 pub fn probe(cfg_path: &str, hosts_csv: &str) -> Value {
     let cfg = match SyncConfig::load(if cfg_path.is_empty() { None } else { Some(cfg_path) }) {
