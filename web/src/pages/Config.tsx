@@ -1,27 +1,44 @@
 import { useEffect, useState } from 'react'
-import { Save, RotateCcw } from 'lucide-react'
-import { api, postJSON } from '@/lib/api'
+import { Save, RotateCcw, Plus, Trash2 } from 'lucide-react'
+import { postJSON } from '@/lib/api'
 import { toast } from '@/components/Toast'
 import StatusBar from '@/components/StatusBar'
 
+interface Model {
+  name: string
+  alias?: string
+  weight: number
+}
+
+interface Provider {
+  name: string
+  base_url: string
+  api_key: string
+  models: Model[]
+}
+
 interface GatewayConfig {
-  providers: Array<{
-    name: string
-    base_url: string
-    api_key: string
-    models: Array<{ name: string; alias?: string; weight: number }>
-  }>
+  // 网关配置
+  providers: Provider[]
   routing: {
     strategy: 'latency-based' | 'round-robin'
     session_affinity: boolean
     passthrough_headers: boolean
   }
+  // 下发器配置（抄旧前端）
+  context_window: number
+  max_tokens: number
+  auto_compact_token_limit: number
+  default_input_modes: string[]
+  image_models: string[]
+  include_models: string[]
+  exclude_models: string[]
+  strategy: 'replace' | 'merge'
 }
 
 export default function Config() {
   const [config, setConfig] = useState<GatewayConfig | null>(null)
   const [busy, setBusy] = useState(false)
-  const [logs, setLogs] = useState<string[]>([])
 
   useEffect(() => {
     loadConfig()
@@ -35,12 +52,24 @@ export default function Config() {
         setConfig(data.config)
       }
     } catch {
-      // 后端还没写，用默认值
       setConfig({
         providers: [
-          { name: 'SenseNova', base_url: 'https://token.sensenova.cn/v1', api_key: 'sk-xxx', models: [{ name: 'deepseek-flash', alias: 'deepseek-v4-flash', weight: 8 }] },
+          {
+            name: 'SenseNova',
+            base_url: 'https://token.sensenova.cn/v1',
+            api_key: 'sk-xxx',
+            models: [{ name: 'deepseek-flash', alias: 'deepseek-v4-flash', weight: 8 }],
+          },
         ],
         routing: { strategy: 'latency-based', session_affinity: true, passthrough_headers: true },
+        context_window: 256000,
+        max_tokens: 16384,
+        auto_compact_token_limit: 200000,
+        default_input_modes: ['text'],
+        image_models: [],
+        include_models: [],
+        exclude_models: [],
+        strategy: 'replace',
       })
     }
   }
@@ -51,20 +80,18 @@ export default function Config() {
     try {
       await postJSON('/api/config', { config })
       toast('配置已保存')
-      setLogs(l => [...l, '✓ 配置已保存'])
     } catch (e) {
       toast('保存失败')
-      setLogs(l => [...l, `✗ 保存失败: ${e}`])
     } finally {
       setBusy(false)
     }
   }
 
-  function updateProvider(idx: number, field: string, value: string | number) {
+  function updateProvider(idx: number, field: keyof Provider, value: any) {
     if (!config) return
-    const newProviders = [...config.providers]
-    newProviders[idx] = { ...newProviders[idx], [field]: value }
-    setConfig({ ...config, providers: newProviders })
+    const providers = [...config.providers]
+    providers[idx] = { ...providers[idx], [field]: value }
+    setConfig({ ...config, providers })
   }
 
   function addProvider() {
@@ -84,52 +111,12 @@ export default function Config() {
 
   return (
     <div className="space-y-4">
-      {/* 路由策略 */}
-      <div className="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
-        <h3 className="mb-4 text-sm font-semibold">路由策略</h3>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">策略</label>
-            <select
-              value={config.routing.strategy}
-              onChange={e => setConfig({ ...config, routing: { ...config.routing, strategy: e.target.value as any } })}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
-            >
-              <option value="latency-based">延迟优先</option>
-              <option value="round-robin">轮询</option>
-            </select>
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">会话粘性</label>
-            <select
-              value={config.routing.session_affinity ? 'true' : 'false'}
-              onChange={e => setConfig({ ...config, routing: { ...config.routing, session_affinity: e.target.value === 'true' } })}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
-            >
-              <option value="true">开启</option>
-              <option value="false">关闭</option>
-            </select>
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">透传 Headers</label>
-            <select
-              value={config.routing.passthrough_headers ? 'true' : 'false'}
-              onChange={e => setConfig({ ...config, routing: { ...config.routing, passthrough_headers: e.target.value === 'true' } })}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
-            >
-              <option value="true">开启</option>
-              <option value="false">关闭</option>
-            </select>
-          </div>
-        </div>
-      </div>
-
-      {/* Provider 管理 */}
+      {/* 网关配置：Provider */}
       <div className="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-sm font-semibold">Provider 管理</h3>
-          <button onClick={addProvider} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700">
-            + 添加
+          <button onClick={addProvider} className="flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700">
+            <Plus className="h-3 w-3" />添加
           </button>
         </div>
         <div className="space-y-4">
@@ -140,10 +127,10 @@ export default function Config() {
                   value={p.name}
                   onChange={e => updateProvider(idx, 'name', e.target.value)}
                   placeholder="Provider 名称"
-                  className="font-semibold text-gray-900 dark:text-gray-100 bg-transparent outline-none"
+                  className="bg-transparent font-semibold outline-none"
                 />
                 <button onClick={() => removeProvider(idx)} className="text-xs text-red-500 hover:text-red-700">
-                  删除
+                  <Trash2 className="h-4 w-4" />
                 </button>
               </div>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -169,27 +156,135 @@ export default function Config() {
                 <label className="mb-1 block text-xs text-gray-500">Models</label>
                 {p.models.map((m, mi) => (
                   <div key={mi} className="mb-1 flex gap-2 text-sm">
-                    <input
-                      value={m.name}
-                      readOnly
-                      className="flex-1 rounded border border-gray-200 px-2 py-1 dark:border-gray-700 dark:bg-gray-800"
-                    />
-                    <input
-                      value={m.alias || ''}
-                      placeholder="alias"
-                      readOnly
-                      className="w-40 rounded border border-gray-200 px-2 py-1 dark:border-gray-700 dark:bg-gray-800"
-                    />
-                    <input
-                      value={m.weight}
-                      readOnly
-                      className="w-16 rounded border border-gray-200 px-2 py-1 dark:border-gray-700 dark:bg-gray-800"
-                    />
+                    <input value={m.name} readOnly className="flex-1 rounded border border-gray-200 px-2 py-1 dark:border-gray-700 dark:bg-gray-800" />
+                    <input value={m.alias || ''} placeholder="alias" readOnly className="w-40 rounded border border-gray-200 px-2 py-1 dark:border-gray-700 dark:bg-gray-800" />
+                    <input value={m.weight} readOnly className="w-16 rounded border border-gray-200 px-2 py-1 dark:border-gray-700 dark:bg-gray-800" />
                   </div>
                 ))}
               </div>
             </div>
           ))}
+        </div>
+      </div>
+
+      {/* 网关配置：路由策略 */}
+      <div className="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
+        <h3 className="mb-4 text-sm font-semibold">路由策略</h3>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">策略</label>
+            <select
+              value={config.routing.strategy}
+              onChange={e => setConfig({ ...config, routing: { ...config.routing, strategy: e.target.value as any } })}
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
+            >
+              <option value="latency-based">延迟优先</option>
+              <option value="round-robin">轮询</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">会话粘性</label>
+            <select
+              value={config.routing.session_affinity ? 'true' : 'false'}
+              onChange={e => setConfig({ ...config, routing: { ...config.routing, session_affinity: e.target.value === 'true' } })}
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
+            >
+              <option value="true">开启</option>
+              <option value="false">关闭</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">透传 Headers</label>
+            <select
+              value={config.routing.passthrough_headers ? 'true' : 'false'}
+              onChange={e => setConfig({ ...config, routing: { ...config.routing, passthrough_headers: e.target.value === 'true' } })}
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
+            >
+              <option value="true">开启</option>
+              <option value="false">关闭</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {/* 下发器配置（抄旧前端）*/}
+      <div className="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
+        <h3 className="mb-4 text-sm font-semibold">全局配置（下发到 Agent）</h3>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">全局上下文窗口</label>
+            <input
+              type="number"
+              value={config.context_window}
+              onChange={e => setConfig({ ...config, context_window: parseInt(e.target.value) || 0 })}
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">全局最大输出</label>
+            <input
+              type="number"
+              value={config.max_tokens}
+              onChange={e => setConfig({ ...config, max_tokens: parseInt(e.target.value) || 0 })}
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">Codex 自动压缩阈值</label>
+            <input
+              type="number"
+              value={config.auto_compact_token_limit}
+              onChange={e => setConfig({ ...config, auto_compact_token_limit: parseInt(e.target.value) || 0 })}
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">同步策略</label>
+            <select
+              value={config.strategy}
+              onChange={e => setConfig({ ...config, strategy: e.target.value as any })}
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
+            >
+              <option value="replace">replace（全盘对齐）</option>
+              <option value="merge">merge（合并）</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">默认输入模式（逗号分隔）</label>
+            <input
+              value={config.default_input_modes.join(', ')}
+              onChange={e => setConfig({ ...config, default_input_modes: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
+              placeholder="text"
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">识图模型通配（逗号分隔）</label>
+            <input
+              value={config.image_models.join(', ')}
+              onChange={e => setConfig({ ...config, image_models: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
+              placeholder="* 或 sensenova-*"
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">模型白名单（逗号，空=全部）</label>
+            <input
+              value={config.include_models.join(', ')}
+              onChange={e => setConfig({ ...config, include_models: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
+              placeholder="留空 = 全部"
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">模型黑名单（逗号）</label>
+            <input
+              value={config.exclude_models.join(', ')}
+              onChange={e => setConfig({ ...config, exclude_models: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
+              placeholder="如 *.preview"
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
+            />
+          </div>
         </div>
       </div>
 
