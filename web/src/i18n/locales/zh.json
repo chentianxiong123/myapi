@@ -1,0 +1,50 @@
+{
+  "nav": {
+    "dashboard": "仪表盘",
+    "models": "模型",
+    "providers": "供应商",
+    "logs": "日志",
+    "sync": "下发",
+    "config": "配置"
+  },
+  "dashboard": {
+    "title": "仪表盘",
+    "requests": "请求数",
+    "cost": "总成本",
+    "inputTokens": "输入 Tokens",
+    "outputTokens": "输出 Tokens",
+    "cacheRead": "缓存读取",
+    "cacheWrite": "缓存写入",
+    "ttft": "平均首字",
+    "errorRate": "错误率",
+    "trend": "趋势",
+    "heatmap": "使用热力图",
+    "requestLogs": "请求日志",
+    "providerStats": "Provider 统计",
+    "modelStats": "模型统计"
+  },
+  "settings": {
+    "title": "设置",
+    "general": "通用",
+    "language": "语言",
+    "theme": "主题",
+    "themeLight": "浅色",
+    "themeDark": "深色",
+    "themeSystem": "跟随系统"
+  },
+  "common": {
+    "save": "保存",
+    "cancel": "取消",
+    "delete": "删除",
+    "edit": "编辑",
+    "add": "添加",
+    "refresh": "刷新",
+    "loading": "加载中…",
+    "success": "成功",
+    "error": "错误",
+    "time": "时间",
+    "model": "模型",
+    "provider": "Provider",
+    "status": "状态"
+  }
+}
