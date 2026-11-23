@@ -6,7 +6,8 @@
     "logs": "Logs",
     "sync": "Sync",
     "config": "Config",
-    "endpoints": "Endpoints"
+    "endpoints": "Endpoints",
+    "deploy": "Deploy"
   },
   "dashboard": {
     "title": "Dashboard",

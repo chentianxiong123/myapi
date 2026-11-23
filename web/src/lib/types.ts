@@ -174,3 +174,27 @@ export const PROTOCOL_LABELS: Record<EndpointProtocol, string> = {
   ollama: 'Ollama',
   custom: 'Custom',
 }
+
+// 部署/水平扩展（学 new-api 主从 + Redis 多实例）
+export interface DeployInstance {
+  id: string
+  name: string            // 实例名
+  nodeType: 'master' | 'slave'   // 主/从（学 new-api NODE_TYPE）
+  port: number            // 监听端口
+  status: 'running' | 'stopped' | 'degraded'
+  address: string         // 实例地址（IP:port）
+  region: string          // 区域/机房
+  cpu: number             // CPU 使用率 %
+  mem: number             // 内存使用率 %
+  requests: number        // 请求数
+  syncFrequency: number   // SYNC_FREQUENCY（秒）
+  frontendBaseUrl: string // FRONTEND_BASE_URL
+  redisConn: string       // REDIS_CONN_STRING
+  sqlDsn: string          // SQL_DSN
+}
+
+export interface SharedStorage {
+  redis: { enabled: boolean; conn: string; cluster: boolean }
+  db: { enabled: boolean; dsn: string; type: 'sqlite' | 'mysql' | 'postgres' }
+  syncFrequency: number
+}

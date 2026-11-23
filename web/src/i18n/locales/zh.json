@@ -6,7 +6,8 @@
     "logs": "日志",
     "sync": "下发",
     "config": "配置",
-    "endpoints": "端点"
+    "endpoints": "端点",
+    "deploy": "部署"
   },
   "dashboard": {
     "title": "仪表盘",
