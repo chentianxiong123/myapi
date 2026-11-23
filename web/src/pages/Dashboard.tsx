@@ -88,6 +88,7 @@ export default function Dashboard() {
       {tab === 'models' && (
         <div className="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
           <h3 className="mb-4 text-sm font-semibold">模型统计</h3>
+          <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">
             <thead><tr className="border-b border-gray-200 dark:border-gray-700">
               <th className="pb-2 font-medium text-gray-500">模型</th>
@@ -110,7 +111,8 @@ export default function Dashboard() {
                 </tr>
               ))}
             </tbody>
-          </table>
+            </table>
+          </div>
         </div>
       )}
     </div>

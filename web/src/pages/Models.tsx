@@ -108,14 +108,14 @@ export default function Models() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-lg font-semibold">模型映射（{models.length}）</h2>
           <p className="text-sm text-gray-500">
             模型级路由：一个模型多 route（不同 key/代理/独立额度，可不带 key 请求）
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button onClick={saveAll} disabled={busy} className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50">
             <Save className="h-4 w-4" />保存
           </button>

@@ -53,7 +53,7 @@ export default function Mcp() {
   return (
     <div className="space-y-4">
       {/* 头部 */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-lg font-semibold">MCP 接口</h2>
           <p className="text-sm text-gray-500">搜索/识图作为 MCP 工具暴露给 agent（学 9router mcp_tools）</p>

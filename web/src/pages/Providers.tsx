@@ -201,7 +201,7 @@ export default function Providers() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-lg font-semibold">Providers</h2>
           <p className="text-sm text-gray-500">

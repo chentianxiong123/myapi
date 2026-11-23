@@ -56,7 +56,7 @@ export default function ProxyPools() {
   return (
     <div className="space-y-4">
       {/* 头部 */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-lg font-semibold">代理池</h2>
           <p className="text-sm text-gray-500">学 9router proxyPools：多个代理池，Provider 引用 + 选择策略</p>

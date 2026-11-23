@@ -73,12 +73,12 @@ export default function Tokens() {
   return (
     <div className="space-y-4">
       {/* 头部 */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-lg font-semibold">密钥管理</h2>
           <p className="text-sm text-gray-500">自己的 agent 工具共用主密钥；分享给好友单独发密钥</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button onClick={newFriend} className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700">
             <Plus className="h-4 w-4" />分享给好友
           </button>

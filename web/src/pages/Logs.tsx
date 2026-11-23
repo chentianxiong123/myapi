@@ -85,7 +85,7 @@ export default function Logs() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <h2 className="text-lg font-semibold">通用日志</h2>
         <div className="flex gap-2">
           <button onClick={() => exportCSV(filtered, 'request-logs')}

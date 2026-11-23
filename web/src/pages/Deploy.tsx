@@ -93,12 +93,12 @@ export default function Deploy() {
   return (
     <div className="space-y-4">
       {/* 头部 */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-lg font-semibold">部署</h2>
           <p className="text-sm text-gray-500">主备高可用 · 客户端固定入口 + Nginx 多 upstream 故障切换 + SQLite 同步</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button onClick={failover} className="flex items-center gap-1.5 rounded-lg border border-amber-300 px-3 py-1.5 text-sm text-amber-600 hover:bg-amber-50 dark:border-amber-600 dark:hover:bg-amber-900/20">
             <Zap className="h-4 w-4" />故障切换
           </button>

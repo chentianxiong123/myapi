@@ -181,12 +181,12 @@ export default function Sync() {
   return (
     <div className="space-y-4">
       {/* 顶部操作 */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-lg font-semibold">配置下发</h2>
           <p className="text-sm text-gray-500">{hosts.length} 台主机 · {totalInstances} 个实例</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button onClick={checkDiff} disabled={busy} className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700 disabled:opacity-50">
             <Diff className="h-4 w-4" />检查 Diff
           </button>

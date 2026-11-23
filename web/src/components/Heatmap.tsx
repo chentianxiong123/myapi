@@ -113,7 +113,8 @@ export default function Heatmap({ data, loading }: HeatmapProps) {
       </div>
 
       {/* 月份标签（grid 铺满） */}
-      <div className="mb-1 grid pl-8" style={{ gridTemplateColumns: `repeat(${WEEKS}, minmax(0, 1fr))`, gap: '3px' }}>
+      <div className="overflow-x-auto pb-1">
+<div className="mb-1 grid min-w-[700px] pl-8" style={{ gridTemplateColumns: `repeat(${WEEKS}, minmax(0, 1fr))`, gap: '3px' }}>
         {weeks.map((week, wi) => {
           const firstDay = week[0]?.date
           const showMonth = wi === 0 || (firstDay && firstDay.getMonth() !== weeks[wi - 1][0].date.getMonth())
@@ -124,9 +125,11 @@ export default function Heatmap({ data, loading }: HeatmapProps) {
           )
         })}
       </div>
+      </div>
 
       {/* 热力图格子（GitHub 贡献图，grid 铺满） */}
-      <div className="grid" style={{ gridTemplateColumns: `max-content repeat(${WEEKS}, minmax(0, 1fr))`, gap: '3px' }}>
+      <div className="overflow-x-auto">
+<div className="grid min-w-[700px]" style={{ gridTemplateColumns: `max-content repeat(${WEEKS}, minmax(0, 1fr))`, gap: '3px' }}>
         {/* 周标签列 */}
         <div className="grid" style={{ gridTemplateRows: 'repeat(7, minmax(0, 1fr))', gap: '3px' }}>
           {['', '一', '', '三', '', '五', '', '日'].map((d, i) => (
@@ -154,6 +157,7 @@ export default function Heatmap({ data, loading }: HeatmapProps) {
             })}
           </div>
         ))}
+      </div>
       </div>
 
       {/* 悬停提示 */}

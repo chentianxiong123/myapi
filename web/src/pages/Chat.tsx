@@ -74,7 +74,7 @@ export default function Chat() {
   return (
     <div className="space-y-4">
       {/* 头部 */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-lg font-semibold">在线测试</h2>
           <p className="text-sm text-gray-500">选模型发消息，验证网关链路（模型 + 密钥 + 路由）</p>
