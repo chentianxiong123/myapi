@@ -38,7 +38,7 @@ export default function RequestLogs({ logs, loading }: Props) {
                 <td className="py-2">{log.provider}</td>
                 <td className="py-2">{log.ttft_ms}ms</td>
                 <td className="py-2 text-gray-500">
-                  {log.tokens_in}→{log.tokens_out}
+                  {log.input_tokens}→{log.output_tokens}
                 </td>
                 <td className="py-2">
                   {log.error ? (
