@@ -75,7 +75,7 @@ export default function Settings() {
           </div>
           <div className="flex justify-between">
             <span className="text-gray-500">项目</span>
-            <span>cpa-sync · 个人网关 + 下发器</span>
+            <span>myapi · 个人网关 + 下发器</span>
           </div>
           <div className="flex justify-between">
             <span className="text-gray-500">理念</span>

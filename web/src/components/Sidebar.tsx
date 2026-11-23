@@ -44,8 +44,8 @@ export default function Sidebar({ active, onSelect }: Props) {
     >
       {/* Logo */}
       <div className="flex h-14 items-center gap-2 border-b border-gray-200 px-4 dark:border-gray-700">
-        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-blue-600 text-xs text-white">CPA</div>
-        {!collapsed && <span className="font-bold">cpa-sync</span>}
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-blue-600 text-xs text-white">MY</div>
+        {!collapsed && <span className="font-bold">myapi</span>}
       </div>
 
       {/* 导航 */}

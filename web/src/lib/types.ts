@@ -176,7 +176,7 @@ export const PROTOCOL_LABELS: Record<EndpointProtocol, string> = {
 }
 
 // 部署/水平扩展（学 new-api 主从 + Redis 多实例）
-// 部署/主备高可用（学 cpa-sync-nginx：客户端固定入口 + Nginx 多 upstream 故障切换）
+// 部署/主备高可用（学 myapi-nginx：客户端固定入口 + Nginx 多 upstream 故障切换）
 export interface DeployInstance {
   id: string
   name: string            // 实例名

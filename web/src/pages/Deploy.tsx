@@ -8,16 +8,16 @@ import StatusBar from '@/components/StatusBar'
 import type { DeployInstance, GatewayEntry, SqliteSync } from '@/lib/types'
 
 const DEFAULT_INSTANCES: DeployInstance[] = [
-  { id: 'i-1', name: 'gw-phone', role: 'master', address: '192.168.31.213:8317', region: '手机 meilan-phone1', status: 'running', cpu: 12, mem: 38, requests: 45231, heartbeatMs: 5000, sqlitePath: '/opt/cpa-sync/data/gateway.db' },
-  { id: 'i-2', name: 'gw-win11', role: 'backup', address: '192.168.31.12:8317', region: 'win11', status: 'running', cpu: 8, mem: 25, requests: 18742, heartbeatMs: 5000, sqlitePath: 'C:\\cpa-sync\\data\\gateway.db' },
-  { id: 'i-3', name: 'gw-pve', role: 'backup', address: '192.168.31.14:8317', region: 'pve', status: 'stopped', cpu: 0, mem: 0, requests: 0, heartbeatMs: 5000, sqlitePath: '/srv/cpa-sync/data/gateway.db' },
+  { id: 'i-1', name: 'gw-phone', role: 'master', address: '192.168.31.213:8317', region: '手机 meilan-phone1', status: 'running', cpu: 12, mem: 38, requests: 45231, heartbeatMs: 5000, sqlitePath: '/opt/myapi/data/gateway.db' },
+  { id: 'i-2', name: 'gw-win11', role: 'backup', address: '192.168.31.12:8317', region: 'win11', status: 'running', cpu: 8, mem: 25, requests: 18742, heartbeatMs: 5000, sqlitePath: 'C:\\myapi\\data\\gateway.db' },
+  { id: 'i-3', name: 'gw-pve', role: 'backup', address: '192.168.31.14:8317', region: 'pve', status: 'stopped', cpu: 0, mem: 0, requests: 0, heartbeatMs: 5000, sqlitePath: '/srv/myapi/data/gateway.db' },
 ]
 
 const DEFAULT_ENTRY: GatewayEntry = { listen: 8380, readTimeout: 120, nextUpstream: 'error timeout http_502 http_503 http_504' }
 
 const DEFAULT_SYNC: SqliteSync = {
-  enabled: true, sourcePath: '/opt/cpa-sync/data/gateway.db',
-  targetHost: '192.168.31.12', targetPath: 'C:\\cpa-sync\\data\\gateway.db',
+  enabled: true, sourcePath: '/opt/myapi/data/gateway.db',
+  targetHost: '192.168.31.12', targetPath: 'C:\\myapi\\data\\gateway.db',
   intervalSec: 60, lastSync: new Date().toISOString(),
 }
 

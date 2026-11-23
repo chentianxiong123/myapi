@@ -1,4 +1,4 @@
-# cpa-sync —— CPA 配置同步
+# myapi —— 个人 LLM 网关
 
 > **主线 = Rust**（`rs/`，CLI + Web 面板一体，`cpa-sync-rs`）。
 > Python 版已归档到 **`old/`**（保留作参考，不再维护/不再主线）。
