@@ -9,6 +9,8 @@ export interface Provider {
   headers: Record<string, string>
   keys: Array<{ 'api-key': string }>
   models: Array<{ name: string; alias?: string; protocol?: ModelProtocol }>
+  // 渠道级别代理（每个 Provider 可单独走代理；空=直连/全局代理）
+  proxy: string
 }
 
 export const MODEL_PROTOCOLS: Array<{ id: ModelProtocol; label: string; path: string }> = [

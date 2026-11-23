@@ -8,7 +8,8 @@
     "config": "配置",
     "endpoints": "端点",
     "deploy": "部署",
-    "tokens": "密钥"
+    "tokens": "密钥",
+    "chat": "在线测试"
   },
   "dashboard": {
     "title": "仪表盘",

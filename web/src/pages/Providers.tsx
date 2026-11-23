@@ -31,6 +31,7 @@ export default function Providers() {
           base_url: 'https://apihub.agnes-ai.com/v1',
           disabled: false,
           headers: { 'User-Agent': 'opencode/1.18.30' },
+          proxy: '',
           keys: [{ 'api-key': 'sk-xxx' }, { 'api-key': 'sk-yyy' }, { 'api-key': 'sk-zzz' }],
           models: [
             { name: 'agnes-2.5-flash', protocol: 'openai_chat' },
@@ -42,6 +43,7 @@ export default function Providers() {
           base_url: 'https://token.sensenova.cn/v1',
           disabled: false,
           headers: { 'User-Agent': 'opencode/1.18.30' },
+          proxy: '',
           keys: [{ 'api-key': 'sk-xxx' }, { 'api-key': 'sk-yyy' }, { 'api-key': 'sk-zzz' }],
           models: [
             { name: 'deepseek-v4-flash', alias: 'deepseek-v4-flash', protocol: 'openai_chat' },
@@ -56,6 +58,7 @@ export default function Providers() {
           base_url: 'https://api.pie-xian.com/v1',
           disabled: false,
           headers: { 'User-Agent': 'opencode/1.18.30' },
+          proxy: '',
           keys: [{ 'api-key': 'sk-xxx' }],
           models: [
             { name: 'agnes-2.5-flash', alias: 'agnes-3.0-flash', protocol: 'anthropic' },
@@ -83,7 +86,7 @@ export default function Providers() {
   }
 
   function addProvider() {
-    setProviders([...providers, { name: '', base_url: '', disabled: false, headers: { 'User-Agent': 'opencode/1.18.30' }, keys: [{ 'api-key': '' }], models: [] }])
+    setProviders([...providers, { name: '', base_url: '', disabled: false, headers: { 'User-Agent': 'opencode/1.18.30' }, keys: [{ 'api-key': '' }], models: [], proxy: '' }])
   }
 
   function removeProvider(idx: number) {
@@ -255,6 +258,26 @@ export default function Providers() {
                         </button>
                       </div>
                     ))}
+                  </div>
+                </div>
+
+                {/* 渠道级别代理（每个 Provider 可单独走代理；空=直连/全局代理） */}
+                <div className="mb-4">
+                  <div className="mb-2 flex items-center gap-2">
+                    <Globe className="h-4 w-4 text-gray-400" />
+                    <span className="text-sm font-medium">渠道代理</span>
+                    <span className="text-xs text-gray-400">该渠道调上游单独走代理（空=直连）</span>
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      value={p.proxy}
+                      onChange={e => updateProvider(idx, 'proxy', e.target.value)}
+                      placeholder="如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080（留空=直连）"
+                      className="flex-1 rounded border border-gray-300 px-2 py-1 font-mono text-sm dark:border-gray-600 dark:bg-gray-700"
+                    />
+                    {p.proxy && (
+                      <button onClick={() => updateProvider(idx, 'proxy', '')} className="rounded border border-gray-300 px-2 text-xs text-gray-500 hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700">清除</button>
+                    )}
                   </div>
                 </div>
 

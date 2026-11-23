@@ -4,6 +4,7 @@ import Config from './pages/Config'
 import Providers from './pages/Providers'
 import Models from './pages/Models'
 import Logs from './pages/Logs'
+import Chat from './pages/Chat'
 import Sync from './pages/Sync'
 import Tokens from './pages/Tokens'
 import Deploy from './pages/Deploy'
@@ -24,6 +25,7 @@ export default function App() {
         {tab === 'tokens' && <Tokens />}
         {tab === 'providers' && <Providers />}
         {tab === 'logs' && <Logs />}
+        {tab === 'chat' && <Chat />}
         {tab === 'sync' && <Sync />}
         {tab === 'deploy' && <Deploy />}
         {tab === 'config' && <Config />}
