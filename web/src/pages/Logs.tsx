@@ -180,7 +180,6 @@ function generateMockLogs(count: number): RequestLog[] {
       cache_creation_tokens: cache_creation,
       cache_hit_rate: (cache_read / (input_tokens + cache_creation)) || 0,
       real_total_tokens: input_tokens + output_tokens + cache_creation + cache_read,
-      cost: Math.random() * 0.05 + 0.001,
       ttft_ms: error ? 0 : Math.floor(Math.random() * 300) + 100,
       latency_ms: latency,
       duration_s: duration,

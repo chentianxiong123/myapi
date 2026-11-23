@@ -6,7 +6,7 @@ import TrendChart from '@/components/TrendChart'
 import ProviderStats from '@/components/ProviderStats'
 import RequestLogs from '@/components/RequestLogs'
 import Heatmap from '@/components/Heatmap'
-import DateRangePicker, { type RangeSelection, getRangeDates } from '@/components/DateRangePicker'
+import DateRangePicker, { type RangeSelection } from '@/components/DateRangePicker'
 
 type Tab = 'logs' | 'providers' | 'models'
 
@@ -19,22 +19,16 @@ export default function Dashboard() {
   const [range, setRange] = useState<RangeSelection>({ preset: '7d' })
   const [tab, setTab] = useState<Tab>('logs')
 
-  useEffect(() => {
-    load()
-  }, [range])
+  useEffect(() => { load() }, [range])
 
   async function load() {
     setLoading(true)
     try {
       const [s, p, l, t] = await Promise.all([
-        api.getStats(),
-        api.getProviderStats(),
-        api.getRequestLogs(100),
-        api.getTrend(24),
+        api.getStats(), api.getProviderStats(), api.getRequestLogs(100), api.getTrend(24),
       ])
       setStats(s); setProviders(p); setLogs(l); setTrend(t)
     } catch {
-      // 假数据
       const ti = 1245000, to = 456000, tcr = 890000, tcc = 123000, tr = 1234, sc = 1205
       setStats({
         total_requests: tr, success_count: sc, success_rate: sc / tr,
@@ -43,9 +37,13 @@ export default function Dashboard() {
         total_cache_creation_tokens: tcc, total_cache_read_tokens: tcr,
         real_total_tokens: ti + to + tcc + tcr,
         cache_hit_rate: tcr / (ti + tcc + tcr),
-        avg_speed_tps: 45, active_providers: 2, total_providers: 3,
+        avg_ttft_ms: 245, avg_latency_ms: 890, avg_speed_tps: 45,
+        active_providers: 2, total_providers: 3,
       })
       setProviders([
+        { name: 'SenseNova', base_url: '', status: 'healthy', total_requests: 800, avg_ttft_ms: 180, error_rate: 0.01, weight: 8, total_input_tokens: 800000, total_output_tokens: 300000, total_cache_read_tokens: 600000, total_cache_creation_tokens: 80000, cache_hit_rate: 0.72 },
+        { name: 'pie-xian', base_url: '', status: 'healthy', total_requests: 400, avg_ttft_ms: 320, error_rate: 0.03, weight: 2, total_input_tokens: 400000, total_output_tokens: 150000, total_cache_read_tokens: 250000, total_cache_creation_tokens: 40000, cache_hit_rate: 0.65 },
+        { name: 'iamhc', base_url: '', status: 'cooldown', total_requests: 34, avg_ttft_ms: 0, error_rate: 1.0, weight: 0, total_input_tokens: 45000, total_output_tokens: 6000, total_cache_read_tokens: 40000, total_cache_creation_tokens: 3000, cache_hit_rate: 0.89 },
       ])
       setTrend(Array.from({ length: 24 }, (_, i) => ({
         time: `${String(i).padStart(2, '0')}:00`,
@@ -93,73 +91,49 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-4">
-      {/* 顶部：日期选择器 */}
       <div className="flex items-center justify-between">
         <DateRangePicker selection={range} onChange={setRange} />
-        <span className="text-xs text-gray-400">
-          {getRangeDates(range).start.toLocaleDateString('zh-CN')} ~ {getRangeDates(range).end.toLocaleDateString('zh-CN')}
-        </span>
       </div>
-
-      {/* 统计卡片 */}
       <StatsHero stats={stats} loading={loading} />
-
-      {/* 趋势图 */}
       {range.preset === 'all' ? (
         <Heatmap data={trend.map(t => ({ date: t.time, requests: t.requests, tokens: t.input_tokens }))} loading={loading} />
       ) : (
         <TrendChart data={trend} loading={loading} />
       )}
-
-      {/* Tab 切换（学cc-switch PageTabs） */}
       <div className="flex gap-1 rounded-lg bg-gray-100 p-1 dark:bg-gray-700">
         {tabs.map(t => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`rounded-md px-4 py-1.5 text-sm ${
-              tab === t.id
-                ? 'bg-white font-semibold text-blue-600 shadow dark:bg-gray-800'
-                : 'text-gray-500 hover:text-gray-900 dark:hover:text-gray-100'
-            }`}
-          >{t.label}</button>
+          <button key={t.id} onClick={() => setTab(t.id)}
+            className={`rounded-md px-4 py-1.5 text-sm ${tab === t.id ? 'bg-white font-semibold text-blue-600 shadow dark:bg-gray-800' : 'text-gray-500 hover:text-gray-900 dark:hover:text-gray-100'}`}>
+            {t.label}
+          </button>
         ))}
       </div>
-
-      {/* 内容区（按tab 切换） */}
       {tab === 'logs' && <RequestLogs logs={logs} loading={loading} />}
       {tab === 'providers' && <ProviderStats providers={providers} loading={loading} />}
       {tab === 'models' && (
         <div className="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
           <h3 className="mb-4 text-sm font-semibold">模型统计</h3>
           <table className="w-full text-left text-sm">
-            <thead>
-              <tr className="border-b border-gray-200 dark:border-gray-700">
-                <th className="pb-2 font-medium text-gray-500">模型</th>
-                <th className="pb-2 font-medium text-gray-500">请求数</th>
-                <th className="pb-2 font-medium text-gray-500">输入</th>
-                <th className="pb-2 font-medium text-gray-500">输出</th>
-                <th className="pb-2 font-medium text-gray-500">缓存命中率</th>
-                <th className="pb-2 font-medium text-gray-500">成本</th>
-              </tr>
-            </thead>
+            <thead><tr className="border-b border-gray-200 dark:border-gray-700">
+              <th className="pb-2 font-medium text-gray-500">模型</th>
+              <th className="pb-2 font-medium text-gray-500">请求数</th>
+              <th className="pb-2 font-medium text-gray-500">输入</th>
+              <th className="pb-2 font-medium text-gray-500">输出</th>
+              <th className="pb-2 font-medium text-gray-500">缓存命中率</th>
+            </tr></thead>
             <tbody>
-              {Object.entries(
-                  acc[log.model].count++
-                  acc[log.model].input += log.input_tokens
-                  acc[log.model].output += log.output_tokens
-                  acc[log.model].cache_hit.push(log.cache_hit_rate)
-                  return acc
-                }, {})
-              ).map(([model, s]) => (
+              {Object.entries(logs.reduce<Record<string, { count: number; input: number; output: number; cache_hit: number[] }>>((acc, log) => {
+                if (!acc[log.model]) acc[log.model] = { count: 0, input: 0, output: 0, cache_hit: [] }
+                acc[log.model].count++; acc[log.model].input += log.input_tokens
+                acc[log.model].output += log.output_tokens; acc[log.model].cache_hit.push(log.cache_hit_rate)
+                return acc
+              }, {})).map(([model, s]) => (
                 <tr key={model} className="border-b border-gray-100 dark:border-gray-800">
                   <td className="py-2 font-mono text-xs">{model}</td>
                   <td className="py-2">{s.count}</td>
                   <td className="py-2 font-mono text-xs">{s.input.toLocaleString()}</td>
                   <td className="py-2 font-mono text-xs">{s.output.toLocaleString()}</td>
-                  <td className="py-2 font-mono text-xs">
-                    {(s.cache_hit.reduce((a, b) => a + b, 0) / s.cache_hit.length * 100).toFixed(1)}%
-                  </td>
+                  <td className="py-2 font-mono text-xs">{(s.cache_hit.reduce((a, b) => a + b, 0) / s.cache_hit.length * 100).toFixed(1)}%</td>
                 </tr>
               ))}
             </tbody>
