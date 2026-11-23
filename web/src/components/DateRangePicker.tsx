@@ -52,6 +52,8 @@ export default function DateRangePicker({
   const [displayMonth, setDisplayMonth] = useState(new Date())
   const [selectingStart, setSelectingStart] = useState(true)
   const [draftStart, setDraftStart] = useState<Date | null>(null)
+  const [datetimeStart, setDatetimeStart] = useState('')
+  const [datetimeEnd, setDatetimeEnd] = useState('')
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -91,6 +93,24 @@ export default function DateRangePicker({
   const calendarDays = getCalendarDays(displayMonth)
   const today = new Date()
 
+  // datetime-local 辅助（学 new-api start_time/end_time）
+  function toDatetimeLocal(d: Date): string {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  }
+  function fromDatetimeLocal(v: string): Date | null {
+    if (!v) return null
+    const d = new Date(v)
+    return isNaN(d.getTime()) ? null : d
+  }
+  function applyDatetime() {
+    const s = fromDatetimeLocal(datetimeStart)
+    const e = fromDatetimeLocal(datetimeEnd)
+    if (s && e) {
+      onChange({ preset: 'custom', customStart: s, customEnd: e })
+      setOpen(false)
+    }
+  }
+
   return (
     <div className="relative" ref={ref}>
       <button
@@ -119,6 +139,22 @@ export default function DateRangePicker({
                 {p.label}
               </button>
             ))}
+          </div>
+
+          {/* 精确起止时间（学 new-api datetime-local start_time/end_time） */}
+          <div className="mb-3 border-t border-gray-200 pt-3 dark:border-gray-700">
+            <div className="mb-1.5 text-xs font-medium text-gray-500">精确时段</div>
+            <div className="flex items-center gap-1.5">
+              <input type="datetime-local" value={datetimeStart} onChange={e => setDatetimeStart(e.target.value)}
+                className="w-full rounded border border-gray-300 px-1.5 py-1 text-xs dark:border-gray-600 dark:bg-gray-700" />
+              <span className="text-xs text-gray-400">至</span>
+              <input type="datetime-local" value={datetimeEnd} onChange={e => setDatetimeEnd(e.target.value)}
+                className="w-full rounded border border-gray-300 px-1.5 py-1 text-xs dark:border-gray-600 dark:bg-gray-700" />
+            </div>
+            <button onClick={applyDatetime}
+              className="mt-1.5 w-full rounded bg-blue-600 py-1 text-xs text-white hover:bg-blue-700">
+              应用
+            </button>
           </div>
 
           {/* Custom calendar */}
