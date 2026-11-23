@@ -224,7 +224,7 @@ export default function Providers() {
         return (
           <div key={idx} className="rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
             {/* 供应商头部 */}
-            <div className="flex items-center gap-3 p-4">
+            <div className="flex flex-wrap items-center gap-3 p-4">
               <button onClick={() => toggleExpand(idx)} className="text-gray-400">
                 {open ? <ChevronDown className="h-5 w-5" /> : <ChevronRight className="h-5 w-5" />}
               </button>
@@ -232,18 +232,18 @@ export default function Providers() {
                 value={p.name}
                 onChange={e => updateProvider(idx, 'name', e.target.value)}
                 placeholder="provider-name"
-                className="w-40 bg-transparent font-semibold outline-none"
+                className="w-32 bg-transparent font-semibold outline-none"
               />
               <input
                 value={p.base_url}
                 onChange={e => updateProvider(idx, 'base_url', e.target.value)}
                 placeholder="https://api.example.com/v1"
-                className="flex-1 rounded border border-gray-300 px-2 py-1 text-sm dark:border-gray-600 dark:bg-gray-700"
+                className="min-w-0 flex-1 rounded border border-gray-300 px-2 py-1 text-sm dark:border-gray-600 dark:bg-gray-700"
               />
-              <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500 dark:bg-gray-700">
+              <span className="shrink-0 rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500 dark:bg-gray-700">
                 {p.keys.length} keys · {p.models.length} models
               </span>
-              <button onClick={() => removeProvider(idx)} className="text-red-500 hover:text-red-700">
+              <button onClick={() => removeProvider(idx)} className="shrink-0 text-red-500 hover:text-red-700">
                 <Trash2 className="h-4 w-4" />
               </button>
             </div>
@@ -369,7 +369,7 @@ export default function Providers() {
                     <button onClick={() => addModel(idx, activeProto)} className="text-xs text-blue-600 hover:text-blue-700">+ 添加</button>
                   </div>
                   <div className="overflow-x-auto">
-                    <table className="w-full text-left text-sm">
+                    <table className="w-full min-w-[600px] text-left text-sm">
                     <thead>
                       <tr className="border-b border-gray-200 dark:border-gray-700">
                         <th className="pb-2 font-medium text-gray-500">Name（上游真实名）</th>
