@@ -1,4 +1,4 @@
-//! 中央配置（对应 core/config.py）：加载 cpa-config.yaml + 默认值
+//! 中央配置（对应 core/config.py）：加载 myapi-config.yaml + 默认值
 use super::ir::{ModelIR, ProviderIR};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YValue;
@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// 项目根：crate 可能在子目录（如 rs/），config/scripts/web 在项目根。
-/// 探测顺序：环境变量 CPA_SYNC_ROOT > CARGO_MANIFEST_DIR 祖先链 >
+/// 探测顺序：环境变量 MYAPI_SYNC_ROOT > CARGO_MANIFEST_DIR 祖先链 >
 /// 可执行文件旁（分发形态：二进制与 config/scripts 同目录）> 回退 CARGO_MANIFEST_DIR。
 pub fn project_root() -> PathBuf {
-    if let Ok(p) = std::env::var("CPA_SYNC_ROOT") {
+    if let Ok(p) = std::env::var("MYAPI_SYNC_ROOT") {
         let pb = PathBuf::from(p);
         if pb.exists() {
             return pb;
@@ -25,7 +25,7 @@ pub fn project_root() -> PathBuf {
     }
     for c in cands {
         for d in c.ancestors() {
-            if d.join("config").join("cpa-config.yaml").exists() || d.join("scripts").is_dir() {
+            if d.join("config").join("myapi-config.yaml").exists() || d.join("scripts").is_dir() {
                 return d.to_path_buf();
             }
         }
@@ -33,10 +33,10 @@ pub fn project_root() -> PathBuf {
     m
 }
 pub fn default_config_path() -> PathBuf {
-    if let Ok(p) = std::env::var("CPA_SYNC_CONFIG") {
+    if let Ok(p) = std::env::var("MYAPI_SYNC_CONFIG") {
         PathBuf::from(p)
     } else {
-        project_root().join("config").join("cpa-config.yaml")
+        project_root().join("config").join("myapi-config.yaml")
     }
 }
 
@@ -66,8 +66,8 @@ pub struct CPASettings {
     pub image_models: Vec<String>,
 }
 fn def_base_url() -> String { "http://YOUR_CPA_IP:8317/v1".into() }
-fn def_api_key() -> String { "YOUR_CPA_API_KEY".into() }
-fn def_provider_id() -> String { "cpa".into() }
+fn def_api_key() -> String { "YOUR_MYAPI_API_KEY".into() }
+fn def_provider_id() -> String { crate::adapters::DEFAULT_PROVIDER_ID.into() }
 fn def_ctx() -> u64 { 512000 }
 fn def_max() -> u32 { 16384 }
 fn def_auto() -> u64 { 300000 }
@@ -91,7 +91,7 @@ pub struct AdapterInstance {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
-    /// omp 深度裁剪：enabledModels 白名单（如 ["cpa/*", "sensenova/*", "exa", "parallel", "tavily"]）
+    /// omp 深度裁剪：enabledModels 白名单（如 ["myapi/*", "sensenova/*", "exa", "parallel", "tavily"]）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled_models: Option<Vec<String>>,
     /// omp config.yml 路径（写 enabledModels 用；默认推导 path 同目录）
@@ -102,7 +102,7 @@ pub struct AdapterInstance {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncConfig {
     #[serde(default)]
-    pub cpa: CPASettings,
+    pub myapi: CPASettings,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<String>,
     #[serde(default = "def_strategy")]
@@ -131,8 +131,8 @@ impl SyncConfig {
             .map_err(|e| format!("读配置失败: {}", e))?;
         let raw: HashMap<String, YValue> = serde_yaml::from_str(&text).unwrap_or_default();
 
-        let cpa_raw = raw.get("cpa").cloned().unwrap_or(YValue::Mapping(Default::default()));
-        let cpa: CPASettings = serde_yaml::from_value(cpa_raw).unwrap_or_default();
+        let cpa_raw = raw.get(crate::adapters::DEFAULT_PROVIDER_ID).cloned().unwrap_or(YValue::Mapping(Default::default()));
+        let myapi: CPASettings = serde_yaml::from_value(cpa_raw).unwrap_or_default();
 
         let hosts: HashMap<String, HostDef> = raw
             .get("hosts")
@@ -160,7 +160,7 @@ impl SyncConfig {
         let strategy: String = raw.get("strategy").and_then(|v| serde_yaml::from_value(v.clone()).ok()).unwrap_or_else(|| "merge".into());
 
         Ok(SyncConfig {
-            cpa, targets, strategy, hosts, adapter_instances,
+            myapi, targets, strategy, hosts, adapter_instances,
             path: cfg_path.to_string_lossy().into(),
         })
     }
@@ -204,9 +204,9 @@ pub fn resolve_input_modes(mid: &str, ov: &YValue, cfg: &SyncConfig) -> Vec<Stri
             if !modes.is_empty() { return modes; }
         }
     }
-    let mut base: Vec<String> = cfg.cpa.default_input_modes.clone();
+    let mut base: Vec<String> = cfg.myapi.default_input_modes.clone();
     if !base.contains(&"image".into()) &&
-       cfg.cpa.image_models.iter().any(|p| wildcard_match(mid, p)) {
+       cfg.myapi.image_models.iter().any(|p| wildcard_match(mid, p)) {
         base.push("image".into());
     }
     base
@@ -214,13 +214,13 @@ pub fn resolve_input_modes(mid: &str, ov: &YValue, cfg: &SyncConfig) -> Vec<Stri
 
 /// 对应 build_provider_ir()
 pub fn build_provider_ir(cfg: &SyncConfig, cpa_models: Vec<ModelIR>) -> ProviderIR {
-    let final_models: Vec<ModelIR> = filter_models(cpa_models, &cfg.cpa.include_models, &cfg.cpa.exclude_models)
+    let final_models: Vec<ModelIR> = filter_models(cpa_models, &cfg.myapi.include_models, &cfg.myapi.exclude_models)
         .into_iter()
         .map(|m| {
             let mid = m.id;
-            let ov = cfg.cpa.model_overrides.get(&mid).cloned().unwrap_or(YValue::Mapping(Default::default()));
-            let ctx = ov.get("contextWindow").and_then(|v| v.as_u64()).unwrap_or(cfg.cpa.context_window);
-            let maxt = ov.get("maxTokens").and_then(|v| v.as_u64()).unwrap_or(cfg.cpa.max_tokens as u64) as u32;
+            let ov = cfg.myapi.model_overrides.get(&mid).cloned().unwrap_or(YValue::Mapping(Default::default()));
+            let ctx = ov.get("contextWindow").and_then(|v| v.as_u64()).unwrap_or(cfg.myapi.context_window);
+            let maxt = ov.get("maxTokens").and_then(|v| v.as_u64()).unwrap_or(cfg.myapi.max_tokens as u64) as u32;
             ModelIR {
                 id: mid.clone(),
                 context_window: ctx,
@@ -232,13 +232,13 @@ pub fn build_provider_ir(cfg: &SyncConfig, cpa_models: Vec<ModelIR>) -> Provider
         })
         .collect();
     let mut meta = HashMap::new();
-    meta.insert("context_window".into(), Value::from(cfg.cpa.context_window));
-    meta.insert("auto_compact_token_limit".into(), Value::from(cfg.cpa.auto_compact_token_limit));
+    meta.insert("context_window".into(), Value::from(cfg.myapi.context_window));
+    meta.insert("auto_compact_token_limit".into(), Value::from(cfg.myapi.auto_compact_token_limit));
     ProviderIR {
-        provider_id: cfg.cpa.provider_id.clone(),
+        provider_id: cfg.myapi.provider_id.clone(),
         api: "openai-completions".into(),
-        base_url: cfg.cpa.base_url.clone(),
-        api_key: cfg.cpa.api_key.clone(),
+        base_url: cfg.myapi.base_url.clone(),
+        api_key: cfg.myapi.api_key.clone(),
         models: final_models,
         meta,
     }

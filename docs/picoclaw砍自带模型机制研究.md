@@ -1,7 +1,7 @@
 # picoclaw 屏蔽/砍掉自带模型机制研究
 
 > 2026-11-06，meilan-phone1（192.168.31.213，picoclaw v0.2.x，config version 3）
-> 研究 picoclaw 怎么"砍掉原版模型"（用户要只留 CPA 网关 cpa），沉淀成可复用脚本。
+> 研究 picoclaw 怎么"砍掉原版模型"（用户要只留网关 myapi），沉淀成可复用脚本。
 
 ## 核心结论
 
@@ -24,12 +24,12 @@
 
 ## 脚本行为
 
-`myapi/scripts/picoclaw_disable_builtin.py` —— 删 `model_list` 里非保留 provider 条目（默认保留 `cpa`），备份 + 原子写，可选重启 picoclaw-gateway。
+`myapi/scripts/picoclaw_disable_builtin.py` —— 删 `model_list` 里非保留 provider 条目（默认保留 `myapi`），备份 + 原子写，可选重启 picoclaw-gateway。
 
 ```bash
 python3 scripts/picoclaw_disable_builtin.py --dry-run                 # 只打印
 python3 scripts/picoclaw_disable_builtin.py --restart-picoclaw        # 删 + 重启 gateway
-python3 scripts/picoclaw_disable_builtin.py --keep cpa,myprovider     # 额外保留
+python3 scripts/picoclaw_disable_builtin.py --keep myapi,myprovider     # 额外保留
 ```
 
 ## 实测（meilan-phone1）

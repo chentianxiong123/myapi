@@ -35,10 +35,10 @@ pub fn pick_agents(cfg: &SyncConfig, explicit: &[String]) -> Vec<String> {
 
 /// 连 CPA 拉模型 + 构建目标 IR（对照 _pull_models + build_provider_ir）
 async fn pull_target(cfg: &SyncConfig) -> Result<(ProviderIR, usize), String> {
-    let client = CPAClient::new(&cfg.cpa.base_url, &cfg.cpa.api_key, 10);
+    let client = CPAClient::new(&cfg.myapi.base_url, &cfg.myapi.api_key, 10);
     let models = client.list_models().await.map_err(|e| e.to_string())?;
     let total = models.len();
-    let kept = filter_models(models, &cfg.cpa.include_models, &cfg.cpa.exclude_models);
+    let kept = filter_models(models, &cfg.myapi.include_models, &cfg.myapi.exclude_models);
     let ir = build_provider_ir(cfg, kept);
     Ok((ir, total))
 }
@@ -218,11 +218,11 @@ pub async fn doctor(cfg_path: &str) -> Value {
         }
     };
     checks.push(json!({"kind": "conn", "ok": true,
-        "line": format!("✓ {} 可达，暴露 {} 个模型", cfg.cpa.base_url, total)}));
+        "line": format!("✓ {} 可达，暴露 {} 个模型", cfg.myapi.base_url, total)}));
 
     // 2) 模型白名单校验
     let avail: Vec<&str> = target.models.iter().map(|m| m.id.as_str()).collect();
-    for mid in &cfg.cpa.include_models {
+    for mid in &cfg.myapi.include_models {
         let ok = avail.contains(&mid.as_str())
             || avail.iter().any(|a| !a.contains('/') && mid.ends_with(&format!("/{}", a)));
         checks.push(json!({"kind": "whitelist", "ok": ok, "model": mid,

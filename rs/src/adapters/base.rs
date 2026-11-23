@@ -1,6 +1,10 @@
 //! 适配器公共逻辑（对照 adapters/base.py 的 diff）
 use crate::core::ir::ProviderIR;
 
+/// 统一品牌/网关标识（下游 agent 配置里的 provider 名、notes、cc-switch 匹配）。
+/// 改名只需改这一处，避免硬编码散落各 adapter。
+pub const DEFAULT_PROVIDER_ID: &str = "myapi";
+
 pub fn base_diff(current: &Option<ProviderIR>, target: &ProviderIR, name: &str) -> Vec<String> {
     let mut lines = Vec::new();
     match current {

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub fn root() -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")) }
-pub fn config_path() -> PathBuf { root().join("config").join("cpa-config.yaml") }
+pub fn config_path() -> PathBuf { root().join("config").join("myapi-config.yaml") }
 
 #[derive(Debug, Clone)]
 pub struct GatewayCfg {
@@ -419,21 +419,21 @@ pub async fn node_log_toggle(payload: &Value) -> Value {
 /// 对应 get_models()：CPA 模型 + 覆盖
 pub async fn get_models() -> Value {
     let cfg = match crate::core::config::SyncConfig::load(None) {
-        Ok(c) => c, Err(e) => return json!({"ok": false, "error": e, "models": [], "cpa": {}}),
+        Ok(c) => c, Err(e) => return json!({"ok": false, "error": e, "models": [], (crate::adapters::DEFAULT_PROVIDER_ID): {}}),
     };
-    let cli = crate::core::cpa_client::CPAClient::new(&cfg.cpa.base_url, &cfg.cpa.api_key, 8);
+    let cli = crate::core::cpa_client::CPAClient::new(&cfg.myapi.base_url, &cfg.myapi.api_key, 8);
     let models = match cli.list_models().await {
-        Ok(m) => m, Err(e) => return json!({"ok": false, "error": e.to_string(), "models": [], "cpa": {}}),
+        Ok(m) => m, Err(e) => return json!({"ok": false, "error": e.to_string(), "models": [], (crate::adapters::DEFAULT_PROVIDER_ID): {}}),
     };
-    let cpa = json!({"context_window": cfg.cpa.context_window, "max_tokens": cfg.cpa.max_tokens,
-                     "auto_compact_token_limit": cfg.cpa.auto_compact_token_limit,
-                     "default_input_modes": cfg.cpa.default_input_modes, "image_models": cfg.cpa.image_models});
+    let myapi = json!({"context_window": cfg.myapi.context_window, "max_tokens": cfg.myapi.max_tokens,
+                     "auto_compact_token_limit": cfg.myapi.auto_compact_token_limit,
+                     "default_input_modes": cfg.myapi.default_input_modes, "image_models": cfg.myapi.image_models});
     let mut list = Vec::new();
     for m in models {
-        let ov = cfg.cpa.model_overrides.get(&m.id).cloned().unwrap_or(serde_yaml::Value::Null);
+        let ov = cfg.myapi.model_overrides.get(&m.id).cloned().unwrap_or(serde_yaml::Value::Null);
         list.push(json!({"id": m.id, "override": ov}));
     }
-    json!({"ok": true, "cpa": cpa, "models": list})
+    json!({"ok": true, (crate::adapters::DEFAULT_PROVIDER_ID): myapi, "models": list})
 }
 
 /// 对应 get_adapters_info()
@@ -454,7 +454,7 @@ pub fn probe_hosts(hosts_csv: &str) -> Value {
 /// 对应 get_version()
 pub fn get_version() -> Value {
     let mut ver = String::from("?");
-    if let Ok(text) = std::fs::read_to_string(root().join("myapi")) {
+    if let Ok(text) = std::fs::read_to_string(root().join(crate::adapters::DEFAULT_PROVIDER_ID)) {
         for line in text.lines() {
             if let Some(rest) = line.strip_prefix("VERSION=") {
                 let v: String = rest.chars().filter(|c| *c != '"' && *c != ' ').collect();
@@ -462,7 +462,7 @@ pub fn get_version() -> Value {
             }
         }
     }
-    json!({"myapi": ver, "agent_sync": "1.0.0", "adapters": crate::adapters::available_names().len()})
+    json!({(crate::adapters::DEFAULT_PROVIDER_ID): ver, "agent_sync": "1.0.0", "adapters": crate::adapters::available_names().len()})
 }
 
 /// 命令执行（对应 run_central/run_client/run_script）

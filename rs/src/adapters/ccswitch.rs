@@ -40,10 +40,14 @@ pub fn list_providers(app_type: &str) -> Vec<Value> {
     rows.filter_map(|r| r.ok()).collect()
 }
 
-/// 对应 get_cpa_providers(app_type)：notes='cpa' 或 name='cpa' 或 name LIKE 'cpa-%'
-pub fn get_cpa_providers(app_type: &str) -> Vec<Value> {
+/// 对应 get_myapi_providers(app_type)：notes='myapi' 或 name='myapi' 或 name LIKE 'myapi-%'
+pub fn get_myapi_providers(app_type: &str) -> Vec<Value> {
     let Ok(con) = connect() else { return vec![] };
-    let Ok(mut stmt) = con.prepare("SELECT id, app_type, name, settings_config, notes, meta, is_current, sort_index, created_at FROM providers WHERE app_type=? AND (notes='cpa' OR name='cpa' OR name LIKE 'cpa-%') ORDER BY sort_index, name") else { return vec![] };
+    let sql = format!(
+        "SELECT id, app_type, name, settings_config, notes, meta, is_current, sort_index, created_at FROM providers WHERE app_type=? AND (notes='{}' OR name='{}' OR name LIKE '{}-%') ORDER BY sort_index, name",
+        DEFAULT_PROVIDER_ID, DEFAULT_PROVIDER_ID, DEFAULT_PROVIDER_ID
+    );
+    let Ok(mut stmt) = con.prepare(&sql) else { return vec![] };
     let Ok(rows) = stmt.query_map(params![app_type], row_to_value) else { return vec![] };
     rows.filter_map(|r| r.ok()).collect()
 }

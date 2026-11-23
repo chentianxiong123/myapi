@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """效仿用户砍掉 picoclaw 自带模型的动作：从 config.json 的 model_list 删掉内置 provider 条目
 （picoclaw 没有 omp 那种 disabledProviders 数组——model_list 就是 provider 模型注册表，
-删掉条目即不再加载），只保留自定义网关（默认 cpa）+ 可选保留项。
+删掉条目即不再加载），只保留自定义网关（默认 myapi）+ 可选保留项。
 
 机制（研究结论）:
   - picoclaw 的 provider/model 配置全在 config.json 的 `model_list`（数组）。
   - 条目结构: {model_name, provider, model, api_base, api_keys?, auth_method?, extra_body?}
   - 内置 provider（openai/anthropic/zhipu/deepseek/... 30+ 个）的模型写在这里，
     api_base 指向官方（api.openai.com 等）或 localhost（ollama/vllm/lmstudio）。
-  - 自定义网关（cpa）也是 model_list 条目（provider=cpa），是用户接入的 CPA 服务。
-  - 屏蔽自带 = 删掉 provider 属于"内置"的条目（保留 cpa + 用户自定义非内置）。
+  - 自定义网关（myapi）也是 model_list 条目（provider=myapi），是用户接入的 CPA 服务。
+  - 屏蔽自带 = 删掉 provider 属于"内置"的条目（保留 myapi + 用户自定义非内置）。
   - 内置全集可从 picoclaw 二进制 strings / README Providers 表提取，但脚本更稳的判据:
-    保留集（默认 cpa）之外的 provider 都视为内置自带，删掉（可 --keep 额外保留）。
+    保留集（默认 myapi）之外的 provider 都视为内置自带，删掉（可 --keep 额外保留）。
 
 用法:
   python3 scripts/picoclaw_disable_builtin.py                                # meilan-phone1 /root/.picoclaw/config.json
   python3 scripts/picoclaw_disable_builtin.py --config /root/.picoclaw/config.json
-  python3 scripts/picoclaw_disable_builtin.py --keep cpa,myprovider          # 保留 cpa + myprovider
+  python3 scripts/picoclaw_disable_builtin.py --keep myapi,myprovider          # 保留 myapi + myprovider
   python3 scripts/picoclaw_disable_builtin.py --dry-run                      # 只打印不改
   python3 scripts/picoclaw_disable_builtin.py --restart-picoclaw             # 改完重启 picoclaw-gateway
 
@@ -34,7 +34,7 @@ import tempfile
 from pathlib import Path
 
 DEFAULT_CONFIG = "/root/.picoclaw/config.json"
-DEFAULT_KEEP = {"cpa"}  # cpa = 用户接入的 CPA 网关（唯一自定义 provider）
+DEFAULT_KEEP = {"myapi"}  # myapi = 用户接入的网关（唯一自定义 provider）
 
 
 def load_config(path: Path) -> dict:
@@ -47,7 +47,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="从 picoclaw config.json 的 model_list 删掉内置 provider 条目")
     ap.add_argument("--config", default=DEFAULT_CONFIG, help="picoclaw config.json 路径")
     ap.add_argument("--keep", default=", ".join(sorted(DEFAULT_KEEP)),
-                    help="保留的 provider id（逗号分隔；默认只保留 cpa）")
+                    help="保留的 provider id（逗号分隔；默认只保留 myapi）")
     ap.add_argument("--dry-run", action="store_true", help="只打印差异不写文件")
     ap.add_argument("--no-backup", action="store_true", help="写前不备份")
     ap.add_argument("--restart-picoclaw", action="store_true",

@@ -1,8 +1,8 @@
 //! dsh 适配器（对照 adapters/dsh.py）
-//! 同步 CPA 配置到 ~/.dsh/profiles/web/cordis.patch.yml 的 llm-pi-ai.providers.cpa
+//! 同步 CPA 配置到 ~/.dsh/profiles/web/cordis.patch.yml 的 llm-pi-ai.providers.myapi
 use crate::core::ir::{ModelIR, ProviderIR};
 use crate::core::remote::RemoteIO;
-use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff};
+use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff, DEFAULT_PROVIDER_ID};
 use serde_yaml::{Mapping, Value as YV};
 
 pub struct DshAdapter { pub path: String, pub io: RemoteIO }
@@ -62,7 +62,7 @@ impl DshAdapter {
             }
         }
         ProviderIR {
-            provider_id: "cpa".into(),
+            provider_id: DEFAULT_PROVIDER_ID.into(),
             api: provider.get("api").and_then(|v| v.as_str()).unwrap_or("openai-completions").into(),
             base_url: provider.get("baseURL").and_then(|v| v.as_str()).unwrap_or("").into(),
             api_key: String::new(),
@@ -75,14 +75,14 @@ impl DshAdapter {
         let entries = self.read_seq();
         let idx = Self::find_llm_pi_ai(&entries)?;
         let entry = &entries[idx];
-        let cpa = match entry.get("config").and_then(|c| c.get("providers")).and_then(|p| p.get("cpa")) {
+        let myapi = match entry.get("config").and_then(|c| c.get("providers")).and_then(|p| p.get(DEFAULT_PROVIDER_ID)) {
             Some(c) => c.clone(),
             None => return None,
         };
-        Some(Self::provider_to_ir(&cpa))
+        Some(Self::provider_to_ir(&myapi))
     }
 
-    /// 对应 render()：只更新 llm-pi-ai.providers.cpa（保留其它条目）
+    /// 对应 render()：只更新 llm-pi-ai.providers.myapi（保留其它条目）
     fn render_impl(&self, ir: &ProviderIR) -> YV {
         let mut entries: Vec<YV> = self.read_seq();
         let idx = if let Some(i) = Self::find_llm_pi_ai(&entries) { i } else {
@@ -95,18 +95,18 @@ impl DshAdapter {
             entries.len() - 1
         };
         // 保留 apiKeyEnv / displayName / retryPolicy，只更新 baseURL/api/models
-        let mut cpa = if let Some(c) = entries[idx].get("config").and_then(|v| v.get("providers")).and_then(|v| v.get("cpa")) {
+        let mut myapi = if let Some(c) = entries[idx].get("config").and_then(|v| v.get("providers")).and_then(|v| v.get(DEFAULT_PROVIDER_ID)) {
             c.clone()
         } else {
             YV::Mapping(Default::default())
         };
-        let c = cpa.as_mapping_mut().unwrap();
+        let c = myapi.as_mapping_mut().unwrap();
         c.insert(YV::String("baseURL".into()), YV::String(ir.base_url.clone()));
         c.insert(YV::String("api".into()), YV::String(if ir.api.is_empty() { "openai-completions".into() } else { ir.api.clone() }));
         if !c.contains_key(&YV::String("displayName".into())) {
-            c.insert(YV::String("displayName".into()), YV::String("cpa".into()));
+            c.insert(YV::String("displayName".into()), YV::String(DEFAULT_PROVIDER_ID.into()));
         }
-        c.entry(YV::String("apiKeyEnv".into())).or_insert(YV::String("DSH_CPA_API_KEY".into()));
+        c.entry(YV::String("apiKeyEnv".into())).or_insert(YV::String("DSH_MYAPI_API_KEY".into()));
         let mut models: Vec<YV> = Vec::new();
         for m in &ir.models {
             let mut mm = Mapping::new();
@@ -117,7 +117,7 @@ impl DshAdapter {
             models.push(YV::Mapping(mm));
         }
         c.insert(YV::String("models".into()), YV::Sequence(models));
-        // 写回 entry.config.providers.cpa
+        // 写回 entry.config.providers.myapi
         let entry = &mut entries[idx];
         let mut entry_m = Mapping::new();
         if let Some(e) = entry.as_mapping() { for (k, v) in e { entry_m.insert(k.clone(), v.clone()); } }
@@ -129,7 +129,7 @@ impl DshAdapter {
             cfg.insert(YV::String("providers".into()), YV::Mapping(Default::default()));
         }
         let prov = cfg.get_mut(&YV::String("providers".into())).unwrap().as_mapping_mut().unwrap();
-        prov.insert(YV::String("cpa".into()), cpa);
+        prov.insert(YV::String(DEFAULT_PROVIDER_ID.into()), myapi);
         *entry = YV::Mapping(entry_m);
         YV::Sequence(entries)
     }

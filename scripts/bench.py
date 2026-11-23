@@ -7,7 +7,7 @@
     python scripts/bench.py                     # 全自动探测
     python scripts/bench.py --profile debug     # 测 debug 构建
     python scripts/bench.py --rust ./myapi.exe --py-src /path/to/py-src
-    python scripts/bench.py --config config/cpa-config.yaml --cli-rounds 5
+    python scripts/bench.py --config config/myapi-config.yaml --cli-rounds 5
 
 路径全部可传参，不写死任何个人目录。探测顺序：命令行 > 环境变量 > 自动推导。
 """
@@ -240,9 +240,9 @@ def main() -> None:
     rust = Path(args.rust) if args.rust else find_rust_exe(args.profile)
     py_src = Path(args.py_src) if args.py_src else ROOT
     config = Path(args.config) if args.config else next(
-        (p for p in (ROOT / "config" / "cpa-config.yaml",
-                     Path.home() / "myapi" / "config" / "cpa-config.yaml") if p.exists()),
-        Path("cpa-config.yaml"))
+        (p for p in (ROOT / "config" / "myapi-config.yaml",
+                     Path.home() / "myapi" / "config" / "myapi-config.yaml") if p.exists()),
+        Path("myapi-config.yaml"))
     py = find_python_web(py_src)
 
     print(f"平台        : {platform.system()} {platform.release()}")

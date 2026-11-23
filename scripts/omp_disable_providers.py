@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """效仿用户扫掉 omp 自带 provider 的动作：把 omp 内置自带 provider 全写进
-~/.omp/agent/config.yml 的 disabledProviders（只保留 web + 自定义 provider 如 cpa/sensenova）。
+~/.omp/agent/config.yml 的 disabledProviders（只保留 web + 自定义 provider 如 myapi/sensenova）。
 
 机制（研究结论）:
   - omp 内置自带 provider 全集 = @oh-my-pi/pi-coding-agent 包内
     node_modules/@oh-my-pi/pi-catalog/src/compat/rules.json 的 `providers` keys
     （编译自 rules/providers/*.kdl，含 85 个：chat/多模态 + web 搜索）。
   - 屏蔽方式 = config.yml 的 disabledProviders 数组（omp 启动时过滤，不加载这些 provider）。
-  - 保留 = web（唯一 search provider，api=web-search）+ 自定义 provider（cpa/sensenova，不在 rules.json）。
+  - 保留 = web（唯一 search provider，api=web-search）+ 自定义 provider（myapi/sensenova，不在 rules.json）。
 
 用法:
   python3 scripts/omp_disable_providers.py                          # 本机 ~/.omp/agent/config.yml
   python3 scripts/omp_disable_providers.py --config /path/config.yml
   python3 scripts/omp_disable_providers.py --rules /path/rules.json  # 显式指定内置 provider 全集
   python3 scripts/omp_disable_providers.py --dry-run                 # 只打印不改
-  python3 scripts/omp_disable_providers.py --keep web,sensenova,cpa  # 额外保留（默认保留 web）
+  python3 scripts/omp_disable_providers.py --keep web,sensenova,myapi  # 额外保留（默认保留 web）
 
 只操作 disabledProviders；不动 providers/modelRoles 等其它字段。
 """
@@ -32,7 +32,7 @@ import yaml
 
 DEFAULT_CONFIG = "~/.omp/agent/config.yml"
 # 保留集：web 是唯一 search provider（api=web-search），不该屏蔽。
-# 自定义 provider（cpa/sensenova）不在 rules.json 里，天然不受影响，无需列这。
+# 自定义 provider（myapi/sensenova）不在 rules.json 里，天然不受影响，无需列这。
 DEFAULT_KEEP = {"web"}
 
 

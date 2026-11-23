@@ -2,10 +2,10 @@
 //! 同步 CPA 模型到 ~/.picoclaw/config.json 的 model_list
 use crate::core::ir::{ModelIR, ProviderIR};
 use crate::core::remote::RemoteIO;
-use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff};
+use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff, DEFAULT_PROVIDER_ID};
 use serde_json::{json, Value};
 
-const CPA_PROVIDER: &str = "cpa";
+const MYAPI_PROVIDER: &str = DEFAULT_PROVIDER_ID;
 
 pub struct PicoclawAdapter { pub path: String, pub io: RemoteIO }
 
@@ -33,7 +33,7 @@ impl PicoclawAdapter {
         }
     }
 
-    /// 对应 load_current()：从 model_list 里提取 cpa 条目
+    /// 对应 load_current()：从 model_list 里提取 myapi 条目
     fn load_impl(&self) -> Option<ProviderIR> {
         let data = self.read();
         let list: Vec<Value> = match data.get("model_list").and_then(|v| v.as_array()) {
@@ -41,7 +41,7 @@ impl PicoclawAdapter {
             None => return None,
         };
         let cpa_entries: Vec<&Value> = list.iter().filter(|m| {
-            m.get("provider").and_then(|v| v.as_str()) == Some(CPA_PROVIDER)
+            m.get("provider").and_then(|v| v.as_str()) == Some(MYAPI_PROVIDER)
         }).collect();
         if cpa_entries.is_empty() { return None; }
         let base = cpa_entries[0].get("api_base").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -59,7 +59,7 @@ impl PicoclawAdapter {
             });
         }
         Some(ProviderIR {
-            provider_id: CPA_PROVIDER.into(),
+            provider_id: MYAPI_PROVIDER.into(),
             api: "openai-completions".into(),
             base_url: base,
             api_key: key,
@@ -68,20 +68,20 @@ impl PicoclawAdapter {
         })
     }
 
-    /// 对应 render()：清旧 cpa 条目 + 追加新模型
+    /// 对应 render()：清旧 myapi 条目 + 追加新模型
     fn render_impl(&self, ir: &ProviderIR) -> Value {
         let mut data = self.read();
         let d = data.as_object_mut().unwrap();
         let old: Vec<Value> = d.get("model_list").and_then(|v| v.as_array())
             .cloned().unwrap_or_default();
         let kept: Vec<Value> = old.into_iter().filter(|m| {
-            m.get("provider").and_then(|v| v.as_str()) != Some(CPA_PROVIDER)
+            m.get("provider").and_then(|v| v.as_str()) != Some(MYAPI_PROVIDER)
         }).collect();
         let mut model_list = kept;
         for m in &ir.models {
             model_list.push(json!({
                 "model_name": m.id,
-                "provider": CPA_PROVIDER,
+                "provider": MYAPI_PROVIDER,
                 "model": m.id,
                 "api_base": ir.base_url,
                 "api_keys": [ir.api_key],

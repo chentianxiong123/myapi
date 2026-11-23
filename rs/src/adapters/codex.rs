@@ -5,7 +5,7 @@ use crate::core::ir::ModelIR;
 use crate::core::ir::ProviderIR;
 use crate::core::remote::RemoteIO;
 use crate::adapters::ccswitch;
-use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff};
+use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff, DEFAULT_PROVIDER_ID};
 use serde_json::{json, Value};
 
 const APP_TYPE: &str = "codex";
@@ -34,7 +34,7 @@ impl Adapter for CodexAdapter {
     fn iter_instances(&self, instances: &[AdapterInstance]) -> Vec<(String, Box<dyn Adapter>)> { self.iter(instances) }
 
     fn load_current(&self) -> Option<ProviderIR> {
-        let recs = ccswitch::get_cpa_providers(APP_TYPE);
+        let recs = ccswitch::get_myapi_providers(APP_TYPE);
         if recs.is_empty() { return None; }
         let mut base = String::new();
         let mut key = String::new();
@@ -58,7 +58,7 @@ impl Adapter for CodexAdapter {
             input_modes: vec!["text".into()], reasoning: true, extra: Default::default(),
         }).collect();
         Some(ProviderIR {
-            provider_id: "cpa".into(), api: "responses".into(),
+            provider_id: DEFAULT_PROVIDER_ID.into(), api: "responses".into(),
             base_url: base, api_key: key, models, meta: Default::default(),
         })
     }
@@ -80,7 +80,7 @@ impl Adapter for CodexAdapter {
                 m.id, m.id, ctx_win, auto_compact, base);
             providers.push(json!({
                 "name": m.id,
-                "notes": "cpa",
+                "notes": DEFAULT_PROVIDER_ID,
                 "settings_config": {
                     "auth": { "OPENAI_API_KEY": ir.api_key },
                     "config": config,

@@ -6,10 +6,10 @@
 //! （crushrc 的 provider add 语法），不含任何主机专属逻辑。
 use crate::core::ir::ProviderIR;
 use crate::core::remote::RemoteIO;
-use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff};
+use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff, DEFAULT_PROVIDER_ID};
 
-const CPA_ID: &str = "cpa";
-const CPA_TYPE: &str = "openai-compat"; // crush 旧 catwalk 值；main/catwalk v3 是 completions
+const MYAPI_ID: &str = DEFAULT_PROVIDER_ID;
+const MYAPI_TYPE: &str = "openai-compat"; // crush 旧 catwalk 值；main/catwalk v3 是 completions
 const BEGIN_MARK: &str = "# --- myapi provider BEGIN ---";
 const END_MARK: &str = "# --- myapi provider END ---";
 
@@ -34,7 +34,7 @@ impl CrushAdapter {
         }
     }
 
-    /// 对应 _loopback_url()：crush 与 cpa 同机，base_url 用回环
+    /// 对应 _loopback_url()：crush 与 myapi 同机，base_url 用回环
     fn loopback_url(url: &str) -> String {
         // http://192.168.31.213:8317/v1 -> http://127.0.0.1:8317/v1
         if let Some(rest) = url.strip_prefix("http://") {
@@ -77,12 +77,12 @@ impl CrushAdapter {
         let mut models = Vec::new();
         for line in seg.lines() {
             let line = line.trim();
-            if let Some(rest) = line.strip_prefix(&format!("provider add {}", CPA_ID)) {
+            if let Some(rest) = line.strip_prefix(&format!("provider add {}", MYAPI_ID)) {
                 let _ = rest;
                 base_url = Self::flag(line, "--base-url");
                 api_key = Self::flag(line, "--api-key");
-            } else if line.starts_with(&format!("model add {}/", CPA_ID)) {
-                let tail = &line[format!("model add {}/", CPA_ID).len()..];
+            } else if line.starts_with(&format!("model add {}/", MYAPI_ID)) {
+                let tail = &line[format!("model add {}/", MYAPI_ID).len()..];
                 let mid = tail.split_whitespace().next().unwrap_or("");
                 if mid.is_empty() { continue; }
                 let cw = Self::flag(line, "--context-window").parse().unwrap_or(256000);
@@ -95,7 +95,7 @@ impl CrushAdapter {
         }
         if models.is_empty() && base_url.is_empty() { return None; }
         Some(ProviderIR {
-            provider_id: CPA_ID.into(), api: "openai-completions".into(),
+            provider_id: MYAPI_ID.into(), api: "openai-completions".into(),
             base_url, api_key, models, meta: Default::default(),
         })
     }
@@ -112,7 +112,7 @@ impl Adapter for CrushAdapter {
     }
 
     fn diff(&self, current: &Option<ProviderIR>, target: &ProviderIR) -> Vec<String> {
-        // crush 与 cpa 同机（回环），base_url 主机段差异不参与对比
+        // crush 与 myapi 同机（回环），base_url 主机段差异不参与对比
         base_diff(current, target, self.name())
             .into_iter().filter(|l| !l.starts_with(&format!("  [{}] base_url:", self.name()))).collect()
     }
@@ -122,17 +122,17 @@ impl Adapter for CrushAdapter {
         let mut lines = vec![BEGIN_MARK.to_string()];
         lines.push(format!(
             "provider add {} --type {} --base-url \"{}\" --api-key \"{}\"",
-            CPA_ID, CPA_TYPE, Self::loopback_url(&ir.base_url), ir.api_key));
+            MYAPI_ID, MYAPI_TYPE, Self::loopback_url(&ir.base_url), ir.api_key));
         for m in &ir.models {
             let cw = if m.context_window > 0 { m.context_window } else { 256000 };
             let mt = if m.max_tokens > 0 { m.max_tokens } else { 16384 };
             lines.push(format!(
                 "model add {}/{} --name \"{}\" --context-window {} --default-max-tokens {}",
-                CPA_ID, m.id, m.id, cw, mt));
+                MYAPI_ID, m.id, m.id, cw, mt));
         }
         if !ir.models.is_empty() {
-            lines.push(format!("model large {}/{}", CPA_ID, ir.models[0].id));
-            lines.push(format!("model small {}/{}", CPA_ID, ir.models[ir.models.len() - 1].id));
+            lines.push(format!("model large {}/{}", MYAPI_ID, ir.models[0].id));
+            lines.push(format!("model small {}/{}", MYAPI_ID, ir.models[ir.models.len() - 1].id));
         }
         lines.push(END_MARK.to_string());
         Rendered::Text(lines.join("\n"))

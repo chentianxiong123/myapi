@@ -17,7 +17,7 @@ export default function Models() {
       // 后端返回的是 OpenAI 格式，这里简化处理
       setModels(data.data || [])
     } catch {
-      // 后端还没写，用示例数据（从 cpa 配置提取）
+      // 后端还没写，用示例数据（从 myapi 配置提取）
       setModels([
         {
           alias: 'deepseek-v4-flash',

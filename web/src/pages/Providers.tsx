@@ -22,7 +22,7 @@ export default function Providers() {
       const data = await res.json()
       setProviders(data.providers || [])
     } catch {
-      // 后端还没写，用示例数据（学cpa 的结构，模型级协议）
+      // 后端还没写，用示例数据（学 myapi 的结构，模型级协议）
       setProviders([
         {
           name: 'agnes',

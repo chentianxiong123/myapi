@@ -1,11 +1,11 @@
 //! hermes 适配器（对照 adapters/hermes.py）
-//! 同步 CPA 配置到 ~/.hermes/config.yaml（model 段 + providers.cpa）
+//! 同步 CPA 配置到 ~/.hermes/config.yaml（model 段 + providers.myapi）
 use crate::core::ir::{ModelIR, ProviderIR};
 use crate::core::remote::RemoteIO;
-use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff};
+use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff, DEFAULT_PROVIDER_ID};
 use serde_yaml::{Mapping, Value as YV};
 
-const CPA_ID: &str = "cpa";
+const MYAPI_ID: &str = DEFAULT_PROVIDER_ID;
 
 pub struct HermesAdapter { pub path: String, pub io: RemoteIO }
 
@@ -33,10 +33,10 @@ impl HermesAdapter {
         serde_yaml::from_str(&text).unwrap_or(YV::Null)
     }
 
-    /// 对应 _find_cpa_provider()
-    fn find_cpa(data: &YV) -> YV {
+    /// 对应 _find_myapi_provider()
+    fn find_myapi(data: &YV) -> YV {
         let providers = match data.get("providers") { Some(v) => v.clone(), None => YV::Null };
-        if let Some(c) = providers.get(CPA_ID) { return c.clone(); }
+        if let Some(c) = providers.get(MYAPI_ID) { return c.clone(); }
         if let Some(obj) = providers.as_mapping() {
             for v in obj.values() {
                 let base = v.get("base_url").and_then(|b| b.as_str()).unwrap_or("");
@@ -61,7 +61,7 @@ impl HermesAdapter {
             }
         }
         ProviderIR {
-            provider_id: CPA_ID.into(),
+            provider_id: MYAPI_ID.into(),
             api: "openai-completions".into(),
             base_url: provider.get("base_url").and_then(|v| v.as_str()).unwrap_or("").into(),
             api_key: provider.get("api_key").and_then(|v| v.as_str()).unwrap_or("").into(),
@@ -72,13 +72,13 @@ impl HermesAdapter {
 
     fn load_impl(&self) -> Option<ProviderIR> {
         let data = self.read();
-        let p = Self::find_cpa(&data);
+        let p = Self::find_myapi(&data);
         if p.is_null() { return None; }
         Some(Self::provider_to_ir(&p))
     }
 
-    /// 对应 render()：model 主端点 + providers.cpa
-    /// 对应 render()：model 主端点 + providers.cpa（作用域分离避免借用冲突）
+    /// 对应 render()：model 主端点 + providers.myapi
+    /// 对应 render()：model 主端点 + providers.myapi（作用域分离避免借用冲突）
     fn render_impl(&self, ir: &ProviderIR) -> YV {
         let mut data = self.read();
         // 1) model 段
@@ -96,23 +96,23 @@ impl HermesAdapter {
                 mc.insert(YV::String("api_mode".into()), YV::String("chat_completions".into()));
             }
         }
-        // 2) providers.cpa
+        // 2) providers.myapi
         {
             let d = data.as_mapping_mut().unwrap();
             let pk = YV::String("providers".into());
             if !d.contains_key(&pk) { d.insert(YV::String("providers".into()), YV::Mapping(Default::default())); }
             let pm = d.get_mut(&pk).unwrap().as_mapping_mut().unwrap();
-            let ck = YV::String(CPA_ID.into());
-            if !pm.contains_key(&ck) { pm.insert(YV::String(CPA_ID.into()), YV::Mapping(Default::default())); }
+            let ck = YV::String(MYAPI_ID.into());
+            if !pm.contains_key(&ck) { pm.insert(YV::String(MYAPI_ID.into()), YV::Mapping(Default::default())); }
             let c = pm.get_mut(&ck).unwrap().as_mapping_mut().unwrap();
-            c.insert(YV::String("name".into()), YV::String("cpa".into()));
+            c.insert(YV::String("name".into()), YV::String(MYAPI_ID.into()));
             c.insert(YV::String("base_url".into()), YV::String(ir.base_url.clone()));
             c.insert(YV::String("api_key".into()), YV::String(ir.api_key.clone()));
             let mut models_map = Mapping::new();
             for m in &ir.models { models_map.insert(YV::String(m.id.clone()), YV::Mapping(Default::default())); }
             c.insert(YV::String("models".into()), YV::Mapping(models_map));
         }
-        // 3) model.default（保留原值，若不在 cpa 清单内则取第一个）
+        // 3) model.default（保留原值，若不在 myapi 清单内则取第一个）
         {
             let d = data.as_mapping_mut().unwrap();
             let mk = YV::String("model".into());

@@ -2,7 +2,7 @@
 //! 同步 CPA provider 配置到 models.json（含历史 UUID 供应商标识迁移）
 use crate::core::ir::{ModelIR, ProviderIR};
 use crate::core::remote::RemoteIO;
-use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff};
+use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff, DEFAULT_PROVIDER_ID};
 use serde_json::{json, Value};
 
 pub struct PiAdapter { pub path: String, pub io: RemoteIO }
@@ -24,11 +24,11 @@ impl PiAdapter {
         serde_json::from_str(&text).unwrap_or(Value::Object(Default::default()))
     }
 
-    /// 对应 _find_cpa_key()：name=="cpa" 优先，兜底 baseUrl 含 :8317
-    fn find_cpa_key(data: &Value) -> Option<String> {
+    /// 对应 _find_myapi_key()：name==DEFAULT_PROVIDER_ID 优先，兜底 baseUrl 含 :8317
+    fn find_myapi_key(data: &Value) -> Option<String> {
         let providers = data.get("providers")?.as_object()?;
         for (k, v) in providers {
-            if v.get("name").and_then(|n| n.as_str()) == Some("cpa") { return Some(k.clone()); }
+            if v.get("name": DEFAULT_PROVIDER_ID) { return Some(k.clone()); }
         }
         for (k, v) in providers {
             if v.get("baseUrl").and_then(|b| b.as_str()).unwrap_or("").contains(":8317") { return Some(k.clone()); }
@@ -53,7 +53,7 @@ impl PiAdapter {
             }
         }
         ProviderIR {
-            provider_id: "cpa".into(),
+            provider_id: DEFAULT_PROVIDER_ID.into(),
             api: provider.get("api").and_then(|v| v.as_str()).unwrap_or("openai-completions").into(),
             base_url: provider.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("").into(),
             api_key: provider.get("apiKey").and_then(|v| v.as_str()).unwrap_or("").into(),
@@ -76,7 +76,7 @@ impl Adapter for PiAdapter {
 
     fn load_current(&self) -> Option<ProviderIR> {
         let data = self.read();
-        let key = Self::find_cpa_key(&data)?;
+        let key = Self::find_myapi_key(&data)?;
         let provider = data.get("providers")?.get(&key)?;
         let mut ir = Self::provider_to_ir(provider);
         ir.meta.insert("_current_provider_id".into(), Value::String(key));
@@ -98,9 +98,9 @@ impl Adapter for PiAdapter {
     fn render(&self, ir: &ProviderIR) -> Rendered {
         let data = self.read();
         let mut providers: Value = data.get("providers").cloned().unwrap_or(Value::Object(Default::default()));
-        let target_key = if ir.provider_id.is_empty() { "cpa".into() } else { ir.provider_id.clone() };
+        let target_key = if ir.provider_id.is_empty() { DEFAULT_PROVIDER_ID.into() } else { ir.provider_id.clone() };
         // 历史 UUID key 迁移
-        if let Some(old_key) = Self::find_cpa_key(&data) {
+        if let Some(old_key) = Self::find_myapi_key(&data) {
             if old_key != target_key {
                 let p = providers.as_object_mut().unwrap();
                 if let Some(v) = p.remove(&old_key) { p.insert(target_key.clone(), v); }
@@ -110,7 +110,7 @@ impl Adapter for PiAdapter {
             let p = providers.as_object_mut().unwrap();
             if !p.contains_key(&target_key) { p.insert(target_key.clone(), Value::Object(Default::default())); }
             let c = p.get_mut(&target_key).unwrap().as_object_mut().unwrap();
-            c.insert("name".into(), Value::String("cpa".into()));
+            c.insert("name": DEFAULT_PROVIDER_ID.into()));
             c.insert("baseUrl".into(), Value::String(ir.base_url.clone()));
             c.insert("api".into(), Value::String(if ir.api.is_empty() { "openai-completions".into() } else { ir.api.clone() }));
             c.insert("apiKey".into(), Value::String(ir.api_key.clone()));

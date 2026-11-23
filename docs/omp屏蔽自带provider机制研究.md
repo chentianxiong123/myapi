@@ -15,7 +15,7 @@ omp 启动时按这个数组过滤，不加载这些内置 provider。
 
 | 文件 | 作用 |
 |------|------|
-| `~/.omp/agent/models.yml` | **provider 定义**：`providers.cpa`（baseUrl/apiKey/models）+ `providers.sensenova`（旧） |
+| `~/.omp/agent/models.yml` | **provider 定义**：`providers.myapi`（baseUrl/apiKey/models）+ `providers.sensenova`（旧） |
 | `~/.omp/agent/config.yml` | **屏蔽 + 角色**：`disabledProviders`（86 个自带）+ `modelRoles`（default/plan/vision）+ UI |
 | `~/.omp/agent/agent.db` | 运行时状态库（model_perf/model_usage/settings/auth_credentials，**无 provider 定义**） |
 
@@ -23,7 +23,7 @@ omp 启动时按这个数组过滤，不加载这些内置 provider。
 
 - `rules.json` 里 **85 个内置 provider**（chat/多模态 + `web` 搜索）；
 - **`web` 是唯一 search provider**（`api: web-search`，seed 模型 hosted/parallel/perplexity/exa...），**不该屏蔽**；
-- 自定义 provider（`cpa`/`sensenova`）**不在 rules.json**（非内置），天然不受 disabledProviders 影响；
+- 自定义 provider（`myapi`/`sensenova`）**不在 rules.json**（非内置），天然不受 disabledProviders 影响；
 - 用户扫的 86 个 = 84 个内置（除 web）+ `llama.cpp`/`minimax-cn`（旧/别名，不在当前内置）。
 
 ## 复用脚本
@@ -38,7 +38,7 @@ python scripts/omp_disable_providers.py \
   --config "C:\Users\a1\.omp\agent\config.yml" \
   --rules "C:\Users\a1\AppData\Roaming\npm\node_modules\@oh-my-pi\pi-coding-agent\node_modules\@oh-my-pi\pi-catalog\src\compat\rules.json"
 # 额外保留（默认保留 web）
-python3 scripts/omp_disable_providers.py --keep web,cpa,sensenova
+python3 scripts/omp_disable_providers.py --keep web,myapi,sensenova
 ```
 
 脚本行为：
@@ -51,10 +51,10 @@ python3 scripts/omp_disable_providers.py --keep web,cpa,sensenova
 
 - dry-run：85 内置，保留 web，屏蔽 84，disabledProviders 86→86（用户已全扫，+0）；
 - 部分扫描模拟：3→84（+81，自动补全）；
-- 真写入：备份 + 写回 86 个，modelRoles 保留（default=cpa/sensenova-6.8-flash-lite），web 不在 disabledProviders（保留）——**全部正确**。
+- 真写入：备份 + 写回 86 个，modelRoles 保留（default=myapi/sensenova-6.8-flash-lite），web 不在 disabledProviders（保留）——**全部正确**。
 
 ## 注意
 
 - win11 跑脚本需 `pip install pyyaml`（脚本依赖 yaml）；
-- `disabledProviders` 只影响**内置** provider（rules.json 里那些）；自定义 provider（cpa/sensenova）不受影响，无需列入；
-- omp adapter（`adapters/omp.py`）同步的是 `models.yml` 的 `providers.cpa`（provider 定义）；屏蔽自带是独立动作（本脚本），两者不冲突。
+- `disabledProviders` 只影响**内置** provider（rules.json 里那些）；自定义 provider（myapi/sensenova）不受影响，无需列入；
+- omp adapter（`adapters/omp.py`）同步的是 `models.yml` 的 `providers.myapi`（provider 定义）；屏蔽自带是独立动作（本脚本），两者不冲突。

@@ -29,7 +29,7 @@ async fn get_index(State(_s): State<S>) -> axum::response::Response {
         .body(axum::body::Body::from(body)).unwrap()
 }
 async fn get_config(State(s): State<S>) -> axum::response::Response {
-    let path = s.0.join("config").join("cpa-config.yaml");
+    let path = s.0.join("config").join("myapi-config.yaml");
     match std::fs::read_to_string(&path) {
         Ok(_t) => axum::Json(serde_json::json!({"ok": true, "config": api::read_yaml_json(&path)})).into_response(),
         Err(e) => axum::Json(serde_json::json!({"ok": false, "error": e.to_string()})).into_response(),
@@ -37,7 +37,7 @@ async fn get_config(State(s): State<S>) -> axum::response::Response {
 }
 async fn post_config(State(s): State<S>, Json(payload): Json<Value>) -> axum::response::Response {
     let cfg = payload.get("config").cloned().unwrap_or_default();
-    let path = s.0.join("config").join("cpa-config.yaml");
+    let path = s.0.join("config").join("myapi-config.yaml");
     match api::write_yaml_json(&path, &cfg) {
         Ok(_) => axum::Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => axum::Json(serde_json::json!({"ok": false, "error": e.to_string()})).into_response(),
@@ -143,7 +143,7 @@ async fn main() {
         .route("/api/probe", post(post_probe))
         .route("/api/probe/cache", get(get_probe_cache).post(post_probe_cache))
         .route("/api/panel/config", get(|| async { axum::Json(api::get_panel_config()) }).post(post_panel_config))
-        .route("/api/version", get(|| async { let v = api::get_version(); axum::Json(serde_json::json!({"ok": true, "myapi": v.get("myapi").cloned().unwrap_or_default(), "agent_sync": v.get("agent_sync").cloned().unwrap_or_default(), "adapters": v.get("adapters").cloned().unwrap_or_default()})) }))
+        .route("/api/version", get(|| async { let v = api::get_version(); axum::Json(serde_json::json!({"ok": true, (crate::adapters::DEFAULT_PROVIDER_ID): v.get(crate::adapters::DEFAULT_PROVIDER_ID).cloned().unwrap_or_default(), "agent_sync": v.get("agent_sync").cloned().unwrap_or_default(), "adapters": v.get("adapters").cloned().unwrap_or_default()})) }))
         .route("/api/nodes/config", post(post_nodes_config))
         .route("/api/nodes/diff", post(post_nodes_diff))
         .route("/api/nodes/sync", post(post_nodes_sync))

@@ -1,7 +1,7 @@
-// Provider（学cpa 的 openai-compatibility 结构）
+// Provider（学 myapi 的 openai-compatibility 结构）
 export type ModelProtocol = 'openai_chat' | 'openai_responses' | 'anthropic' | 'gemini' | 'ollama'
 
-// Provider（学cpa 的 openai-compatibility 结构）
+// Provider（学 myapi 的 openai-compatibility 结构）
 export interface Provider {
   name: string
   base_url: string

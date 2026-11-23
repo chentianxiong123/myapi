@@ -74,3 +74,6 @@ pub fn available_names() -> Vec<String> {
 pub fn base_diff(current: &Option<ProviderIR>, target: &ProviderIR, name: &str) -> Vec<String> {
     base::base_diff(current, target, name)
 }
+
+/// 统一品牌/网关标识（下游 provider 名/notes/cc-switch 匹配）。改名只改 base.rs。
+pub const DEFAULT_PROVIDER_ID: &str = base::DEFAULT_PROVIDER_ID;

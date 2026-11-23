@@ -1,8 +1,8 @@
 //! omp 适配器（对照 adapters/omp.py）
-//! 同步 CPA provider 到 omp 的 agents.yaml（providers.cpa + models 数组）
+//! 同步 CPA provider 到 omp 的 agents.yaml（providers.myapi + models 数组）
 use crate::core::ir::{ModelIR, ProviderIR};
 use crate::core::remote::RemoteIO;
-use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff};
+use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff, DEFAULT_PROVIDER_ID};
 use serde_yaml::{Mapping, Value as YV};
 
 pub struct OmpAdapter { pub path: String, pub io: RemoteIO, pub enabled_models: Vec<String>, pub config_path: String }
@@ -58,14 +58,14 @@ impl OmpAdapter {
         serde_yaml::from_str(&text).unwrap_or(YV::Mapping(Default::default()))
     }
 
-    /// 对应 _find_cpa_provider_key()：优先 key=cpa，否则任意 name=cpa
-    fn find_cpa_key(data: &YV) -> Option<String> {
+    /// 对应 _find_myapi_provider_key()：优先 key=myapi，否则任意 name=myapi
+    fn find_myapi_key(data: &YV) -> Option<String> {
         let providers = data.get("providers")?.as_mapping()?;
         for (k, v) in providers {
-            if k.as_str() == Some("cpa") { return Some("cpa".into()); }
+            if k.as_str() == Some(DEFAULT_PROVIDER_ID) { return Some(DEFAULT_PROVIDER_ID.into()); }
         }
         for (k, v) in providers {
-            if v.get("name").and_then(|n| n.as_str()) == Some("cpa") {
+            if v.get("name": DEFAULT_PROVIDER_ID) {
                 return Some(k.as_str().unwrap_or("").to_string());
             }
         }
@@ -89,7 +89,7 @@ impl OmpAdapter {
             }
         }
         ProviderIR {
-            provider_id: "cpa".into(),
+            provider_id: DEFAULT_PROVIDER_ID.into(),
             api: provider.get("api").and_then(|v| v.as_str()).unwrap_or("openai-completions").into(),
             base_url: provider.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("").into(),
             api_key: provider.get("apiKey").and_then(|v| v.as_str()).unwrap_or("").into(),
@@ -104,20 +104,20 @@ impl Adapter for OmpAdapter {
 
     fn load_current(&self) -> Option<ProviderIR> {
         let data = self.read();
-        let key = Self::find_cpa_key(&data)?;
+        let key = Self::find_myapi_key(&data)?;
         let p = data.get("providers")?.get(&YV::String(key.clone()))?;
         Some(Self::provider_to_ir(p))
     }
 
     fn diff(&self, current: &Option<ProviderIR>, target: &ProviderIR) -> Vec<String> { base_diff(current, target, "omp") }
 
-    /// 对应 render()：providers.cpa（含清旧 cpa key 收拢）
+    /// 对应 render()：providers.myapi（含清旧 myapi key 收拢）
     fn render(&self, ir: &ProviderIR) -> Rendered {
         let mut data = self.read();
-        // 清掉 name=cpa 但 key != cpa 的旧条目
+        // 清掉 name=myapi 但 key != myapi 的旧条目
         if let Some(providers) = data.get_mut("providers").and_then(|v| v.as_mapping_mut()) {
             let stale: Vec<YV> = providers.iter().filter(|(k, v)| {
-                k.as_str() != Some("cpa") && v.get("name").and_then(|n| n.as_str()) == Some("cpa")
+                k.as_str() != Some(DEFAULT_PROVIDER_ID) && v.get("name": DEFAULT_PROVIDER_ID)
             }).map(|(k, _)| k.clone()).collect();
             for k in stale { providers.remove(&k); }
         }
@@ -127,10 +127,10 @@ impl Adapter for OmpAdapter {
                 d.insert(YV::String("providers".into()), YV::Mapping(Default::default()));
             }
             let pm = d.get_mut(&YV::String("providers".into())).unwrap().as_mapping_mut().unwrap();
-            let ck = YV::String("cpa".into());
-            if !pm.contains_key(&ck) { pm.insert(YV::String("cpa".into()), YV::Mapping(Default::default())); }
+            let ck = YV::String(DEFAULT_PROVIDER_ID.into());
+            if !pm.contains_key(&ck) { pm.insert(YV::String(DEFAULT_PROVIDER_ID.into()), YV::Mapping(Default::default())); }
             let c = pm.get_mut(&ck).unwrap().as_mapping_mut().unwrap();
-            c.insert(YV::String("name".into()), YV::String("cpa".into()));
+            c.insert(YV::String("name": DEFAULT_PROVIDER_ID.into()));
             c.insert(YV::String("baseUrl".into()), YV::String(ir.base_url.clone()));
             c.insert(YV::String("api".into()), YV::String(if ir.api.is_empty() { "openai-completions".into() } else { ir.api.clone() }));
             c.insert(YV::String("apiKey".into()), YV::String(ir.api_key.clone()));

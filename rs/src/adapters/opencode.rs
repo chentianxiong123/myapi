@@ -1,10 +1,10 @@
 //! opencode 适配器（对照 adapters/opencode.py）
-//! 同步 CPA provider 配置到 opencode.json 的 provider.cpa
+//! 同步 CPA provider 配置到 opencode.json 的 provider.myapi
 //! 通用分发：path 由 AdapterInstance 指定，缺省展开到 opencode 标准配置位置；
 //! host 非空则经 RemoteIO 走 ssh/scp 远程读写（对照 core/remote.py）。
 use crate::core::ir::{ModelIR, ProviderIR};
 use crate::core::remote::RemoteIO;
-use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff};
+use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff, DEFAULT_PROVIDER_ID};
 use serde_json::{json, Value};
 
 pub struct OpencodeAdapter {
@@ -32,7 +32,7 @@ impl OpencodeAdapter {
 
     fn find_cpa(data: &Value) -> Value {
         let providers = data.get("provider").cloned().unwrap_or(Value::Object(Default::default()));
-        if let Some(c) = providers.get("cpa") { if !c.is_null() { return c.clone(); } }
+        if let Some(c) = providers.get(DEFAULT_PROVIDER_ID) { if !c.is_null() { return c.clone(); } }
         if let Some(obj) = providers.as_object() {
             for v in obj.values() {
                 let base = v.get("options").and_then(|o| o.get("baseURL")).and_then(|b| b.as_str()).unwrap_or("");
@@ -68,7 +68,7 @@ impl OpencodeAdapter {
             }
         }
         ProviderIR {
-            provider_id: "cpa".into(),
+            provider_id: DEFAULT_PROVIDER_ID.into(),
             api: "openai-completions".into(),
             base_url: options.get("baseURL").and_then(|v| v.as_str()).unwrap_or("").into(),
             api_key: options.get("apiKey").and_then(|v| v.as_str()).unwrap_or("").into(),
@@ -92,16 +92,16 @@ impl Adapter for OpencodeAdapter {
 
     fn load_current(&self) -> Option<ProviderIR> {
         let data = self.read();
-        let cpa = Self::find_cpa(&data);
-        if cpa.is_null() { return None; }
-        Some(Self::provider_to_ir(&cpa))
+        let myapi = Self::find_cpa(&data);
+        if myapi.is_null() { return None; }
+        Some(Self::provider_to_ir(&myapi))
     }
 
     fn diff(&self, current: &Option<ProviderIR>, target: &ProviderIR) -> Vec<String> {
         let mut lines = base_diff(current, target, self.name());
         let data = self.read();
-        let cpa = Self::find_cpa(&data);
-        if let Some(ms) = cpa.get("models").and_then(|v| v.as_object()) {
+        let myapi = Self::find_cpa(&data);
+        if let Some(ms) = myapi.get("models").and_then(|v| v.as_object()) {
             if let Some(sample) = ms.values().next() {
                 if let Some(o) = sample.as_object() {
                     if o.contains_key("input") || o.contains_key("contextWindow") || o.contains_key("maxTokens") {
@@ -119,8 +119,8 @@ impl Adapter for OpencodeAdapter {
         if !d.contains_key("provider") { d.insert("provider".into(), Value::Object(Default::default())); }
         let providers = d.get_mut("provider").unwrap();
         let p = providers.as_object_mut().unwrap();
-        if !p.contains_key("cpa") { p.insert("cpa".into(), Value::Object(Default::default())); }
-        let c = p.get_mut("cpa").unwrap().as_object_mut().unwrap();
+        if !p.contains_key(DEFAULT_PROVIDER_ID) { p.insert(DEFAULT_PROVIDER_ID.into(), Value::Object(Default::default())); }
+        let c = p.get_mut(DEFAULT_PROVIDER_ID).unwrap().as_object_mut().unwrap();
         if !c.contains_key("npm") { c.insert("npm".into(), Value::String("@ai-sdk/openai-compatible".into())); }
         if !c.contains_key("options") { c.insert("options".into(), Value::Object(Default::default())); }
         let o = c.get_mut("options").unwrap().as_object_mut().unwrap();

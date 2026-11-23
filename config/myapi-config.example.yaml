@@ -1,22 +1,22 @@
 # myapi / agent-sync 配置 —— 模板（脱敏，供参考/发行）
 #
 # 同一份 config 结构：
-#   - myapi（中心）：中心机 config/cpa-config.yaml（已 .gitignore，不进仓库）
+#   - myapi（中心）：中心机 config/myapi-config.yaml（已 .gitignore，不进仓库）
 #   - agent-sync（客户端）：拷到目标机后填 base_url + api_key
-# 用法：cp config/cpa-config.example.yaml config/cpa-config.yaml
+# 用法：cp config/myapi-config.example.yaml config/myapi-config.yaml
 #       然后填你的 base_url / api_key。
 #
 # 中心机：myapi apply 一键分发到所有下游；
 # 目标机：agent-sync apply 本机自拉（只需 base_url + api_key + targets）。
 
-cpa:
+myapi:
   # CPA (cli-proxy-api) 网关地址 —— 替换成你的
   base_url: "http://YOUR_CPA_IP:8317/v1"
   # CPA 的 API key —— 替换成你的
   api_key: "YOUR_CPA_API_KEY"
   # 供应商标识：下游（pi/opencode 等）用它作 provider 的 key。
   # 有意义且稳定（默认 "cpa"），不要用随机 UUID；历史 UUID 会自动迁移。
-  provider_id: "cpa"
+  provider_id: "myapi"
 
   # 模型：留空 = 动态扫 CPA 的 /v1/models，扫出什么就配什么（用户期望）
   # 若只想配部分模型，才在这里列白名单（支持带前缀 sensenova/deepseek-v4-flash）
@@ -77,7 +77,7 @@ adapter_instances:
     # 例：web 引擎只留三家可用（exa/parallel/tavily），其余 18 家占位裁掉。
     - { name: win11, host: win11, path: "C:\\Users\\a1\\.omp\\agent\\models.yml",
         config_path: "C:\\Users\\a1\\.omp\\agent\\config.yml",
-        enabled_models: ["cpa/*", "sensenova/*", "exa", "parallel", "tavily"] }
+        enabled_models: ["myapi/*", "sensenova/*", "exa", "parallel", "tavily"] }
     - { name: macos, host: macos, path: "/Users/a1/.omp/agent/models.yml" }
   dsh:
     - { name: win11, host: win11, path: "C:\\Users\\a1\\.dsh\\profiles\\web\\cordis.patch.yml" }

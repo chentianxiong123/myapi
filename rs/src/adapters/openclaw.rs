@@ -1,11 +1,11 @@
 //! openclaw 适配器（对照 adapters/openclaw.py）
-//! 同步 CPA provider 配置到 ~/.openclaw/openclaw.json 的 models.providers.cpa
+//! 同步 CPA provider 配置到 ~/.openclaw/openclaw.json 的 models.providers.myapi
 use crate::core::ir::{ModelIR, ProviderIR};
 use crate::core::remote::RemoteIO;
-use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff};
+use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff, DEFAULT_PROVIDER_ID};
 use serde_json::{json, Value};
 
-const CPA_ID: &str = "cpa";
+const MYAPI_ID: &str = DEFAULT_PROVIDER_ID;
 
 pub struct OpenclawAdapter { pub path: String, pub io: RemoteIO }
 
@@ -33,17 +33,17 @@ impl OpenclawAdapter {
         }
     }
 
-    fn find_cpa_provider(data: &Value) -> Value {
+    fn find_myapi_provider(data: &Value) -> Value {
         let providers = data.get("models").and_then(|m| m.get("providers")).cloned()
             .unwrap_or(Value::Object(Default::default()));
-        if let Some(c) = providers.get(CPA_ID) {
+        if let Some(c) = providers.get(MYAPI_ID) {
             if c.is_object() { return c.clone(); }
         }
         if let Some(obj) = providers.as_object() {
             for (k, v) in obj {
                 if v.is_object() {
                     let base = v.get("baseUrl").and_then(|b| b.as_str()).unwrap_or("");
-                    if !base.is_empty() && (k == CPA_ID || base.contains("8317")) { return v.clone(); }
+                    if !base.is_empty() && (k == MYAPI_ID || base.contains("8317")) { return v.clone(); }
                 }
             }
         }
@@ -68,7 +68,7 @@ impl OpenclawAdapter {
             }
         }
         ProviderIR {
-            provider_id: CPA_ID.into(),
+            provider_id: MYAPI_ID.into(),
             api: provider.get("api").and_then(|v| v.as_str()).unwrap_or("openai-completions").into(),
             base_url: provider.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("").into(),
             api_key: provider.get("apiKey").and_then(|v| v.as_str()).unwrap_or("").into(),
@@ -79,12 +79,12 @@ impl OpenclawAdapter {
 
     pub fn load_current(&self) -> Option<ProviderIR> {
         let data = self.read();
-        let p = Self::find_cpa_provider(&data);
+        let p = Self::find_myapi_provider(&data);
         if p.is_null() { return None; }
         Some(Self::provider_to_ir(&p))
     }
 
-    /// 对应 render()：IR → openclaw.json 的 models.providers.cpa
+    /// 对应 render()：IR → openclaw.json 的 models.providers.myapi
     pub fn render_json(&self, ir: &ProviderIR) -> Value {
         let mut data = self.read();
         let d = data.as_object_mut().unwrap();
@@ -95,9 +95,9 @@ impl OpenclawAdapter {
         if !mc.contains_key("providers") { mc.insert("providers".into(), Value::Object(Default::default())); }
         let providers = mc.get_mut("providers").unwrap();
         let p = providers.as_object_mut().unwrap();
-        if !p.contains_key(CPA_ID) { p.insert(CPA_ID.into(), Value::Object(Default::default())); }
-        let cpa = p.get_mut(CPA_ID).unwrap();
-        let c = cpa.as_object_mut().unwrap();
+        if !p.contains_key(MYAPI_ID) { p.insert(MYAPI_ID.into(), Value::Object(Default::default())); }
+        let myapi = p.get_mut(MYAPI_ID).unwrap();
+        let c = myapi.as_object_mut().unwrap();
         c.insert("baseUrl".into(), Value::String(ir.base_url.clone()));
         c.insert("apiKey".into(), Value::String(ir.api_key.clone()));
         c.insert("api".into(), Value::String(if ir.api.is_empty() { "openai-completions".into() } else { ir.api.clone() }));
@@ -117,7 +117,7 @@ impl Adapter for OpenclawAdapter {
     fn iter_instances(&self, instances: &[AdapterInstance]) -> Vec<(String, Box<dyn Adapter>)> { self.iter(instances) }
     fn load_current(&self) -> Option<ProviderIR> {
         let data = self.read();
-        let p = Self::find_cpa_provider(&data);
+        let p = Self::find_myapi_provider(&data);
         if p.is_null() { return None; }
         Some(Self::provider_to_ir(&p))
     }

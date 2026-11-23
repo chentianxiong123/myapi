@@ -3,7 +3,7 @@
 use crate::core::ir::ProviderIR;
 use crate::core::remote::RemoteIO;
 use crate::adapters::ccswitch;
-use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff};
+use crate::adapters::{Adapter, AdapterInstance, Rendered, base_diff, DEFAULT_PROVIDER_ID};
 use serde_json::{json, Value};
 
 const APP_TYPE: &str = "claude";
@@ -31,7 +31,7 @@ impl Adapter for ClaudeAdapter {
     fn iter_instances(&self, instances: &[AdapterInstance]) -> Vec<(String, Box<dyn Adapter>)> { self.iter(instances) }
 
     fn load_current(&self) -> Option<ProviderIR> {
-        let recs = ccswitch::get_cpa_providers(APP_TYPE);
+        let recs = ccswitch::get_myapi_providers(APP_TYPE);
         if recs.is_empty() { return None; }
         let mut base = String::new();
         let mut key = String::new();
@@ -50,7 +50,7 @@ impl Adapter for ClaudeAdapter {
             input_modes: vec!["text".into()], reasoning: false, extra: Default::default(),
         }).collect();
         Some(ProviderIR {
-            provider_id: "cpa".into(), api: "anthropic-messages".into(),
+            provider_id: DEFAULT_PROVIDER_ID.into(), api: "anthropic-messages".into(),
             base_url: base, api_key: key, models, meta: Default::default(),
         })
     }
@@ -77,7 +77,7 @@ impl Adapter for ClaudeAdapter {
             env.insert("CLAUDE_CODE_SUBAGENT_MODEL".into(), Value::String(m.id.clone()));
             providers.push(json!({
                 "name": m.id,
-                "notes": "cpa",
+                "notes": DEFAULT_PROVIDER_ID,
                 "settings_config": {
                     "env": Value::Object(env),
                     "attribution": { "commit": "", "pr": "" }
