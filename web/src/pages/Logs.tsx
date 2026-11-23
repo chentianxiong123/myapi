@@ -180,17 +180,8 @@ export default function Logs() {
       <div className="rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
         <RequestLogTable logs={paginated} loading={loading} columns={columns} scrollHeight={560} />
 
-        {/* footer 分页（学 new-api Pagination floated right） */}
-        <div className="flex flex-wrap items-center justify-between border-t border-gray-200 px-4 py-2.5 dark:border-gray-700">
-          <div className="flex items-center gap-2 text-xs text-gray-400">
-            <span>共 {filtered.length} 条</span>
-            <select value={pageSize} onChange={e => { setPageSize(parseInt(e.target.value)); setPage(1) }}
-              className="rounded border border-gray-300 px-1 py-0.5 text-xs dark:border-gray-600 dark:bg-gray-700">
-              <option value={20}>20 条/页</option>
-              <option value={50}>50 条/页</option>
-              <option value={100}>100 条/页</option>
-            </select>
-          </div>
+        {/* footer 分页（学 new-api Pagination floated right，全部靠右） */}
+        <div className="flex items-center justify-end gap-3 border-t border-gray-200 px-4 py-2.5 dark:border-gray-700">
           <nav className="flex items-center gap-1">
             <button onClick={() => goToPage(page - 1)} disabled={page === 1}
               className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-500 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:hover:bg-gray-700">‹</button>
@@ -207,6 +198,15 @@ export default function Logs() {
             <button onClick={() => goToPage(page + 1)} disabled={page === totalPages}
               className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-500 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:hover:bg-gray-700">›</button>
           </nav>
+          <div className="flex items-center gap-2 text-xs text-gray-400">
+            <span>共 {filtered.length} 条</span>
+            <select value={pageSize} onChange={e => { setPageSize(parseInt(e.target.value)); setPage(1) }}
+              className="rounded border border-gray-300 px-1 py-0.5 text-xs dark:border-gray-600 dark:bg-gray-700">
+              <option value={20}>20 条/页</option>
+              <option value={50}>50 条/页</option>
+              <option value={100}>100 条/页</option>
+            </select>
+          </div>
         </div>
       </div>
     </div>

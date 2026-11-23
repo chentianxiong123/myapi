@@ -1,34 +1,32 @@
 import { useEffect, useState } from 'react'
 import { api } from '@/lib/api'
-import type { StatsSummary, ProviderStat, RequestLog, TrendPoint, DailyPoint } from '@/lib/types'
+import type { StatsSummary, ProviderStat, TrendPoint, DailyPoint } from '@/lib/types'
 import StatsHero from '@/components/StatsHero'
 import TrendChart from '@/components/TrendChart'
 import ProviderStats from '@/components/ProviderStats'
-import RequestLogTable from '@/components/RequestLogTable'
 import Heatmap from '@/components/Heatmap'
 import DateRangePicker, { type RangeSelection } from '@/components/DateRangePicker'
 
-type Tab = 'logs' | 'providers' | 'models'
+type Tab = 'providers' | 'models'
 
 export default function Dashboard() {
   const [stats, setStats] = useState<StatsSummary | null>(null)
   const [providers, setProviders] = useState<ProviderStat[]>([])
-  const [logs, setLogs] = useState<RequestLog[]>([])
   const [trend, setTrend] = useState<TrendPoint[]>([])
   const [daily, setDaily] = useState<DailyPoint[]>([])
   const [loading, setLoading] = useState(true)
   const [range, setRange] = useState<RangeSelection>({ preset: '7d' })
-  const [tab, setTab] = useState<Tab>('logs')
+  const [tab, setTab] = useState<Tab>('providers')
 
   useEffect(() => { load() }, [range])
 
   async function load() {
     setLoading(true)
     try {
-      const [s, p, l, t, d] = await Promise.all([
-        api.getStats(), api.getProviderStats(), api.getRequestLogs(100), api.getTrend(24), api.getDaily(371),
+      const [s, p, t, d] = await Promise.all([
+        api.getStats(), api.getProviderStats(), api.getTrend(24), api.getDaily(371),
       ])
-      setStats(s); setProviders(p); setLogs(l); setTrend(t); setDaily(d)
+      setStats(s); setProviders(p); setTrend(t); setDaily(d)
     } catch {
       const ti = 1245000, to = 456000, tcr = 890000, tcc = 123000, tr = 1234, sc = 1205
       setStats({
@@ -55,37 +53,14 @@ export default function Dashboard() {
         output_tokens: Math.floor(Math.random() * 20000) + 5000,
         cache_read_tokens: Math.floor(Math.random() * 40000) + 8000,
       })))
-      setLogs(Array.from({ length: 20 }, (_, i) => {
-        const input = Math.floor(Math.random() * 3000) + 100
-        const output = Math.floor(Math.random() * 800) + 50
-        const cache_read = Math.floor(Math.random() * 2000)
-        const cache_creation = Math.floor(Math.random() * 500)
-        const latency = Math.floor(Math.random() * 2000) + 500
-        const duration = latency / 1000
-        const error = i % 7 === 0 ? 'timeout' : null
-        return {
-          id: `req-${i}`, timestamp: new Date(Date.now() - i * 45000).toISOString(),
-          model: ['deepseek-v4-flash', 'agnes-3.0-flash', 'glm-5.3', 'kimi-k3.1-pro'][i % 4],
-          provider: ['SenseNova', 'pie-xian', 'iamhc', 'agnes'][i % 4],
-          app_type: ['pi', 'opencode', 'claude', 'codex'][i % 4],
-          session_id: `session-${Math.floor(i / 3)}`,
-          input_tokens: input, fresh_input_tokens: input - cache_read, output_tokens: output,
-          cache_read_tokens: cache_read, cache_creation_tokens: cache_creation,
-          cache_hit_rate: (cache_read / (input + cache_creation)) || 0,
-          real_total_tokens: input + output + cache_creation + cache_read,
-          ttft_ms: error ? 0 : Math.floor(Math.random() * 300) + 100,
-          latency_ms: latency, duration_s: duration,
-          output_speed_tps: output / duration,
-          status_code: error ? 502 : 200, error, is_stream: true,
-        }
-      }))
+      // 模型统计（从 providers 聚合）
+      setDaily([])
     } finally {
       setLoading(false)
     }
   }
 
   const tabs: Array<{ id: Tab; label: string }> = [
-    { id: 'logs', label: '请求日志' },
     { id: 'providers', label: 'Provider 统计' },
     { id: 'models', label: '模型统计' },
   ]
@@ -109,7 +84,6 @@ export default function Dashboard() {
           </button>
         ))}
       </div>
-      {tab === 'logs' && <RequestLogTable logs={logs} loading={loading} columns={['time','app','model','output','ttft','status_code']} />}
       {tab === 'providers' && <ProviderStats providers={providers} loading={loading} />}
       {tab === 'models' && (
         <div className="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
@@ -123,18 +97,16 @@ export default function Dashboard() {
               <th className="pb-2 font-medium text-gray-500">缓存命中率</th>
             </tr></thead>
             <tbody>
-              {Object.entries(logs.reduce<Record<string, { count: number; input: number; output: number; cache_hit: number[] }>>((acc, log) => {
-                if (!acc[log.model]) acc[log.model] = { count: 0, input: 0, output: 0, cache_hit: [] }
-                acc[log.model].count++; acc[log.model].input += log.input_tokens
-                acc[log.model].output += log.output_tokens; acc[log.model].cache_hit.push(log.cache_hit_rate)
-                return acc
-              }, {})).map(([model, s]) => (
-                <tr key={model} className="border-b border-gray-100 dark:border-gray-800">
-                  <td className="py-2 font-mono text-xs">{model}</td>
-                  <td className="py-2">{s.count}</td>
-                  <td className="py-2 font-mono text-xs">{s.input.toLocaleString()}</td>
-                  <td className="py-2 font-mono text-xs">{s.output.toLocaleString()}</td>
-                  <td className="py-2 font-mono text-xs">{(s.cache_hit.reduce((a, b) => a + b, 0) / s.cache_hit.length * 100).toFixed(1)}%</td>
+              {providers.flatMap(p => p.name ? [{
+                model: p.name, count: p.total_requests, input: p.total_input_tokens,
+                output: p.total_output_tokens, cache_hit: p.cache_hit_rate,
+              }] : []).map((m, i) => (
+                <tr key={i} className="border-b border-gray-100 dark:border-gray-800">
+                  <td className="py-2 font-mono text-xs">{m.model}</td>
+                  <td className="py-2">{m.count}</td>
+                  <td className="py-2 font-mono text-xs">{m.input.toLocaleString()}</td>
+                  <td className="py-2 font-mono text-xs">{m.output.toLocaleString()}</td>
+                  <td className="py-2 font-mono text-xs">{(m.cache_hit * 100).toFixed(1)}%</td>
                 </tr>
               ))}
             </tbody>
