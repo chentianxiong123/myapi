@@ -8,13 +8,23 @@ export interface Provider {
   disabled: boolean
   headers: Record<string, string>
   keys: Array<{ 'api-key': string }>
-  models: Array<{ name: string; alias?: string; protocol?: ModelProtocol }>
+  models: Array<{ name: string; alias?: string; protocol?: ModelProtocol; kind?: ModelKind }>
   // 渠道级别代理（每个 Provider 可单独走代理；空=直连/全局代理）
   proxy: string
   // 代理池（学 9router：引用 proxyPools 的一个池 + 选择策略；空=不用池）
   proxy_pool_id: string
   proxy_strategy: 'round-robin' | 'random' | 'none'
 }
+
+// 模型类型（学 9router /v1/models 分类：chat/webSearch/webFetch/embedding）
+export type ModelKind = 'chat' | 'webSearch' | 'webFetch' | 'embedding'
+
+export const MODEL_KINDS: Array<{ id: ModelKind; label: string; endpoint: string }> = [
+  { id: 'chat', label: '对话（chat）', endpoint: '/v1/chat/completions' },
+  { id: 'webSearch', label: 'Web 搜索（search）', endpoint: '/v1/search' },
+  { id: 'webFetch', label: '网页抓取（fetch）', endpoint: '/v1/web-fetch' },
+  { id: 'embedding', label: '嵌入（embedding）', endpoint: '/v1/embeddings' },
+]
 
 export const MODEL_PROTOCOLS: Array<{ id: ModelProtocol; label: string; path: string }> = [
   { id: 'openai_chat', label: 'OpenAI Chat', path: '/v1/chat/completions' },
@@ -28,6 +38,7 @@ export const MODEL_PROTOCOLS: Array<{ id: ModelProtocol; label: string; path: st
 export interface ExposedModel {
   id?: string
   alias: string
+  kind?: ModelKind
   providers: Array<{
     provider_name: string
     real_name: string

@@ -4,7 +4,7 @@ import { toast } from '@/components/Toast'
 import StatusBar from '@/components/StatusBar'
 import { postJSON } from '@/lib/api'
 import type { Provider, ModelProtocol, ProxyPool } from '@/lib/types'
-import { MODEL_PROTOCOLS, PROXY_STRATEGIES } from '@/lib/types'
+import { MODEL_PROTOCOLS, PROXY_STRATEGIES, MODEL_KINDS } from '@/lib/types'
 
 export default function Providers() {
   const [providers, setProviders] = useState<Provider[]>([])
@@ -151,9 +151,11 @@ export default function Providers() {
     setProviders(newProviders)
   }
 
-  function updateModel(pidx: number, midx: number, field: 'name' | 'alias' | 'protocol', value: string) {
+  function updateModel(pidx: number, midx: number, field: 'name' | 'alias' | 'protocol' | 'kind', value: string) {
     const newProviders = [...providers]
-    newProviders[pidx].models[midx][field] = value as any
+    const m = { ...newProviders[pidx].models[midx] } as any
+    m[field] = value
+    newProviders[pidx].models[midx] = m
     setProviders(newProviders)
   }
 
@@ -372,6 +374,7 @@ export default function Providers() {
                         <th className="pb-2 font-medium text-gray-500">Name（上游真实名）</th>
                         <th className="pb-2 font-medium text-gray-500">Alias（对外暴露，空=用name）</th>
                         <th className="pb-2 font-medium text-gray-500">协议</th>
+                        <th className="pb-2 font-medium text-gray-500">类型</th>
                         <th className="pb-2 w-10"></th>
                       </tr>
                     </thead>
@@ -405,6 +408,15 @@ export default function Providers() {
                                   className="w-full rounded border border-gray-300 px-2 py-1 text-xs dark:border-gray-600 dark:bg-gray-700"
                                 >
                                   {MODEL_PROTOCOLS.map(proto => <option key={proto.id} value={proto.id}>{proto.label}</option>)}
+                                </select>
+                              </td>
+                              <td className="py-1 pr-2">
+                                <select
+                                  value={m.kind || 'chat'}
+                                  onChange={e => updateModel(idx, realIdx, 'kind', e.target.value)}
+                                  className="w-full rounded border border-gray-300 px-2 py-1 text-xs dark:border-gray-600 dark:bg-gray-700"
+                                >
+                                  {MODEL_KINDS.map(kind => <option key={kind.id} value={kind.id}>{kind.label}</option>)}
                                 </select>
                               </td>
                               <td className="py-1">

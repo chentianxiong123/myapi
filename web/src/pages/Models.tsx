@@ -1,10 +1,17 @@
 import { useEffect, useState } from 'react'
 import { Layers, Plus, Trash2, RefreshCw, Save, Pencil, Check, X } from 'lucide-react'
 import { toast } from '@/components/Toast'
-import type { ExposedModel } from '@/lib/types'
+import type { ExposedModel, ModelKind } from '@/lib/types'
+import { MODEL_KINDS } from '@/lib/types'
 
 // 模仿 CPA 模型映射：alias（对外名）→ 多个 provider 真实模型 + 权重（路由分流）
 const DEFAULT_MODELS: ExposedModel[] = [
+  { id: 'm-0', alias: 'tavily/search', kind: 'webSearch', providers: [
+    { provider_name: 'tavily', real_name: 'tavily/search', weight: 10 },
+  ]},
+  { id: 'm-00', alias: 'text-embedding-3-small', kind: 'embedding', providers: [
+    { provider_name: 'openai', real_name: 'text-embedding-3-small', weight: 10 },
+  ]},
   { id: 'm-1', alias: 'deepseek-v4-flash', providers: [
     { provider_name: 'SenseNova', real_name: 'deepseek-v4-flash', weight: 8 },
     { provider_name: 'SenseNova', real_name: 'deepseek-flash', weight: 0 },
@@ -33,6 +40,7 @@ export default function Models() {
   const [busy, setBusy] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState<ExposedModel | null>(null)
+  const [kindFilter, setKindFilter] = useState<ModelKind | 'all'>('all')
 
   useEffect(() => { loadModels() }, [])
 
@@ -47,7 +55,7 @@ export default function Models() {
   }
 
   function addModel() {
-    const m: ExposedModel = { id: `m-${Date.now()}`, alias: '', providers: [] }
+    const m: ExposedModel = { id: `m-${Date.now()}`, alias: '', kind: kindFilter === 'all' ? 'chat' : kindFilter, providers: [] }
     setModels([...models, m])
     setEditingId(m.id ?? null); setDraft(m)
   }
@@ -125,8 +133,25 @@ export default function Models() {
         </div>
       </div>
 
+      {/* 模型类型筛选（学 9router /v1/models 分类）*/}
+      <div className="flex flex-wrap gap-1 rounded-lg bg-gray-100 p-1 dark:bg-gray-700">
+        <button onClick={() => setKindFilter('all')}
+          className={`rounded px-3 py-1 text-sm ${kindFilter === 'all' ? 'bg-white text-blue-600 shadow-sm dark:bg-gray-800' : 'text-gray-500 hover:text-gray-700'}`}>
+          全部（{models.length}）
+        </button>
+        {MODEL_KINDS.map(kind => {
+          const count = models.filter(m => (m.kind || 'chat') === kind.id).length
+          return (
+            <button key={kind.id} onClick={() => setKindFilter(kind.id)}
+              className={`rounded px-3 py-1 text-sm ${kindFilter === kind.id ? 'bg-white text-blue-600 shadow-sm dark:bg-gray-800' : 'text-gray-500 hover:text-gray-700'}`}>
+              {kind.label}（{count}）
+            </button>
+          )
+        })}
+      </div>
+
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {models.map((m) => {
+        {models.filter(m => kindFilter === 'all' || (m.kind || 'chat') === kindFilter).map((m) => {
           const editing = editingId === m.id
           const totalWeight = m.providers.reduce((s, p) => s + p.weight, 0)
           return (
@@ -167,6 +192,9 @@ export default function Models() {
                   <div className="mb-3 flex items-center gap-2">
                     <Layers className="h-4 w-4 text-blue-600" />
                     <span className="font-mono font-semibold">{m.alias}</span>
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] ${m.kind === 'webSearch' ? 'bg-teal-100 text-teal-700 dark:bg-teal-900/20' : m.kind === 'embedding' ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/20' : m.kind === 'webFetch' ? 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/20' : 'bg-gray-100 text-gray-500 dark:bg-gray-700'}`}>
+                      {MODEL_KINDS.find(k => k.id === (m.kind || 'chat'))?.label || 'chat'}
+                    </span>
                     <span className="ml-auto rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-600 dark:bg-blue-900/20">
                       {m.providers.length} provider{m.providers.length > 1 ? 's' : ''} · w={totalWeight}
                     </span>
