@@ -112,35 +112,36 @@ export default function Heatmap({ data, loading }: HeatmapProps) {
         <span className="text-xs text-gray-400 tabular-nums">{totalTokens.toLocaleString()} Tokens · {totalRequests.toLocaleString()} 次请求</span>
       </div>
 
-      {/* 月份标签 */}
-      <div className="mb-1 flex gap-[3px] pl-8">
+      {/* 月份标签（grid 铺满） */}
+      <div className="mb-1 grid pl-8" style={{ gridTemplateColumns: `repeat(${WEEKS}, minmax(0, 1fr))`, gap: '3px' }}>
         {weeks.map((week, wi) => {
           const firstDay = week[0]?.date
           const showMonth = wi === 0 || (firstDay && firstDay.getMonth() !== weeks[wi - 1][0].date.getMonth())
           return (
-            <div key={wi} className="w-3 text-[9px] text-gray-400">
+            <div key={wi} className="overflow-visible whitespace-nowrap text-[9px] text-gray-400">
               {showMonth && firstDay ? `${firstDay.getMonth() + 1}月` : ''}
             </div>
           )
         })}
       </div>
 
-      {/* 热力图格子（GitHub 贡献图） */}
-      <div className="flex gap-[3px]">
-        <div className="flex flex-col gap-[3px] text-[9px] text-gray-400">
-          <div className="h-3" />
-          {['一', '', '三', '', '五', '', '日'].map((d, i) => (
-            <div key={i} className="h-3 leading-3">{d}</div>
+      {/* 热力图格子（GitHub 贡献图，grid 铺满） */}
+      <div className="grid" style={{ gridTemplateColumns: `max-content repeat(${WEEKS}, minmax(0, 1fr))`, gap: '3px' }}>
+        {/* 周标签列 */}
+        <div className="grid" style={{ gridTemplateRows: 'repeat(7, minmax(0, 1fr))', gap: '3px' }}>
+          {['', '一', '', '三', '', '五', '', '日'].map((d, i) => (
+            <div key={i} className="flex items-center text-[9px] leading-none text-gray-400">{d}</div>
           ))}
         </div>
+        {/* 53 列格子 */}
         {weeks.map((week, wi) => (
-          <div key={wi} className="flex flex-col gap-[3px]">
+          <div key={wi} className="grid" style={{ gridTemplateRows: 'repeat(7, minmax(0, 1fr))', gap: '3px' }}>
             {week.map((day, di) => {
               const level = day.future ? -1 : levelOf(day.count, thresholds)
               return (
                 <div
                   key={di}
-                  className={`h-3 w-3 rounded-sm ${day.future ? 'opacity-0' : HEAT_COLORS[level]}`}
+                  className={`aspect-square w-full rounded-[3px] ${day.future ? 'opacity-0' : HEAT_COLORS[level]}`}
                   onMouseEnter={e => {
                     if (day.future) return
                     const rect = e.currentTarget.getBoundingClientRect()
