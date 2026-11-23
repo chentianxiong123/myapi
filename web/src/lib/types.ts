@@ -1,3 +1,24 @@
+// Provider（学cpa 的 openai-compatibility 结构）
+export interface Provider {
+  name: string
+  base_url: string
+  disabled: boolean
+  headers: Record<string, string>
+  keys: Array<{ 'api-key': string }>
+  models: Array<{ name: string; alias?: string }>
+}
+
+// 对外暴露的模型（按 alias 分组）
+export interface ExposedModel {
+  alias: string
+  providers: Array<{
+    provider_name: string
+    real_name: string
+    weight: number
+  }>
+}
+
+// 统计
 export interface StatsSummary {
   total_requests: number
   success_count: number

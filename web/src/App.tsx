@@ -2,13 +2,15 @@ import { useState } from 'react'
 import { LayoutDashboard, List, ScrollText, Settings, Server } from 'lucide-react'
 import Dashboard from './pages/Dashboard'
 import Config from './pages/Config'
+import Providers from './pages/Providers'
+import Models from './pages/Models'
 import Toast from './components/Toast'
 
 const tabs = [
   { id: 'dashboard', label: '仪表盘', icon: LayoutDashboard },
   { id: 'models', label: '模型', icon: List },
-  { id: 'logs', label: '日志', icon: ScrollText },
   { id: 'providers', label: 'Provider', icon: Server },
+  { id: 'logs', label: '日志', icon: ScrollText },
   { id: 'config', label: '配置', icon: Settings },
 ]
 
@@ -43,9 +45,9 @@ export default function App() {
       </header>
       <main className="p-6">
         {tab === 'dashboard' && <Dashboard />}
-        {tab === 'models' && <div className="text-gray-500">模型页（待开发）</div>}
+        {tab === 'models' && <Models />}
+        {tab === 'providers' && <Providers />}
         {tab === 'logs' && <div className="text-gray-500">日志页（待开发）</div>}
-        {tab === 'providers' && <div className="text-gray-500">Provider 页（待开发）</div>}
         {tab === 'config' && <Config />}
       </main>
     </div>
