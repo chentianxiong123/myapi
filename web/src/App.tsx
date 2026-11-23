@@ -5,7 +5,6 @@ import Providers from './pages/Providers'
 import Models from './pages/Models'
 import Logs from './pages/Logs'
 import Sync from './pages/Sync'
-import Endpoints from './pages/Endpoints'
 import SettingsPage from './pages/Settings'
 import Sidebar from './components/Sidebar'
 import Toast from './components/Toast'
@@ -21,7 +20,6 @@ export default function App() {
         {tab === 'dashboard' && <Dashboard />}
         {tab === 'models' && <Models />}
         {tab === 'providers' && <Providers />}
-        {tab === 'endpoints' && <Endpoints />}
         {tab === 'logs' && <Logs />}
         {tab === 'sync' && <Sync />}
         {tab === 'config' && <Config />}

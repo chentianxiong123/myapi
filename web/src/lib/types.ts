@@ -2,6 +2,7 @@
 export interface Provider {
   name: string
   base_url: string
+  protocol: 'openai' | 'anthropic' | 'gemini' | 'ollama'   // wire_api（学 cc-switch）
   disabled: boolean
   headers: Record<string, string>
   keys: Array<{ 'api-key': string }>

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Plus, Trash2, ChevronDown, ChevronRight, Key } from 'lucide-react'
+import { Plus, Trash2, ChevronDown, ChevronRight, Key, Globe } from 'lucide-react'
 import { toast } from '@/components/Toast'
 import StatusBar from '@/components/StatusBar'
 import { postJSON } from '@/lib/api'
@@ -25,6 +25,7 @@ export default function Providers() {
         {
           name: 'agnes',
           base_url: 'https://apihub.agnes-ai.com/v1',
+          protocol: 'openai',
           disabled: false,
           headers: { 'User-Agent': 'opencode/1.18.30' },
           keys: [{ 'api-key': 'sk-xxx' }, { 'api-key': 'sk-yyy' }, { 'api-key': 'sk-zzz' }],
@@ -36,6 +37,7 @@ export default function Providers() {
         {
           name: 'SenseNova',
           base_url: 'https://token.sensenova.cn/v1',
+          protocol: 'openai',
           disabled: false,
           headers: { 'User-Agent': 'opencode/1.18.30' },
           keys: [{ 'api-key': 'sk-xxx' }, { 'api-key': 'sk-yyy' }, { 'api-key': 'sk-zzz' }],
@@ -50,6 +52,7 @@ export default function Providers() {
         {
           name: 'pie-xian',
           base_url: 'https://api.pie-xian.com/v1',
+          protocol: 'openai',
           disabled: false,
           headers: { 'User-Agent': 'opencode/1.18.30' },
           keys: [{ 'api-key': 'sk-xxx' }],
@@ -81,6 +84,7 @@ export default function Providers() {
     setProviders([...providers, {
       name: '',
       base_url: '',
+      protocol: 'openai',
       disabled: false,
       headers: { 'User-Agent': 'opencode/1.18.30' },
       keys: [],
@@ -179,6 +183,7 @@ export default function Providers() {
               placeholder="https://api.example.com/v1"
               className="flex-1 rounded border border-gray-300 px-2 py-1 text-sm dark:border-gray-600 dark:bg-gray-700"
             />
+            <span className="rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-600 dark:bg-blue-900/20">{p.protocol}</span>
             <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500 dark:bg-gray-700">
               {p.keys.length} keys · {p.models.length} models
             </span>
@@ -190,6 +195,21 @@ export default function Providers() {
           {/* 展开内容 */}
           {expanded.has(idx) && (
             <div className="border-t border-gray-200 p-4 dark:border-gray-700">
+              {/* 协议（wire_api，学 cc-switch Codex responses） */}
+              <div className="mb-4">
+                <div className="mb-2 flex items-center gap-2">
+                  <Globe className="h-4 w-4 text-gray-400" />
+                  <span className="text-sm font-medium">协议（wire_api）</span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {['openai', 'anthropic', 'gemini', 'ollama'].map(proto => (
+                    <button key={proto} onClick={() => updateProvider(idx, 'protocol', proto)}
+                      className={`rounded-lg px-3 py-1.5 text-sm ${p.protocol === proto ? 'bg-blue-600 text-white' : 'border border-gray-300 dark:border-gray-600'}`}>
+                      {proto}
+                    </button>
+                  ))}
+                </div>
+              </div>
               {/* Keys */}
               <div className="mb-4">
                 <div className="mb-2 flex items-center gap-2">
