@@ -1,0 +1,16 @@
+import type { StatsSummary, ProviderStat, RequestLog, TrendPoint } from './types'
+
+const BASE = ''
+
+export async function fetchJSON<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`)
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return res.json()
+}
+
+export const api = {
+  getStats: () => fetchJSON<StatsSummary>('/stats/summary'),
+  getProviderStats: () => fetchJSON<ProviderStat[]>('/stats/providers'),
+  getRequestLogs: (limit = 100) => fetchJSON<RequestLog[]>(`/api/logs?limit=${limit}`),
+  getTrend: (hours = 24) => fetchJSON<TrendPoint[]>(`/stats/trend?hours=${hours}`),
+}

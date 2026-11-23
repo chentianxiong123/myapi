@@ -1,29 +1,27 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
+# Rust
+target/
+*.db
+*.db-wal
+*.db-shm
 
-# 本地真实配置（含 base_url/api_key，不进仓库）
+# Node
+node_modules/
+dist/
+.vite/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 配置（真实值不进仓库）
 config/cpa-config.yaml
 config/gateway.yaml
 
-# 调试/临时
-_forensics/
+# 备份
+*.bak
 *.bak.*
-*.db-shm
-*.db-wal
-*.tmp
-
-# 编辑器
-.idea/
-.vscode/
-*.swp
-
-# 发行产物
-dist/
-build/
-
-# 基准脚本产物
-/target/bench-result.json
