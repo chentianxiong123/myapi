@@ -9,12 +9,14 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "clsx": "^2.1.1",
     "i18next": "^27.2.4",
     "lucide-react": "^0.300.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-i18next": "^18.0.3",
-    "recharts": "^2.10.0"
+    "recharts": "^2.10.0",
+    "tailwind-merge": "^3.7.1"
   },
   "devDependencies": {
     "@types/react": "^18.2.0",
