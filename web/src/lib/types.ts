@@ -1,13 +1,23 @@
 // Provider（学cpa 的 openai-compatibility 结构）
+export type ModelProtocol = 'openai_chat' | 'openai_responses' | 'anthropic' | 'gemini' | 'ollama'
+
+// Provider（学cpa 的 openai-compatibility 结构）
 export interface Provider {
   name: string
   base_url: string
-  protocol: 'openai' | 'anthropic' | 'gemini' | 'ollama'   // wire_api（学 cc-switch）
   disabled: boolean
   headers: Record<string, string>
   keys: Array<{ 'api-key': string }>
-  models: Array<{ name: string; alias?: string }>
+  models: Array<{ name: string; alias?: string; protocol?: ModelProtocol }>
 }
+
+export const MODEL_PROTOCOLS: Array<{ id: ModelProtocol; label: string; path: string }> = [
+  { id: 'openai_chat', label: 'OpenAI Chat', path: '/v1/chat/completions' },
+  { id: 'openai_responses', label: 'OpenAI Responses', path: '/v1/responses' },
+  { id: 'anthropic', label: 'Anthropic Messages', path: '/v1/messages' },
+  { id: 'gemini', label: 'Gemini', path: '/v1beta/models' },
+  { id: 'ollama', label: 'Ollama', path: '/api/chat' },
+]
 
 // 对外暴露的模型（按 alias 分组）
 export interface ExposedModel {
