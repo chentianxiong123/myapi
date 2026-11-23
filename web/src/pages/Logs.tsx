@@ -19,6 +19,16 @@ const COLUMNS = [
   { id: 'error', label: '错误', visible: true },
 ]
 
+// 学 new-api getColorByElapsedTime：耗时颜色分级
+function elapsedColor(ms: number): string {
+  if (ms <= 0) return 'text-gray-400'
+  if (ms < 1000) return 'text-green-600'
+  if (ms < 3000) return 'text-yellow-700'
+  if (ms < 5000) return 'text-yellow-600'
+  if (ms < 10000) return 'text-orange-500'
+  return 'text-red-600'
+}
+
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
@@ -127,14 +137,16 @@ export default function Logs() {
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-gray-500">{formatTime(log.timestamp)}</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{log.model}</td>
                 <td className="whitespace-nowrap px-3 py-2">{log.provider}</td>
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{log.ttft_ms > 0 ? `${log.ttft_ms}ms` : '-'}</td>
+                <td className={`whitespace-nowrap px-3 py-2 font-mono text-xs ${elapsedColor(log.ttft_ms)}`}>{log.ttft_ms > 0 ? `${log.ttft_ms}ms` : '-'}</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{formatTokens(log.fresh_input_tokens)}</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{formatTokens(log.output_tokens)}</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-purple-600">{formatTokens(log.cache_read_tokens)}</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-indigo-600">{formatTokens(log.cache_creation_tokens)}</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{(log.cache_hit_rate * 100).toFixed(1)}%</td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{log.output_speed_tps.toFixed(0)} t/s</td>
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{log.duration_s.toFixed(1)}s</td>
+                <td className={`whitespace-nowrap px-3 py-2 font-mono text-xs ${elapsedColor(log.latency_ms)}`}>
+                  {log.duration_s.toFixed(1)}s{log.is_stream && <span className="ml-1 rounded bg-pink-100 px-1 text-[9px] text-pink-600 dark:bg-pink-900/30">Stream</span>}
+                </td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{log.status_code}</td>
                 <td className="whitespace-nowrap px-3 py-2">
                   {log.error ? (

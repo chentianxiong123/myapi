@@ -14,10 +14,20 @@ function formatCost(n: number) {
   return `$${n.toFixed(6)}`
 }
 
+// 学 new-api getColorByElapsedTime：耗时颜色分级
+function elapsedColor(ms: number): string {
+  if (ms <= 0) return 'text-gray-400'
+  if (ms < 1000) return 'text-green-600'
+  if (ms < 3000) return 'text-yellow-700'
+  if (ms < 5000) return 'text-yellow-600'
+  if (ms < 10000) return 'text-orange-500'
+  return 'text-red-600'
+}
+
 export default function RequestDetailPanel({ log, onClose }: Props) {
   if (!log) return null
 
-  const rows: Array<{ label: string; value: string; mono?: boolean }> = [
+  const rows: Array<{ label: string; value: string; mono?: boolean; color?: string }> = [
     { label: 'Request ID', value: log.id, mono: true },
     { label: '时间', value: new Date(log.timestamp).toLocaleString('zh-CN') },
     { label: '模型', value: log.model, mono: true },
@@ -33,8 +43,8 @@ export default function RequestDetailPanel({ log, onClose }: Props) {
     { label: '缓存命中率', value: `${(log.cache_hit_rate * 100).toFixed(1)}%` },
     { label: '真实总 Tokens', value: formatTokens(log.real_total_tokens) },
     { label: '', value: '' },
-    { label: '首字时间', value: `${log.ttft_ms}ms` },
-    { label: '总时长', value: `${log.duration_s.toFixed(1)}s` },
+    { label: '首字时间', value: `${log.ttft_ms}ms`, color: elapsedColor(log.ttft_ms) },
+    { label: '总时长', value: `${log.duration_s.toFixed(1)}s`, color: elapsedColor(log.latency_ms) },
     { label: '输出速度', value: `${log.output_speed_tps.toFixed(0)} tok/s` },
     { label: '', value: '' },
     { label: '状态码', value: String(log.status_code) },
@@ -55,7 +65,7 @@ export default function RequestDetailPanel({ log, onClose }: Props) {
           row.label ? (
             <div key={i} className="mb-3">
               <div className="text-xs text-gray-400">{row.label}</div>
-              <div className={`mt-0.5 text-sm ${row.mono ? 'font-mono' : ''} flex items-center gap-1`}>
+              <div className={`mt-0.5 text-sm ${row.mono ? 'font-mono' : ''} ${row.color || ''} flex items-center gap-1`}>
                 <span className="break-all">{row.value}</span>
                 {row.mono && (
                   <button onClick={() => navigator.clipboard.writeText(row.value)} className="text-gray-300 hover:text-gray-500">
