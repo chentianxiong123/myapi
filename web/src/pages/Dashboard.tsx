@@ -5,6 +5,7 @@ import StatsHero from '@/components/StatsHero'
 import TrendChart from '@/components/TrendChart'
 import ProviderStats from '@/components/ProviderStats'
 import RequestLogs from '@/components/RequestLogs'
+import Heatmap from '@/components/Heatmap'
 import DateRangePicker, { type RangeSelection, getRangeDates } from '@/components/DateRangePicker'
 
 type Tab = 'logs' | 'providers' | 'models'
@@ -110,7 +111,11 @@ export default function Dashboard() {
       <StatsHero stats={stats} loading={loading} />
 
       {/* 趋势图 */}
-      <TrendChart data={trend} loading={loading} />
+      {range.preset === 'all' ? (
+        <Heatmap data={trend.map(t => ({ date: t.time, requests: t.requests, tokens: t.input_tokens }))} loading={loading} />
+      ) : (
+        <TrendChart data={trend} loading={loading} />
+      )}
 
       {/* Tab 切换（学cc-switch PageTabs） */}
       <div className="flex gap-1 rounded-lg bg-gray-100 p-1 dark:bg-gray-700">
