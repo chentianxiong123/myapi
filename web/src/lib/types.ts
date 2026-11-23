@@ -205,3 +205,19 @@ export interface SqliteSync {
   intervalSec: number     // 同步间隔（秒）
   lastSync: string        // 上次同步时间
 }
+
+// API 密钥管理（学 new-api Token：给各 agent 发 key）
+export interface ApiToken {
+  id: string
+  name: string            // 用途名（如 pi / opencode / codex）
+  key: string             // 密钥（sk-xxx）
+  status: 'enabled' | 'disabled'
+  unlimited_quota: boolean
+  remain_quota: number    // 剩余额度（tokens）
+  expired_time: string    // 过期时间（'' = 永不过期）
+  models: string[]        // 允许的模型（空=全部）
+  ip_limit: string        // IP 限制（空=不限）
+  created_at: string
+  last_used_at: string    // 最后使用
+  total_requests: number  // 累计请求
+}

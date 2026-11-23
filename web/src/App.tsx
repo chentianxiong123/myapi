@@ -5,6 +5,7 @@ import Providers from './pages/Providers'
 import Models from './pages/Models'
 import Logs from './pages/Logs'
 import Sync from './pages/Sync'
+import Tokens from './pages/Tokens'
 import Deploy from './pages/Deploy'
 import SettingsPage from './pages/Settings'
 import Sidebar from './components/Sidebar'
@@ -20,6 +21,7 @@ export default function App() {
         <Toast />
         {tab === 'dashboard' && <Dashboard />}
         {tab === 'models' && <Models />}
+        {tab === 'tokens' && <Tokens />}
         {tab === 'providers' && <Providers />}
         {tab === 'logs' && <Logs />}
         {tab === 'sync' && <Sync />}
