@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { LayoutDashboard, List, ScrollText, Settings, Server } from 'lucide-react'
 import Dashboard from './pages/Dashboard'
+import Logs from './pages/Logs'
 import Config from './pages/Config'
 import Providers from './pages/Providers'
 import Models from './pages/Models'
@@ -47,7 +48,7 @@ export default function App() {
         {tab === 'dashboard' && <Dashboard />}
         {tab === 'models' && <Models />}
         {tab === 'providers' && <Providers />}
-        {tab === 'logs' && <div className="text-gray-500">日志页（待开发）</div>}
+        {tab === 'logs' && <Logs />}
         {tab === 'config' && <Config />}
       </main>
     </div>
