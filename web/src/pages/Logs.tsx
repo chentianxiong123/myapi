@@ -20,6 +20,9 @@ export default function Logs() {
   const [columns, setColumns] = useState<RequestLogColumnId[]>(() => resolveRequestLogColumns(undefined))
   const [colOverrides, setColOverrides] = useState<Record<string, boolean>>({})
   const [openMenu, setOpenMenu] = useState<'status' | 'columns' | null>(null)
+  // 分页（学 sub2api Pagination）
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(50)
 
   useEffect(() => { loadLogs() }, [limit])
 
@@ -50,6 +53,31 @@ export default function Logs() {
     const next = setRequestLogColumn(colOverrides, id, !columns.includes(id))
     setColOverrides(next)
     setColumns(resolveRequestLogColumns(next))
+  }
+
+  // 分页计算（学 sub2api Pagination）
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize))
+  const paginated = filtered.slice((page - 1) * pageSize, page * pageSize)
+
+  function visiblePages(): Array<number | string> {
+    const pages: Array<number | string> = []
+    const maxVisible = 7
+    if (totalPages <= maxVisible) {
+      for (let i = 1; i <= totalPages; i++) pages.push(i)
+    } else {
+      pages.push(1)
+      const start = Math.max(2, page - 2)
+      const end = Math.min(totalPages - 1, page + 2)
+      if (start > 2) pages.push('...')
+      for (let i = start; i <= end; i++) pages.push(i)
+      if (end < totalPages - 1) pages.push('...')
+      pages.push(totalPages)
+    }
+    return pages
+  }
+
+  function goToPage(p: number) {
+    if (p >= 1 && p <= totalPages && p !== page) setPage(p)
   }
 
   const statusLabel = filterStatus === undefined ? '全部状态码' : String(filterStatus)
@@ -148,7 +176,36 @@ export default function Logs() {
         <span className="ml-auto text-xs text-gray-400">显示 {filtered.length} / {logs.length} 条</span>
       </div>
 
-      <RequestLogTable logs={filtered} loading={loading} columns={columns} />
+      <RequestLogTable logs={paginated} loading={loading} columns={columns} />
+
+      {/* 分页（学 sub2api Pagination） */}
+      <div className="flex flex-wrap items-center justify-between rounded-xl border border-gray-200 bg-white px-4 py-3 dark:border-gray-700 dark:bg-gray-800">
+        <div className="flex items-center gap-2 text-xs text-gray-400">
+          <span>共 {filtered.length} 条</span>
+          <select value={pageSize} onChange={e => { setPageSize(parseInt(e.target.value)); setPage(1) }}
+            className="rounded border border-gray-300 px-1 py-0.5 text-xs dark:border-gray-600 dark:bg-gray-700">
+            <option value={20}>20 条/页</option>
+            <option value={50}>50 条/页</option>
+            <option value={100}>100 条/页</option>
+          </select>
+        </div>
+        <nav className="flex items-center gap-1">
+          <button onClick={() => goToPage(page - 1)} disabled={page === 1}
+            className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-500 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:hover:bg-gray-700">‹</button>
+          {visiblePages().map((p, i) => (
+            typeof p === 'number' ? (
+              <button key={i} onClick={() => goToPage(p)}
+                className={`rounded-md border px-3 py-1 text-xs ${p === page ? 'border-blue-600 bg-blue-50 font-semibold text-blue-600 dark:bg-blue-900/30' : 'border-gray-300 text-gray-600 hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700'}`}>
+                {p}
+              </button>
+            ) : (
+              <span key={i} className="px-1 text-xs text-gray-400">…</span>
+            )
+          ))}
+          <button onClick={() => goToPage(page + 1)} disabled={page === totalPages}
+            className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-500 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:hover:bg-gray-700">›</button>
+        </nav>
+      </div>
     </div>
   )
 }
