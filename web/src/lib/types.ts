@@ -176,25 +176,32 @@ export const PROTOCOL_LABELS: Record<EndpointProtocol, string> = {
 }
 
 // 部署/水平扩展（学 new-api 主从 + Redis 多实例）
+// 部署/主备高可用（学 cpa-sync-nginx：客户端固定入口 + Nginx 多 upstream 故障切换）
 export interface DeployInstance {
   id: string
   name: string            // 实例名
-  nodeType: 'master' | 'slave'   // 主/从（学 new-api NODE_TYPE）
-  port: number            // 监听端口
+  role: 'master' | 'backup'   // 主/备（Nginx upstream backup）
+  address: string         // 实例地址（host:port）
+  region: string          // 位置（手机/win11/pve）
   status: 'running' | 'stopped' | 'degraded'
-  address: string         // 实例地址（IP:port）
-  region: string          // 区域/机房
   cpu: number             // CPU 使用率 %
   mem: number             // 内存使用率 %
   requests: number        // 请求数
-  syncFrequency: number   // SYNC_FREQUENCY（秒）
-  frontendBaseUrl: string // FRONTEND_BASE_URL
-  redisConn: string       // REDIS_CONN_STRING
-  sqlDsn: string          // SQL_DSN
+  heartbeatMs: number     // 心跳间隔（Nginx 健康检查）
+  sqlitePath: string      // SQLite 文件路径（本地库）
 }
 
-export interface SharedStorage {
-  redis: { enabled: boolean; conn: string; cluster: boolean }
-  db: { enabled: boolean; dsn: string; type: 'sqlite' | 'mysql' | 'postgres' }
-  syncFrequency: number
+export interface GatewayEntry {
+  listen: number          // 客户端认的固定入口（Nginx listen）
+  readTimeout: number     // proxy_read_timeout
+  nextUpstream: string    // proxy_next_upstream 故障切换策略
+}
+
+export interface SqliteSync {
+  enabled: boolean
+  sourcePath: string      // 主节点 SQLite 路径
+  targetHost: string      // 备用节点主机（scp 同步目标）
+  targetPath: string      // 备用节点 SQLite 路径
+  intervalSec: number     // 同步间隔（秒）
+  lastSync: string        // 上次同步时间
 }
