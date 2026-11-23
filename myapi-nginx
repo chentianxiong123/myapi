@@ -11,8 +11,8 @@ case "${1:-install}" in
   install)
     PY="$ROOT/.venv/bin/python"
     [ -x "$PY" ] || { echo "✗ 缺 .venv：python3 -m venv .venv && .venv/bin/pip install PyYAML" >&2; exit 1; }
-    "$PY" "$ROOT/scripts/render_gateway.py" --output /tmp/cpa-nginx.conf
-    sudo cp /tmp/cpa-nginx.conf "$DEST"
+    "$PY" "$ROOT/scripts/render_gateway.py" --output /tmp/myapi-nginx.conf
+    sudo cp /tmp/myapi-nginx.conf "$DEST"
     # 精简：同步低频场景 1 个 worker 够；master_process off 单进程直接服务
     sudo sed -i -E 's/^[[:space:]]*worker_processes[[:space:]]+.*;/worker_processes 1;/' /etc/nginx/nginx.conf
     if ! grep -qE '^[[:space:]]*master_process[[:space:]]+off;' /etc/nginx/nginx.conf; then
