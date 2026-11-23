@@ -1,4 +1,4 @@
-import { Activity, Zap, AlertTriangle, Server, Coins, Database, ArrowDownToLine, ArrowUpFromLine, Gauge } from 'lucide-react'
+import { Activity, Zap, AlertTriangle, Server, Layers, Database, ArrowDownToLine, ArrowUpFromLine } from 'lucide-react'
 import type { StatsSummary } from '@/lib/types'
 
 interface Props {
@@ -42,10 +42,10 @@ export default function StatsHero({ stats, loading }: Props) {
       color: 'text-blue-600 bg-blue-50 dark:bg-blue-900/20',
     },
     {
-      label: '总成本',
-      sub: '累计',
-      icon: Coins,
-      color: 'text-yellow-600 bg-yellow-50 dark:bg-yellow-900/20',
+      label: '总 Tokens',
+      sub: '含缓存',
+      icon: Layers,
+      color: 'text-violet-600 bg-violet-50 dark:bg-violet-900/20',
     },
     {
       label: '输入 Tokens',

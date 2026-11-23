@@ -58,12 +58,10 @@ export default function Logs() {
     return true
   })
 
+  // 学 new-api timestamp2string：YYYY-MM-DD HH:mm:ss
   function formatTime(ts: string) {
     const d = new Date(ts)
-    const now = new Date()
-    const clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
-    if (d.toDateString() === now.toDateString()) return clock
-    return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${clock}`
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
   }
 
   const visibleCols = COLUMNS.filter(c => c.visible)
