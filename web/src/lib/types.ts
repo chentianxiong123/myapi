@@ -115,3 +115,16 @@ export interface SyncTarget {
   adapter: string
   instances: AdapterInstance[]
 }
+
+export interface HostFull {
+  name: string
+  host: string           // IP 或 hostname
+  port: number           // SSH 端口（默认 22）
+  user: string           // SSH 用户名
+  auth_type: 'key' | 'password'
+  key_path: string       // SSH 密钥路径
+  password: string       // 密码（可选）
+  ssh_alias: string      // ~/.ssh/config 里的别名
+  platform: 'win' | 'unix' | 'macos'
+  notes: string          // 备注
+}
