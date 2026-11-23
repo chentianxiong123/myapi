@@ -3,8 +3,8 @@ import { Plus, Trash2, ChevronDown, ChevronRight, Key, Layers, Globe, Zap, Refre
 import { toast } from '@/components/Toast'
 import StatusBar from '@/components/StatusBar'
 import { postJSON } from '@/lib/api'
-import type { Provider, ModelProtocol } from '@/lib/types'
-import { MODEL_PROTOCOLS } from '@/lib/types'
+import type { Provider, ModelProtocol, ProxyPool } from '@/lib/types'
+import { MODEL_PROTOCOLS, PROXY_STRATEGIES } from '@/lib/types'
 
 export default function Providers() {
   const [providers, setProviders] = useState<Provider[]>([])
@@ -12,11 +12,27 @@ export default function Providers() {
   const [activeProtocol, setActiveProtocol] = useState<Record<number, ModelProtocol>>({})
   const [busy, setBusy] = useState(false)
   const [testingKeys, setTestingKeys] = useState<Set<string>>(new Set())
+  const [proxyPools, setProxyPools] = useState<ProxyPool[]>([])
   const [testResults, setTestResults] = useState<Map<string, 'ok' | 'fail'>>(new Map())
 
   useEffect(() => {
     loadProviders()
+    loadProxyPools()
   }, [])
+
+  async function loadProxyPools() {
+    try {
+      const res = await fetch('/api/proxypools')
+      const data = await res.json()
+      setProxyPools(data.pools || [])
+    } catch {
+      // 示例池（学 9router proxyPools）
+      setProxyPools([
+        { id: 'p-1', name: '家里 Clash', proxyUrl: 'http://127.0.0.1:7890', type: 'http', isActive: true, strictProxy: false, testStatus: 'ok' },
+        { id: 'p-2', name: '服务器代理', proxyUrl: 'socks5://192.168.31.12:1080', type: 'socks5', isActive: true, strictProxy: true, testStatus: 'unknown' },
+      ])
+    }
+  }
 
   async function loadProviders() {
     try {
@@ -32,6 +48,8 @@ export default function Providers() {
           disabled: false,
           headers: { 'User-Agent': 'opencode/1.18.30' },
           proxy: '',
+          proxy_pool_id: '',
+          proxy_strategy: 'none',
           keys: [{ 'api-key': 'sk-xxx' }, { 'api-key': 'sk-yyy' }, { 'api-key': 'sk-zzz' }],
           models: [
             { name: 'agnes-2.5-flash', protocol: 'openai_chat' },
@@ -44,6 +62,8 @@ export default function Providers() {
           disabled: false,
           headers: { 'User-Agent': 'opencode/1.18.30' },
           proxy: '',
+          proxy_pool_id: '',
+          proxy_strategy: 'none',
           keys: [{ 'api-key': 'sk-xxx' }, { 'api-key': 'sk-yyy' }, { 'api-key': 'sk-zzz' }],
           models: [
             { name: 'deepseek-v4-flash', alias: 'deepseek-v4-flash', protocol: 'openai_chat' },
@@ -59,6 +79,8 @@ export default function Providers() {
           disabled: false,
           headers: { 'User-Agent': 'opencode/1.18.30' },
           proxy: '',
+          proxy_pool_id: '',
+          proxy_strategy: 'none',
           keys: [{ 'api-key': 'sk-xxx' }],
           models: [
             { name: 'agnes-2.5-flash', alias: 'agnes-3.0-flash', protocol: 'anthropic' },
@@ -86,7 +108,7 @@ export default function Providers() {
   }
 
   function addProvider() {
-    setProviders([...providers, { name: '', base_url: '', disabled: false, headers: { 'User-Agent': 'opencode/1.18.30' }, keys: [{ 'api-key': '' }], models: [], proxy: '' }])
+    setProviders([...providers, { name: '', base_url: '', disabled: false, headers: { 'User-Agent': 'opencode/1.18.30' }, keys: [{ 'api-key': '' }], models: [], proxy: '', proxy_pool_id: '', proxy_strategy: 'none' }])
   }
 
   function removeProvider(idx: number) {
@@ -261,23 +283,47 @@ export default function Providers() {
                   </div>
                 </div>
 
-                {/* 渠道级别代理（每个 Provider 可单独走代理；空=直连/全局代理） */}
+                {/* 渠道级别代理 + 代理池（学 9router：Provider 引用池 + 策略）*/}
                 <div className="mb-4">
                   <div className="mb-2 flex items-center gap-2">
                     <Globe className="h-4 w-4 text-gray-400" />
                     <span className="text-sm font-medium">渠道代理</span>
-                    <span className="text-xs text-gray-400">该渠道调上游单独走代理（空=直连）</span>
+                    <span className="text-xs text-gray-400">直连 / 单代理 / 代理池（学 9router）</span>
                   </div>
-                  <div className="flex gap-2">
-                    <input
-                      value={p.proxy}
-                      onChange={e => updateProvider(idx, 'proxy', e.target.value)}
-                      placeholder="如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080（留空=直连）"
-                      className="flex-1 rounded border border-gray-300 px-2 py-1 font-mono text-sm dark:border-gray-600 dark:bg-gray-700"
-                    />
-                    {p.proxy && (
-                      <button onClick={() => updateProvider(idx, 'proxy', '')} className="rounded border border-gray-300 px-2 text-xs text-gray-500 hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700">清除</button>
-                    )}
+                  <div className="space-y-2">
+                    <div className="flex gap-2">
+                      <input
+                        value={p.proxy}
+                        onChange={e => updateProvider(idx, 'proxy', e.target.value)}
+                        placeholder="单代理 URL（如 http://127.0.0.1:7890，留空=不用单代理）"
+                        className="flex-1 rounded border border-gray-300 px-2 py-1 font-mono text-sm dark:border-gray-600 dark:bg-gray-700"
+                      />
+                      {p.proxy && (
+                        <button onClick={() => updateProvider(idx, 'proxy', '')} className="rounded border border-gray-300 px-2 text-xs text-gray-500 hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700">清除</button>
+                      )}
+                    </div>
+                    <div className="flex gap-2">
+                      <select
+                        value={p.proxy_pool_id}
+                        onChange={e => updateProvider(idx, 'proxy_pool_id', e.target.value)}
+                        className="flex-1 rounded border border-gray-300 px-2 py-1 text-sm dark:border-gray-600 dark:bg-gray-700"
+                      >
+                        <option value="">不使用代理池</option>
+                        {proxyPools.map(pool => (
+                          <option key={pool.id} value={pool.id}>
+                            {pool.name}（{pool.type} · {pool.testStatus === 'ok' ? '可用' : pool.testStatus === 'fail' ? '失效' : '未测'}）
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        value={p.proxy_strategy}
+                        onChange={e => updateProvider(idx, 'proxy_strategy', e.target.value)}
+                        disabled={!p.proxy_pool_id}
+                        className="w-44 rounded border border-gray-300 px-2 py-1 text-sm dark:border-gray-600 dark:bg-gray-700 disabled:opacity-50"
+                      >
+                        {PROXY_STRATEGIES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+                      </select>
+                    </div>
                   </div>
                 </div>
 

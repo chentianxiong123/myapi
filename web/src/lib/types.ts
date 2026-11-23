@@ -11,6 +11,9 @@ export interface Provider {
   models: Array<{ name: string; alias?: string; protocol?: ModelProtocol }>
   // 渠道级别代理（每个 Provider 可单独走代理；空=直连/全局代理）
   proxy: string
+  // 代理池（学 9router：引用 proxyPools 的一个池 + 选择策略；空=不用池）
+  proxy_pool_id: string
+  proxy_strategy: 'round-robin' | 'random' | 'none'
 }
 
 export const MODEL_PROTOCOLS: Array<{ id: ModelProtocol; label: string; path: string }> = [
@@ -225,3 +228,20 @@ export interface ApiToken {
   last_used_at: string    // 最后使用
   total_requests: number  // 累计请求
 }
+
+// 代理池（学 9router proxyPools：多个代理 URL + 选择策略 + 健康状态）
+export interface ProxyPool {
+  id: string
+  name: string              // 池名（如 家里 / 服务器）
+  proxyUrl: string          // 代理 URL
+  type: 'http' | 'socks5'
+  isActive: boolean
+  strictProxy: boolean      // 严格模式（池必须保证）
+  testStatus: 'unknown' | 'ok' | 'fail'
+}
+
+export const PROXY_STRATEGIES: Array<{ id: 'round-robin' | 'random' | 'none'; label: string }> = [
+  { id: 'round-robin', label: '轮流（round-robin）' },
+  { id: 'random', label: '随机（random）' },
+  { id: 'none', label: '固定第一个（none）' },
+]

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import Dashboard from './pages/Dashboard'
 import Config from './pages/Config'
 import Providers from './pages/Providers'
+import ProxyPools from './pages/ProxyPools'
 import Models from './pages/Models'
 import Logs from './pages/Logs'
 import Chat from './pages/Chat'
@@ -24,6 +25,7 @@ export default function App() {
         {tab === 'models' && <Models />}
         {tab === 'tokens' && <Tokens />}
         {tab === 'providers' && <Providers />}
+        {tab === 'proxypools' && <ProxyPools />}
         {tab === 'logs' && <Logs />}
         {tab === 'chat' && <Chat />}
         {tab === 'sync' && <Sync />}
