@@ -233,6 +233,7 @@ function generateMockLogs(count: number): RequestLog[] {
       model: models[i % models.length],
       provider: providers[i % providers.length],
       app_type: apps[i % apps.length],
+      key_name: i % 4 === 0 ? '好友:老张' : '主密钥',
       session_id: `session-${Math.floor(i / 3)}`,
       input_tokens,
       fresh_input_tokens: input_tokens - cache_read,

@@ -83,6 +83,7 @@ export default function RequestLogTable({ logs, loading, columns = DEFAULT_COLUM
 const COLUMN_LABELS: Record<RequestLogColumnId, string> = {
   time: '时间',
   app: '应用',
+  key_name: '使用者',
   provider: 'Provider',
   model: '模型',
   stream: '流',
@@ -119,6 +120,15 @@ function renderCell(id: RequestLogColumnId, log: RequestLog) {
             {log.app_type.slice(0, 1).toUpperCase()}
           </span>
           <span className="text-xs">{log.app_type}</span>
+        </div>
+      )
+    case 'key_name':
+      return (
+        <div className="flex items-center gap-1">
+          <span className="flex h-4 w-4 items-center justify-center rounded-full bg-orange-100 text-[9px] font-bold text-orange-600 dark:bg-orange-900/30">
+            {log.key_name?.includes('好友') ? '友' : '主'}
+          </span>
+          <span className={`text-xs ${log.key_name?.includes('好友') ? 'text-orange-600' : 'text-gray-500'}`}>{log.key_name || '主密钥'}</span>
         </div>
       )
     case 'provider':

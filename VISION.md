@@ -141,7 +141,12 @@ myapi/
 - [x] React 前端骨架 + Dashboard
 - [x] Config 页（Provider + 路由策略）
 - [ ] Rust 后端（axum + 路由 + 透传）
-- [ ] 统计日志（SQLite）
+- [ ] 统计日志（SQLite）—— 日志入库 schema（后端实现时遵循，字段已定）：
+  - 基础：id / timestamp / model / provider / app_type / session_id
+  - **使用者：key_name**（请求带哪个 key 入库——主密钥/好友名，区分"我的/好友"）
+  - Token：input_tokens / output_tokens / cache_read / cache_creation / real_total_tokens
+  - 延迟：ttft_ms / latency_ms / duration_s / output_speed_tps
+  - 状态：status_code / error / is_stream
 - [ ] 流式转发
 
 ### Phase 2：下发器回归

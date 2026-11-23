@@ -5,6 +5,7 @@
 export const REQUEST_LOG_COLUMNS = [
   { id: 'time', label: '时间', defaultVisible: true, locked: true },
   { id: 'app', label: '应用', defaultVisible: true },
+  { id: 'key_name', label: '使用者', defaultVisible: false },
   { id: 'provider', label: 'Provider', defaultVisible: true },
   { id: 'model', label: '模型', defaultVisible: true },
   { id: 'stream', label: '流', defaultVisible: true },

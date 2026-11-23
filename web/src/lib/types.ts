@@ -77,6 +77,7 @@ export interface RequestLog {
   model: string
   provider: string
   app_type: string                     // pi/opencode/claude/codex/...
+  key_name: string                      // 用的哪个 key（主密钥/好友名，区分使用者，入库字段）
   session_id: string
   // Token 数据（学 cc-switch）
   input_tokens: number                 // 输入 tokens（原始）
