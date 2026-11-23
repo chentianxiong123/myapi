@@ -128,3 +128,13 @@ export interface HostFull {
   platform: 'win' | 'unix' | 'macos'
   notes: string          // 备注
 }
+
+export interface DailyPoint {
+  date: string       // YYYY-MM-DD
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+  total_tokens: number
+}

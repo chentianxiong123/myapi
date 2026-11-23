@@ -1,4 +1,4 @@
-import type { StatsSummary, ProviderStat, RequestLog, TrendPoint } from './types'
+import type { StatsSummary, ProviderStat, RequestLog, TrendPoint, DailyPoint } from './types'
 
 const BASE = ''
 
@@ -23,4 +23,5 @@ export const api = {
   getProviderStats: () => fetchJSON<ProviderStat[]>('/stats/providers'),
   getRequestLogs: (limit = 100) => fetchJSON<RequestLog[]>(`/api/logs?limit=${limit}`),
   getTrend: (hours = 24) => fetchJSON<TrendPoint[]>(`/stats/trend?hours=${hours}`),
+  getDaily: (days = 371) => fetchJSON<DailyPoint[]>(`/stats/daily?days=${days}`),
 }

@@ -1,10 +1,19 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 
 const WEEKS = 53
 
 interface HeatmapProps {
   data: Array<{ date: string; requests: number; tokens: number }>
   loading?: boolean
+}
+
+interface HoverState {
+  date: Date
+  requests: number
+  tokens: number
+  future: boolean
+  x: number
+  y: number
 }
 
 function dayKey(date: Date): string {
@@ -26,15 +35,18 @@ function levelOf(value: number, max: number): number {
   return 4
 }
 
+// GitHub 贡献图绿格配色（5 级，0 = 空）
 const HEAT_COLORS = [
-  'bg-gray-100 dark:bg-gray-800',
-  'bg-blue-100 dark:bg-blue-900/40',
-  'bg-blue-200 dark:bg-blue-800/60',
-  'bg-blue-400 dark:bg-blue-600',
-  'bg-blue-600 dark:bg-blue-400',
+  'bg-gray-100 dark:bg-gray-700/50',
+  'bg-green-100 dark:bg-green-900/40',
+  'bg-green-300 dark:bg-green-800/70',
+  'bg-green-500 dark:bg-green-600',
+  'bg-green-700 dark:bg-green-500',
 ]
 
 export default function Heatmap({ data, loading }: HeatmapProps) {
+  const [hover, setHover] = useState<HoverState | null>(null)
+
   const byDay = useMemo(() => {
     const map = new Map<string, { requests: number; tokens: number }>()
     data.forEach(d => map.set(d.date, { requests: d.requests, tokens: d.tokens }))
@@ -49,15 +61,15 @@ export default function Heatmap({ data, loading }: HeatmapProps) {
     const thisMonday = addDays(today, -weekday)
     const firstDay = addDays(thisMonday, -(WEEKS - 1) * 7)
 
-    const result: Array<Array<{ date: Date; count: number; future: boolean }>> = []
+    const result: Array<Array<{ date: Date; count: number; tokens: number; future: boolean }>> = []
     let current = new Date(firstDay)
     for (let w = 0; w < WEEKS; w++) {
-      const week: Array<{ date: Date; count: number; future: boolean }> = []
+      const week: Array<{ date: Date; count: number; tokens: number; future: boolean }> = []
       for (let d = 0; d < 7; d++) {
         const date = new Date(current)
         const isFuture = date.getTime() > today.getTime()
         const stat = byDay.get(dayKey(date))
-        week.push({ date: new Date(date), count: stat?.requests || 0, future: isFuture })
+        week.push({ date: new Date(date), count: stat?.requests || 0, tokens: stat?.tokens || 0, future: isFuture })
         current = addDays(current, 1)
       }
       result.push(week)
@@ -65,21 +77,32 @@ export default function Heatmap({ data, loading }: HeatmapProps) {
     return result
   }, [byDay])
 
+  const totalRequests = useMemo(() => weeks.flat().filter(c => !c.future).reduce((s, c) => s + c.count, 0), [weeks])
+  const totalTokens = useMemo(() => weeks.flat().filter(c => !c.future).reduce((s, c) => s + c.tokens, 0), [weeks])
+
   if (loading) {
     return <div className="h-32 animate-pulse rounded-xl bg-gray-200 dark:bg-gray-700" />
   }
 
+  // 汇总头：日期范围 + 总量
+  const firstDay = weeks[0]?.[0]?.date
+  const lastDay = weeks[WEEKS - 1]?.[0]?.date
+  const fmtDate = (d?: Date) => d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : ''
+
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
-      <div className="mb-4 flex items-center justify-between">
-        <h3 className="text-sm font-semibold">使用热力图（过去 53 周）</h3>
-        <div className="flex items-center gap-1 text-xs text-gray-400">
-          <span>少</span>
-          {HEAT_COLORS.map((c, i) => (
-            <div key={i} className={`h-3 w-3 rounded-sm ${c}`} />
-          ))}
-          <span>多</span>
+    <div className="relative rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
+      {/* 头部 */}
+      <div className="mb-1 flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-semibold">使用热力图</h3>
+          <p className="text-xs text-gray-400">过去 53 周的每日用量，颜色深浅可直接对比</p>
         </div>
+      </div>
+
+      {/* 汇总行：日期范围 + 总量 */}
+      <div className="mb-3 flex items-baseline gap-3">
+        <span className="text-sm font-semibold tabular-nums">{fmtDate(firstDay)} – {fmtDate(lastDay)}</span>
+        <span className="text-xs text-gray-400 tabular-nums">{totalTokens.toLocaleString()} Tokens · {totalRequests.toLocaleString()} 次请求</span>
       </div>
 
       {/* 月份标签 */}
@@ -95,12 +118,12 @@ export default function Heatmap({ data, loading }: HeatmapProps) {
         })}
       </div>
 
-      {/* 热力图格子 */}
+      {/* 热力图格子（GitHub 贡献图） */}
       <div className="flex gap-[3px]">
         <div className="flex flex-col gap-[3px] text-[9px] text-gray-400">
           <div className="h-3" />
           {['一', '', '三', '', '五', '', '日'].map((d, i) => (
-            <div key={i} className="h-3">{d}</div>
+            <div key={i} className="h-3 leading-3">{d}</div>
           ))}
         </div>
         {weeks.map((week, wi) => (
@@ -110,13 +133,35 @@ export default function Heatmap({ data, loading }: HeatmapProps) {
               return (
                 <div
                   key={di}
-                  className={`h-3 w-3 rounded-sm ${day.future ? 'opacity-0' : HEAT_COLORS[level + 1]}`}
-                  title={day.future ? '' : `${day.date.toLocaleDateString('zh-CN')}: ${day.count} 请求`}
+                  className={`h-3 w-3 rounded-sm ${day.future ? 'opacity-0' : HEAT_COLORS[level]}`}
+                  onMouseEnter={e => {
+                    if (day.future) return
+                    const rect = e.currentTarget.getBoundingClientRect()
+                    const parent = e.currentTarget.parentElement?.parentElement?.getBoundingClientRect()
+                    setHover({ date: day.date, requests: day.count, tokens: day.tokens, future: false, x: rect.left - (parent?.left || 0), y: rect.top - (parent?.top || 0) })
+                  }}
+                  onMouseLeave={() => setHover(null)}
                 />
               )
             })}
           </div>
         ))}
+      </div>
+
+      {/* 悬停提示 */}
+      {hover && (
+        <div className="pointer-events-none absolute z-20 rounded-md bg-gray-900 px-3 py-2 text-xs text-white shadow-lg dark:bg-gray-700"
+          style={{ left: hover.x, top: hover.y - 50, transform: 'translateX(-50%)' }}>
+          <div className="font-semibold">{hover.date.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' })}</div>
+          <div className="mt-0.5 text-gray-300">{hover.requests} 次请求 · {hover.tokens.toLocaleString()} Tokens</div>
+        </div>
+      )}
+
+      {/* 图例 */}
+      <div className="mt-2 flex items-center justify-end gap-1 text-xs text-gray-400">
+        <span>少</span>
+        {HEAT_COLORS.map((c, i) => <div key={i} className={`h-3 w-3 rounded-sm ${c}`} />)}
+        <span>多</span>
       </div>
     </div>
   )

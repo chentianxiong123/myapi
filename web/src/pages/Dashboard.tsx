@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '@/lib/api'
-import type { StatsSummary, ProviderStat, RequestLog, TrendPoint } from '@/lib/types'
+import type { StatsSummary, ProviderStat, RequestLog, TrendPoint, DailyPoint } from '@/lib/types'
 import StatsHero from '@/components/StatsHero'
 import TrendChart from '@/components/TrendChart'
 import ProviderStats from '@/components/ProviderStats'
@@ -15,6 +15,7 @@ export default function Dashboard() {
   const [providers, setProviders] = useState<ProviderStat[]>([])
   const [logs, setLogs] = useState<RequestLog[]>([])
   const [trend, setTrend] = useState<TrendPoint[]>([])
+  const [daily, setDaily] = useState<DailyPoint[]>([])
   const [loading, setLoading] = useState(true)
   const [range, setRange] = useState<RangeSelection>({ preset: '7d' })
   const [tab, setTab] = useState<Tab>('logs')
@@ -24,10 +25,10 @@ export default function Dashboard() {
   async function load() {
     setLoading(true)
     try {
-      const [s, p, l, t] = await Promise.all([
-        api.getStats(), api.getProviderStats(), api.getRequestLogs(100), api.getTrend(24),
+      const [s, p, l, t, d] = await Promise.all([
+        api.getStats(), api.getProviderStats(), api.getRequestLogs(100), api.getTrend(24), api.getDaily(371),
       ])
-      setStats(s); setProviders(p); setLogs(l); setTrend(t)
+      setStats(s); setProviders(p); setLogs(l); setTrend(t); setDaily(d)
     } catch {
       const ti = 1245000, to = 456000, tcr = 890000, tcc = 123000, tr = 1234, sc = 1205
       setStats({
@@ -96,7 +97,7 @@ export default function Dashboard() {
       </div>
       <StatsHero stats={stats} loading={loading} />
       {range.preset === 'all' ? (
-        <Heatmap data={trend.map(t => ({ date: t.time, requests: t.requests, tokens: t.input_tokens }))} loading={loading} />
+        <Heatmap data={daily.map(d => ({ date: d.date, requests: d.requests, tokens: d.total_tokens }))} loading={loading} />
       ) : (
         <TrendChart data={trend} loading={loading} />
       )}
