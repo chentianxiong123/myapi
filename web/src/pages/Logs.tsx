@@ -1,39 +1,8 @@
 import { useEffect, useState } from 'react'
-import { RefreshCw, Filter, XCircle, CheckCircle, Download } from 'lucide-react'
+import { RefreshCw, Filter, Download } from 'lucide-react'
 import type { RequestLog } from '@/lib/types'
 import { exportCSV, exportJSON } from '@/lib/export'
-
-const COLUMNS = [
-  { id: 'time', label: '时间', visible: true, locked: true },
-  { id: 'model', label: '模型', visible: true },
-  { id: 'provider', label: 'Provider', visible: true },
-  { id: 'ttft', label: '首字', visible: true },
-  { id: 'input', label: '输入', visible: true },
-  { id: 'output', label: '输出', visible: true },
-  { id: 'cache_read', label: '缓存读', visible: true },
-  { id: 'cache_write', label: '缓存写', visible: false },
-  { id: 'hit_rate', label: '命中率', visible: false },
-  { id: 'speed', label: '速度', visible: false },
-  { id: 'duration', label: '时长', visible: false },
-  { id: 'status_code', label: '状态码', visible: false },
-  { id: 'error', label: '错误', visible: true },
-]
-
-// 学 new-api getColorByElapsedTime：耗时颜色分级
-function elapsedColor(ms: number): string {
-  if (ms <= 0) return 'text-gray-400'
-  if (ms < 1000) return 'text-green-600'
-  if (ms < 3000) return 'text-yellow-700'
-  if (ms < 5000) return 'text-yellow-600'
-  if (ms < 10000) return 'text-orange-500'
-  return 'text-red-600'
-}
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-  return n.toString()
-}
+import RequestLogTable from '@/components/RequestLogTable'
 
 export default function Logs() {
   const [logs, setLogs] = useState<RequestLog[]>([])
@@ -68,26 +37,14 @@ export default function Logs() {
     return true
   })
 
-  // 学 new-api timestamp2string：YYYY-MM-DD HH:mm:ss
-  function formatTime(ts: string) {
-    const d = new Date(ts)
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
-  }
-
-  const visibleCols = COLUMNS.filter(c => c.visible)
-
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">请求日志</h2>
+        <h2 className="text-lg font-semibold">通用日志</h2>
         <div className="flex gap-2">
           <button onClick={() => exportCSV(filtered, 'request-logs')}
             className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700">
-            <Download className="h-4 w-4" />CSV
-          </button>
-          <button onClick={() => exportJSON(filtered, 'request-logs')}
-            className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700">
-            <Download className="h-4 w-4" />JSON
+            <Download className="h-4 w-4" />导出
           </button>
           <button onClick={loadLogs} disabled={refreshing}
             className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700 disabled:opacity-50">
@@ -96,15 +53,16 @@ export default function Logs() {
         </div>
       </div>
 
+      {/* 筛选栏（学 new-api 通用日志） */}
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
         <Filter className="h-4 w-4 text-gray-400" />
-        <input value={filterModel} onChange={e => setFilterModel(e.target.value)} placeholder="筛选模型..."
-          className="w-48 rounded border border-gray-300 px-2 py-1 text-sm dark:border-gray-600 dark:bg-gray-700" />
-        <input value={filterProvider} onChange={e => setFilterProvider(e.target.value)} placeholder="筛选 Provider..."
-          className="w-40 rounded border border-gray-300 px-2 py-1 text-sm dark:border-gray-600 dark:bg-gray-700" />
+        <input value={filterModel} onChange={e => setFilterModel(e.target.value)} placeholder="模型名称..."
+          className="w-44 rounded border border-gray-300 px-2 py-1 text-sm dark:border-gray-600 dark:bg-gray-700" />
+        <input value={filterProvider} onChange={e => setFilterProvider(e.target.value)} placeholder="渠道..."
+          className="w-36 rounded border border-gray-300 px-2 py-1 text-sm dark:border-gray-600 dark:bg-gray-700" />
         <select value={filterError} onChange={e => setFilterError(e.target.value as any)}
           className="rounded border border-gray-300 px-2 py-1 text-sm dark:border-gray-600 dark:bg-gray-700">
-          <option value="all">全部状态</option>
+          <option value="all">所有类型</option>
           <option value="success">成功</option>
           <option value="error">错误</option>
         </select>
@@ -118,48 +76,7 @@ export default function Logs() {
         <span className="ml-auto text-xs text-gray-400">显示 {filtered.length} / {logs.length} 条</span>
       </div>
 
-      <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
-        <table className="w-full text-left text-sm">
-          <thead>
-            <tr className="border-b border-gray-200 dark:border-gray-700">
-              {visibleCols.map(col => (
-                <th key={col.id} className="whitespace-nowrap px-3 py-3 font-medium text-gray-500 dark:text-gray-400">{col.label}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <tr><td colSpan={visibleCols.length} className="px-4 py-8 text-center text-gray-400">加载中…</td></tr>
-            ) : filtered.length === 0 ? (
-              <tr><td colSpan={visibleCols.length} className="px-4 py-8 text-center text-gray-400">没有匹配的日志</td></tr>
-            ) : filtered.map((log, i) => (
-              <tr key={i} className="border-b border-gray-100 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-700/50">
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-gray-500">{formatTime(log.timestamp)}</td>
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{log.model}</td>
-                <td className="whitespace-nowrap px-3 py-2">{log.provider}</td>
-                <td className={`whitespace-nowrap px-3 py-2 font-mono text-xs ${elapsedColor(log.ttft_ms)}`}>{log.ttft_ms > 0 ? `${log.ttft_ms}ms` : '-'}</td>
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{formatTokens(log.fresh_input_tokens)}</td>
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{formatTokens(log.output_tokens)}</td>
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-purple-600">{formatTokens(log.cache_read_tokens)}</td>
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-indigo-600">{formatTokens(log.cache_creation_tokens)}</td>
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{(log.cache_hit_rate * 100).toFixed(1)}%</td>
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{log.output_speed_tps.toFixed(0)} t/s</td>
-                <td className={`whitespace-nowrap px-3 py-2 font-mono text-xs ${elapsedColor(log.latency_ms)}`}>
-                  {log.duration_s.toFixed(1)}s{log.is_stream && <span className="ml-1 rounded bg-pink-100 px-1 text-[9px] text-pink-600 dark:bg-pink-900/30">Stream</span>}
-                </td>
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{log.status_code}</td>
-                <td className="whitespace-nowrap px-3 py-2">
-                  {log.error ? (
-                    <span className="flex items-center gap-1 text-red-500"><XCircle className="h-3.5 w-3.5" /><span className="text-xs">{log.error}</span></span>
-                  ) : (
-                    <CheckCircle className="h-3.5 w-3.5 text-green-500" />
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <RequestLogTable logs={filtered} loading={loading} />
     </div>
   )
 }

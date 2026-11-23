@@ -4,7 +4,7 @@ import type { StatsSummary, ProviderStat, RequestLog, TrendPoint, DailyPoint } f
 import StatsHero from '@/components/StatsHero'
 import TrendChart from '@/components/TrendChart'
 import ProviderStats from '@/components/ProviderStats'
-import RequestLogs from '@/components/RequestLogs'
+import RequestLogTable from '@/components/RequestLogTable'
 import Heatmap from '@/components/Heatmap'
 import DateRangePicker, { type RangeSelection } from '@/components/DateRangePicker'
 
@@ -109,7 +109,7 @@ export default function Dashboard() {
           </button>
         ))}
       </div>
-      {tab === 'logs' && <RequestLogs logs={logs} loading={loading} />}
+      {tab === 'logs' && <RequestLogTable logs={logs} loading={loading} compact />}
       {tab === 'providers' && <ProviderStats providers={providers} loading={loading} />}
       {tab === 'models' && (
         <div className="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
