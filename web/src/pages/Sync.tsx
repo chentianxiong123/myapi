@@ -27,27 +27,41 @@ interface AdapterInstance {
   path: string
 }
 
-// 全局 Agent 配置（下发到所有 agent 客户端，原在设置页，按需移到下发页）
+// 全局 Agent 配置（默认值，所有 agent 共用）—— 学 cc-switch：全局默认 + 单点覆盖
 interface AgentGlobalConfig {
   context_window: number
   max_tokens: number
-  auto_compact_token_limit: number
+  reasoning: boolean
   default_input_modes: string[]
   image_models: string[]
   include_models: string[]
   exclude_models: string[]
-  strategy: 'replace' | 'merge'
+}
+
+// 单点覆盖（每个 Adapter 可选，不填=用全局）
+interface AdapterOverride {
+  enabled: boolean
+  context_window?: number
+  max_tokens?: number
+  reasoning?: boolean
+  default_input_modes?: string[]
+  image_models?: string[]
+  // 工具专属
+  auto_compact_token_limit?: number   // Codex 专属
 }
 
 const DEFAULT_AGENT_CONFIG: AgentGlobalConfig = {
   context_window: 256000,
   max_tokens: 16384,
-  auto_compact_token_limit: 200000,
+  reasoning: false,
   default_input_modes: ['text'],
   image_models: [],
   include_models: [],
   exclude_models: [],
-  strategy: 'replace',
+}
+
+function defaultOverride(): AdapterOverride {
+  return { enabled: false }
 }
 
 export default function Sync() {
@@ -58,6 +72,8 @@ export default function Sync() {
   const [busy, setBusy] = useState(false)
   const [logs, setLogs] = useState<string[]>([])
   const [agentConfig, setAgentConfig] = useState<AgentGlobalConfig>(DEFAULT_AGENT_CONFIG)
+  const [overrides, setOverrides] = useState<Record<string, AdapterOverride>>({})
+  const [expandedOverrides, setExpandedOverrides] = useState<Set<string>>(new Set())
 
   useEffect(() => { loadSyncConfig() }, [])
 
@@ -137,6 +153,28 @@ export default function Sync() {
   function updateAgentConfig(field: keyof AgentGlobalConfig, value: any) {
     setAgentConfig(c => ({ ...c, [field]: value }))
   }
+
+  function toggleOverride(adapter: string) {
+    const s = new Set(expandedOverrides); s.has(adapter) ? s.delete(adapter) : s.add(adapter); setExpandedOverrides(s)
+  }
+  function updateOverride(adapter: string, field: keyof AdapterOverride, value: any) {
+    setOverrides(o => ({ ...o, [adapter]: { ...o[adapter], [field]: value } }))
+  }
+  function enableOverride(adapter: string) {
+    setOverrides(o => ({ ...o, [adapter]: { ...(o[adapter] || defaultOverride()), enabled: true } }))
+  }
+  function disableOverride(adapter: string) {
+    setOverrides(o => ({ ...o, [adapter]: { ...o[adapter], enabled: false } }))
+  }
+  function setOverrideIf(adapter: string, field: keyof AdapterOverride, value: any) {
+    if (value === '' || value === undefined || value === null) {
+      const o = { ...(overrides[adapter] || {}) }; delete (o as any)[field]; setOverrides(ov => ({ ...ov, [adapter]: o }))
+    } else {
+      updateOverride(adapter, field, value)
+    }
+  }
+
+  const overriddenCount = Object.values(overrides).filter(o => o.enabled).length
 
   const totalInstances = Object.values(instances).reduce((s, a) => s + a.length, 0)
 
@@ -228,12 +266,13 @@ export default function Sync() {
         </div>
       </div>
 
-      {/* 全局 Agent 配置（下发到所有 agent 客户端）*/}
+      {/* 全局 Agent 配置（默认值，单点覆盖在下方各 Adapter）*/}
       <div className="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
-        <div className="mb-4 flex items-center justify-between">
-          <h3 className="flex items-center gap-2 text-sm font-semibold"><Settings className="h-4 w-4" />全局 Agent 配置（下发到所有客户端）</h3>
+        <div className="mb-1 flex items-center justify-between">
+          <h3 className="flex items-center gap-2 text-sm font-semibold"><Settings className="h-4 w-4" />全局 Agent 配置（默认值）</h3>
           <button onClick={() => setAgentConfig(DEFAULT_AGENT_CONFIG)} className="text-xs text-gray-400 hover:text-gray-600">重置</button>
         </div>
+        <p className="mb-4 text-xs text-gray-400">所有 agent 共用；个别不一样的用下方「单点覆盖」（{overriddenCount} 个已覆盖）</p>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <div><label className="mb-1 block text-xs text-gray-500">全局上下文窗口</label>
             <input type="number" value={agentConfig.context_window} onChange={e => updateAgentConfig('context_window', parseInt(e.target.value) || 0)}
@@ -241,14 +280,10 @@ export default function Sync() {
           <div><label className="mb-1 block text-xs text-gray-500">全局最大输出</label>
             <input type="number" value={agentConfig.max_tokens} onChange={e => updateAgentConfig('max_tokens', parseInt(e.target.value) || 0)}
               className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" /></div>
-          <div><label className="mb-1 block text-xs text-gray-500">自动压缩阈值</label>
-            <input type="number" value={agentConfig.auto_compact_token_limit} onChange={e => updateAgentConfig('auto_compact_token_limit', parseInt(e.target.value) || 0)}
-              className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" /></div>
-          <div><label className="mb-1 block text-xs text-gray-500">同步策略</label>
-            <select value={agentConfig.strategy} onChange={e => updateAgentConfig('strategy', e.target.value)}
+          <div><label className="mb-1 block text-xs text-gray-500">思考模型（默认）</label>
+            <select value={agentConfig.reasoning ? 'true' : 'false'} onChange={e => updateAgentConfig('reasoning', e.target.value === 'true')}
               className="w-full rounded border border-gray-300 px-2 py-1 text-xs dark:border-gray-600 dark:bg-gray-700">
-              <option value="replace">replace（全盘对齐）</option>
-              <option value="merge">merge（合并）</option>
+              <option value="false">否</option><option value="true">是</option>
             </select></div>
           <div><label className="mb-1 block text-xs text-gray-500">默认输入模式（逗号分隔）</label>
             <input value={agentConfig.default_input_modes.join(', ')} onChange={e => updateAgentConfig('default_input_modes', e.target.value.split(',').map(s => s.trim()).filter(Boolean))} placeholder="text"
@@ -301,6 +336,62 @@ export default function Sync() {
                       ))}</tbody>
                     </table>
                     <button onClick={() => addInstance(adapter)} className="mt-2 flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700"><Plus className="h-3 w-3" />添加实例</button>
+
+                    {/* 单点覆盖（可选，不填=用全局默认）*/}
+                    <div className="mt-3 rounded-lg border border-dashed border-gray-300 dark:border-gray-600">
+                      <div className="flex items-center gap-2 px-3 py-2">
+                        <button onClick={() => toggleOverride(adapter)} className="text-gray-400">
+                          {expandedOverrides.has(adapter) ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                        </button>
+                        <span className="text-xs font-medium text-gray-500">单点覆盖</span>
+                        <span className="text-[10px] text-gray-400">不填=用全局默认</span>
+                        <label className="ml-auto flex items-center gap-1 text-xs text-gray-500">
+                          <input type="checkbox" checked={overrides[adapter]?.enabled || false}
+                            onChange={e => e.target.checked ? enableOverride(adapter) : disableOverride(adapter)} />
+                          启用
+                        </label>
+                      </div>
+                      {expandedOverrides.has(adapter) && (
+                        <div className="border-t border-gray-100 p-3 dark:border-gray-800">
+                          {!overrides[adapter]?.enabled ? (
+                            <p className="text-xs text-gray-400">未启用——此工具使用全局默认值。勾选「启用」后自定义。</p>
+                          ) : (
+                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                              <div><label className="mb-1 block text-xs text-gray-500">上下文窗口（覆盖）</label>
+                                <input type="number" placeholder={`全局 ${agentConfig.context_window}`}
+                                  value={overrides[adapter]?.context_window ?? ''}
+                                  onChange={e => setOverrideIf(adapter, 'context_window', e.target.value === '' ? '' : parseInt(e.target.value) || 0)}
+                                  className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" /></div>
+                              <div><label className="mb-1 block text-xs text-gray-500">最大输出（覆盖）</label>
+                                <input type="number" placeholder={`全局 ${agentConfig.max_tokens}`}
+                                  value={overrides[adapter]?.max_tokens ?? ''}
+                                  onChange={e => setOverrideIf(adapter, 'max_tokens', e.target.value === '' ? '' : parseInt(e.target.value) || 0)}
+                                  className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" /></div>
+                              <div><label className="mb-1 block text-xs text-gray-500">思考模型（覆盖）</label>
+                                <select
+                                  value={overrides[adapter]?.reasoning !== undefined ? (overrides[adapter].reasoning ? 'true' : 'false') : ''}
+                                  onChange={e => setOverrideIf(adapter, 'reasoning', e.target.value === '' ? '' : e.target.value === 'true')}
+                                  className="w-full rounded border border-gray-300 px-2 py-1 text-xs dark:border-gray-600 dark:bg-gray-700">
+                                  <option value="">用全局</option>
+                                  <option value="false">否</option><option value="true">是</option>
+                                </select></div>
+                              <div><label className="mb-1 block text-xs text-gray-500">输入模式（覆盖）</label>
+                                <input placeholder={`全局 ${agentConfig.default_input_modes.join('/')}`}
+                                  value={(overrides[adapter]?.default_input_modes || []).join(', ')}
+                                  onChange={e => setOverrideIf(adapter, 'default_input_modes', e.target.value.split(',').map(s => s.trim()).filter(Boolean))}
+                                  className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" /></div>
+                              {adapter === 'codex' && (
+                                <div><label className="mb-1 block text-xs text-gray-500">自动压缩阈值（Codex 专属）</label>
+                                  <input type="number" placeholder="如 200000"
+                                    value={overrides[adapter]?.auto_compact_token_limit ?? ''}
+                                    onChange={e => setOverrideIf(adapter, 'auto_compact_token_limit', e.target.value === '' ? '' : parseInt(e.target.value) || 0)}
+                                    className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" /></div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
