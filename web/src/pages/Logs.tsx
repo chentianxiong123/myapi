@@ -176,35 +176,38 @@ export default function Logs() {
         <span className="ml-auto text-xs text-gray-400">显示 {filtered.length} / {logs.length} 条</span>
       </div>
 
-      <RequestLogTable logs={paginated} loading={loading} columns={columns} />
+      {/* 日志卡片（学 new-api chart-card：独立卡片 + 内部滚动 + footer 分页） */}
+      <div className="rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
+        <RequestLogTable logs={paginated} loading={loading} columns={columns} scrollHeight={560} />
 
-      {/* 分页（学 sub2api Pagination） */}
-      <div className="flex flex-wrap items-center justify-between rounded-xl border border-gray-200 bg-white px-4 py-3 dark:border-gray-700 dark:bg-gray-800">
-        <div className="flex items-center gap-2 text-xs text-gray-400">
-          <span>共 {filtered.length} 条</span>
-          <select value={pageSize} onChange={e => { setPageSize(parseInt(e.target.value)); setPage(1) }}
-            className="rounded border border-gray-300 px-1 py-0.5 text-xs dark:border-gray-600 dark:bg-gray-700">
-            <option value={20}>20 条/页</option>
-            <option value={50}>50 条/页</option>
-            <option value={100}>100 条/页</option>
-          </select>
+        {/* footer 分页（学 new-api Pagination floated right） */}
+        <div className="flex flex-wrap items-center justify-between border-t border-gray-200 px-4 py-2.5 dark:border-gray-700">
+          <div className="flex items-center gap-2 text-xs text-gray-400">
+            <span>共 {filtered.length} 条</span>
+            <select value={pageSize} onChange={e => { setPageSize(parseInt(e.target.value)); setPage(1) }}
+              className="rounded border border-gray-300 px-1 py-0.5 text-xs dark:border-gray-600 dark:bg-gray-700">
+              <option value={20}>20 条/页</option>
+              <option value={50}>50 条/页</option>
+              <option value={100}>100 条/页</option>
+            </select>
+          </div>
+          <nav className="flex items-center gap-1">
+            <button onClick={() => goToPage(page - 1)} disabled={page === 1}
+              className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-500 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:hover:bg-gray-700">‹</button>
+            {visiblePages().map((p, i) => (
+              typeof p === 'number' ? (
+                <button key={i} onClick={() => goToPage(p)}
+                  className={`rounded-md border px-3 py-1 text-xs ${p === page ? 'border-blue-600 bg-blue-50 font-semibold text-blue-600 dark:bg-blue-900/30' : 'border-gray-300 text-gray-600 hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700'}`}>
+                  {p}
+                </button>
+              ) : (
+                <span key={i} className="px-1 text-xs text-gray-400">…</span>
+              )
+            ))}
+            <button onClick={() => goToPage(page + 1)} disabled={page === totalPages}
+              className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-500 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:hover:bg-gray-700">›</button>
+          </nav>
         </div>
-        <nav className="flex items-center gap-1">
-          <button onClick={() => goToPage(page - 1)} disabled={page === 1}
-            className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-500 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:hover:bg-gray-700">‹</button>
-          {visiblePages().map((p, i) => (
-            typeof p === 'number' ? (
-              <button key={i} onClick={() => goToPage(p)}
-                className={`rounded-md border px-3 py-1 text-xs ${p === page ? 'border-blue-600 bg-blue-50 font-semibold text-blue-600 dark:bg-blue-900/30' : 'border-gray-300 text-gray-600 hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700'}`}>
-                {p}
-              </button>
-            ) : (
-              <span key={i} className="px-1 text-xs text-gray-400">…</span>
-            )
-          ))}
-          <button onClick={() => goToPage(page + 1)} disabled={page === totalPages}
-            className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-500 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:hover:bg-gray-700">›</button>
-        </nav>
       </div>
     </div>
   )

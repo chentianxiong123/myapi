@@ -9,6 +9,8 @@ interface Props {
   columns?: RequestLogColumnId[]
   /** 点击行（打开详情） */
   onRowClick?: (log: RequestLog) => void
+  /** 内部滚动最大高度（学 new-api 卡片内部滚动） */
+  scrollHeight?: number
 }
 
 // 学 new-api getColorByElapsedTime：耗时颜色分级（首字/耗时共用）
@@ -39,9 +41,10 @@ const DEFAULT_COLUMNS: RequestLogColumnId[] = [
 ]
 
 /** new-api 风格请求日志表格（统一 Dashboard tab + Logs 页，列可配置） */
-export default function RequestLogTable({ logs, loading, columns = DEFAULT_COLUMNS, onRowClick }: Props) {
+export default function RequestLogTable({ logs, loading, columns = DEFAULT_COLUMNS, onRowClick, scrollHeight }: Props) {
   return (
     <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
+      <div className="overflow-y-auto" style={scrollHeight ? { maxHeight: scrollHeight } : undefined}>
       <table className="w-full text-left text-sm">
         <thead>
           <tr className="border-b border-gray-200 dark:border-gray-700">
@@ -72,6 +75,7 @@ export default function RequestLogTable({ logs, loading, columns = DEFAULT_COLUM
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   )
 }
