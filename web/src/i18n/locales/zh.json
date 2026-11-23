@@ -5,7 +5,8 @@
     "providers": "供应商",
     "logs": "日志",
     "sync": "下发",
-    "config": "配置"
+    "config": "配置",
+    "endpoints": "端点"
   },
   "dashboard": {
     "title": "仪表盘",

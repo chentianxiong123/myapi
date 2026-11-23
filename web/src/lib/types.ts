@@ -138,3 +138,28 @@ export interface DailyPoint {
   cache_creation_tokens: number
   total_tokens: number
 }
+
+// 端点管理（学 sub2api EndpointPopover + apicompat 多协议）
+export type EndpointProtocol = 'openai_chat' | 'openai_responses' | 'anthropic_messages' | 'gemini' | 'ollama' | 'custom'
+
+export interface Endpoint {
+  id: string
+  name: string
+  protocol: EndpointProtocol
+  path: string           // 端点路径，如 /v1/chat/completions
+  enabled: boolean
+  description: string
+  methods: string[]      // 支持的方法
+  streaming: boolean     // 是否支持流式
+  auth: 'bearer' | 'x-api-key' | 'none'   // 认证方式
+  content_type: string   // application/json
+}
+
+export const PROTOCOL_LABELS: Record<EndpointProtocol, string> = {
+  openai_chat: 'OpenAI Chat',
+  openai_responses: 'OpenAI Responses',
+  anthropic_messages: 'Anthropic Messages',
+  gemini: 'Gemini',
+  ollama: 'Ollama',
+  custom: 'Custom',
+}

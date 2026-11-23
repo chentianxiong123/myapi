@@ -5,7 +5,8 @@
     "providers": "Providers",
     "logs": "Logs",
     "sync": "Sync",
-    "config": "Config"
+    "config": "Config",
+    "endpoints": "Endpoints"
   },
   "dashboard": {
     "title": "Dashboard",

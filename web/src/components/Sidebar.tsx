@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   LayoutDashboard, List, ScrollText, Settings, Server,
-  Play, Sun, Moon, Languages, ChevronsLeft, ChevronsRight, Layers
+  Play, Sun, Moon, Languages, ChevronsLeft, ChevronsRight, Layers, Globe
 } from 'lucide-react'
 import { useTheme } from '@/contexts/ThemeContext'
 
@@ -10,6 +10,7 @@ const navItems = [
   { id: 'dashboard', label: 'nav.dashboard', icon: LayoutDashboard },
   { id: 'models', label: 'nav.models', icon: List },
   { id: 'providers', label: 'nav.providers', icon: Server },
+  { id: 'endpoints', label: 'nav.endpoints', icon: Globe },
   { id: 'logs', label: 'nav.logs', icon: ScrollText },
   { id: 'sync', label: 'nav.sync', icon: Play },
   { id: 'config', label: 'nav.config', icon: Settings },
