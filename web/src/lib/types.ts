@@ -58,3 +58,21 @@ export interface TrendPoint {
   avg_ttft_ms: number
   errors: number
 }
+
+// Sync 相关（学旧前端 + cc-switch）
+export interface Host {
+  name: string
+  ssh: string
+  platform: 'win' | 'unix'
+}
+
+export interface AdapterInstance {
+  name: string
+  host: string
+  path: string
+}
+
+export interface SyncTarget {
+  adapter: string
+  instances: AdapterInstance[]
+}

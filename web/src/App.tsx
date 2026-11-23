@@ -1,10 +1,11 @@
 import { useState } from 'react'
-import { LayoutDashboard, List, ScrollText, Settings, Server } from 'lucide-react'
+import { LayoutDashboard, List, ScrollText, Settings, Server, Play } from 'lucide-react'
 import Dashboard from './pages/Dashboard'
-import Logs from './pages/Logs'
 import Config from './pages/Config'
 import Providers from './pages/Providers'
 import Models from './pages/Models'
+import Logs from './pages/Logs'
+import Sync from './pages/Sync'
 import Toast from './components/Toast'
 
 const tabs = [
@@ -12,6 +13,7 @@ const tabs = [
   { id: 'models', label: '模型', icon: List },
   { id: 'providers', label: 'Provider', icon: Server },
   { id: 'logs', label: '日志', icon: ScrollText },
+  { id: 'sync', label: '下发', icon: Play },
   { id: 'config', label: '配置', icon: Settings },
 ]
 
@@ -34,7 +36,9 @@ export default function App() {
                 key={id}
                 onClick={() => setTab(id)}
                 className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm ${
-                  tab === id ? 'bg-white font-semibold text-blue-600 shadow dark:bg-gray-800' : 'text-gray-500 hover:text-gray-900 dark:hover:text-gray-100'
+                  tab === id
+                    ? 'bg-white font-semibold text-blue-600 shadow dark:bg-gray-800'
+                    : 'text-gray-500 hover:text-gray-900 dark:hover:text-gray-100'
                 }`}
               >
                 <Icon className="h-4 w-4" />
@@ -49,6 +53,7 @@ export default function App() {
         {tab === 'models' && <Models />}
         {tab === 'providers' && <Providers />}
         {tab === 'logs' && <Logs />}
+        {tab === 'sync' && <Sync />}
         {tab === 'config' && <Config />}
       </main>
     </div>
