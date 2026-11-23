@@ -26,12 +26,19 @@ function addDays(date: Date, days: number): Date {
   return d
 }
 
-function levelOf(value: number, max: number): number {
-  if (value === 0) return 0
-  const ratio = value / max
-  if (ratio < 0.25) return 1
-  if (ratio < 0.5) return 2
-  if (ratio < 0.75) return 3
+// 学 cc-switch：按非零天的四分位分档，避免个别高峰日把其余格子都压成最浅
+function buildThresholds(values: number[]): number[] {
+  const sorted = values.filter(v => v > 0).sort((a, b) => a - b)
+  if (sorted.length === 0) return [Infinity, Infinity, Infinity]
+  const at = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))]
+  return [at(0.25), at(0.5), at(0.75)]
+}
+
+function levelOf(value: number, thresholds: number[]): number {
+  if (value <= 0) return 0
+  if (value <= thresholds[0]) return 1
+  if (value <= thresholds[1]) return 2
+  if (value <= thresholds[2]) return 3
   return 4
 }
 
@@ -53,7 +60,7 @@ export default function Heatmap({ data, loading }: HeatmapProps) {
     return map
   }, [data])
 
-  const maxRequests = useMemo(() => Math.max(...data.map(d => d.requests), 1), [data])
+  const thresholds = useMemo(() => buildThresholds(data.map(d => d.requests)), [data])
 
   const weeks = useMemo(() => {
     const today = new Date()
@@ -129,7 +136,7 @@ export default function Heatmap({ data, loading }: HeatmapProps) {
         {weeks.map((week, wi) => (
           <div key={wi} className="flex flex-col gap-[3px]">
             {week.map((day, di) => {
-              const level = day.future ? -1 : levelOf(day.count, maxRequests)
+              const level = day.future ? -1 : levelOf(day.count, thresholds)
               return (
                 <div
                   key={di}
