@@ -1,0 +1,510 @@
+
+<!doctype html>
+<html lang="en">
+
+<head>
+    <title>Code coverage report for pages/Chat.tsx</title>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="../prettify.css" />
+    <link rel="stylesheet" href="../base.css" />
+    <link rel="shortcut icon" type="image/x-icon" href="../favicon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script src="../theme.js"></script>
+    <style type='text/css'>
+        .coverage-summary .sorter {
+            background-image: url(../sort-arrow-sprite.png);
+        }
+    </style>
+</head>
+    
+<body>
+<div class='wrapper'>
+    <div class='pad1'>
+        
+        <label class="theme-select quiet">
+            Theme
+            <select id="themeSelect" autocomplete="off">
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+                <option value="legacy">Legacy</option>
+            </select>
+        </label>
+
+        <h1><a href="../index.html">All files</a> / <a href="index.html">pages</a> Chat.tsx</h1>
+        <div class='clearfix'>
+            
+            <div class='fl pad1y space-right2'>
+                <span class="strong">0% </span>
+                <span class="quiet">Statements</span>
+                <span class='fraction'>0/59</span>
+            </div>
+        
+            
+            <div class='fl pad1y space-right2'>
+                <span class="strong">0% </span>
+                <span class="quiet">Branches</span>
+                <span class='fraction'>0/48</span>
+            </div>
+        
+            
+            <div class='fl pad1y space-right2'>
+                <span class="strong">0% </span>
+                <span class="quiet">Functions</span>
+                <span class='fraction'>0/19</span>
+            </div>
+        
+            
+            <div class='fl pad1y space-right2'>
+                <span class="strong">0% </span>
+                <span class="quiet">Lines</span>
+                <span class='fraction'>0/44</span>
+            </div>
+        
+            
+        </div>
+        <p class="quiet">
+            Press <em>n</em> or <em>j</em> to go to the next uncovered block, <em>b</em>, <em>p</em> or <em>k</em> for the previous block.
+        </p>
+        <template id="filterTemplate">
+            <div class="quiet">
+                Filter:
+                <input type="search" id="fileSearch">
+            </div>
+        </template>
+    </div>
+    <div class='status-line low'></div>
+    <pre><table class="coverage">
+<tr><td class="line-count quiet"><a name='L1'></a><a href='#L1'>1</a>
+<a name='L2'></a><a href='#L2'>2</a>
+<a name='L3'></a><a href='#L3'>3</a>
+<a name='L4'></a><a href='#L4'>4</a>
+<a name='L5'></a><a href='#L5'>5</a>
+<a name='L6'></a><a href='#L6'>6</a>
+<a name='L7'></a><a href='#L7'>7</a>
+<a name='L8'></a><a href='#L8'>8</a>
+<a name='L9'></a><a href='#L9'>9</a>
+<a name='L10'></a><a href='#L10'>10</a>
+<a name='L11'></a><a href='#L11'>11</a>
+<a name='L12'></a><a href='#L12'>12</a>
+<a name='L13'></a><a href='#L13'>13</a>
+<a name='L14'></a><a href='#L14'>14</a>
+<a name='L15'></a><a href='#L15'>15</a>
+<a name='L16'></a><a href='#L16'>16</a>
+<a name='L17'></a><a href='#L17'>17</a>
+<a name='L18'></a><a href='#L18'>18</a>
+<a name='L19'></a><a href='#L19'>19</a>
+<a name='L20'></a><a href='#L20'>20</a>
+<a name='L21'></a><a href='#L21'>21</a>
+<a name='L22'></a><a href='#L22'>22</a>
+<a name='L23'></a><a href='#L23'>23</a>
+<a name='L24'></a><a href='#L24'>24</a>
+<a name='L25'></a><a href='#L25'>25</a>
+<a name='L26'></a><a href='#L26'>26</a>
+<a name='L27'></a><a href='#L27'>27</a>
+<a name='L28'></a><a href='#L28'>28</a>
+<a name='L29'></a><a href='#L29'>29</a>
+<a name='L30'></a><a href='#L30'>30</a>
+<a name='L31'></a><a href='#L31'>31</a>
+<a name='L32'></a><a href='#L32'>32</a>
+<a name='L33'></a><a href='#L33'>33</a>
+<a name='L34'></a><a href='#L34'>34</a>
+<a name='L35'></a><a href='#L35'>35</a>
+<a name='L36'></a><a href='#L36'>36</a>
+<a name='L37'></a><a href='#L37'>37</a>
+<a name='L38'></a><a href='#L38'>38</a>
+<a name='L39'></a><a href='#L39'>39</a>
+<a name='L40'></a><a href='#L40'>40</a>
+<a name='L41'></a><a href='#L41'>41</a>
+<a name='L42'></a><a href='#L42'>42</a>
+<a name='L43'></a><a href='#L43'>43</a>
+<a name='L44'></a><a href='#L44'>44</a>
+<a name='L45'></a><a href='#L45'>45</a>
+<a name='L46'></a><a href='#L46'>46</a>
+<a name='L47'></a><a href='#L47'>47</a>
+<a name='L48'></a><a href='#L48'>48</a>
+<a name='L49'></a><a href='#L49'>49</a>
+<a name='L50'></a><a href='#L50'>50</a>
+<a name='L51'></a><a href='#L51'>51</a>
+<a name='L52'></a><a href='#L52'>52</a>
+<a name='L53'></a><a href='#L53'>53</a>
+<a name='L54'></a><a href='#L54'>54</a>
+<a name='L55'></a><a href='#L55'>55</a>
+<a name='L56'></a><a href='#L56'>56</a>
+<a name='L57'></a><a href='#L57'>57</a>
+<a name='L58'></a><a href='#L58'>58</a>
+<a name='L59'></a><a href='#L59'>59</a>
+<a name='L60'></a><a href='#L60'>60</a>
+<a name='L61'></a><a href='#L61'>61</a>
+<a name='L62'></a><a href='#L62'>62</a>
+<a name='L63'></a><a href='#L63'>63</a>
+<a name='L64'></a><a href='#L64'>64</a>
+<a name='L65'></a><a href='#L65'>65</a>
+<a name='L66'></a><a href='#L66'>66</a>
+<a name='L67'></a><a href='#L67'>67</a>
+<a name='L68'></a><a href='#L68'>68</a>
+<a name='L69'></a><a href='#L69'>69</a>
+<a name='L70'></a><a href='#L70'>70</a>
+<a name='L71'></a><a href='#L71'>71</a>
+<a name='L72'></a><a href='#L72'>72</a>
+<a name='L73'></a><a href='#L73'>73</a>
+<a name='L74'></a><a href='#L74'>74</a>
+<a name='L75'></a><a href='#L75'>75</a>
+<a name='L76'></a><a href='#L76'>76</a>
+<a name='L77'></a><a href='#L77'>77</a>
+<a name='L78'></a><a href='#L78'>78</a>
+<a name='L79'></a><a href='#L79'>79</a>
+<a name='L80'></a><a href='#L80'>80</a>
+<a name='L81'></a><a href='#L81'>81</a>
+<a name='L82'></a><a href='#L82'>82</a>
+<a name='L83'></a><a href='#L83'>83</a>
+<a name='L84'></a><a href='#L84'>84</a>
+<a name='L85'></a><a href='#L85'>85</a>
+<a name='L86'></a><a href='#L86'>86</a>
+<a name='L87'></a><a href='#L87'>87</a>
+<a name='L88'></a><a href='#L88'>88</a>
+<a name='L89'></a><a href='#L89'>89</a>
+<a name='L90'></a><a href='#L90'>90</a>
+<a name='L91'></a><a href='#L91'>91</a>
+<a name='L92'></a><a href='#L92'>92</a>
+<a name='L93'></a><a href='#L93'>93</a>
+<a name='L94'></a><a href='#L94'>94</a>
+<a name='L95'></a><a href='#L95'>95</a>
+<a name='L96'></a><a href='#L96'>96</a>
+<a name='L97'></a><a href='#L97'>97</a>
+<a name='L98'></a><a href='#L98'>98</a>
+<a name='L99'></a><a href='#L99'>99</a>
+<a name='L100'></a><a href='#L100'>100</a>
+<a name='L101'></a><a href='#L101'>101</a>
+<a name='L102'></a><a href='#L102'>102</a>
+<a name='L103'></a><a href='#L103'>103</a>
+<a name='L104'></a><a href='#L104'>104</a>
+<a name='L105'></a><a href='#L105'>105</a>
+<a name='L106'></a><a href='#L106'>106</a>
+<a name='L107'></a><a href='#L107'>107</a>
+<a name='L108'></a><a href='#L108'>108</a>
+<a name='L109'></a><a href='#L109'>109</a>
+<a name='L110'></a><a href='#L110'>110</a>
+<a name='L111'></a><a href='#L111'>111</a>
+<a name='L112'></a><a href='#L112'>112</a>
+<a name='L113'></a><a href='#L113'>113</a>
+<a name='L114'></a><a href='#L114'>114</a>
+<a name='L115'></a><a href='#L115'>115</a>
+<a name='L116'></a><a href='#L116'>116</a>
+<a name='L117'></a><a href='#L117'>117</a>
+<a name='L118'></a><a href='#L118'>118</a>
+<a name='L119'></a><a href='#L119'>119</a>
+<a name='L120'></a><a href='#L120'>120</a>
+<a name='L121'></a><a href='#L121'>121</a>
+<a name='L122'></a><a href='#L122'>122</a>
+<a name='L123'></a><a href='#L123'>123</a>
+<a name='L124'></a><a href='#L124'>124</a>
+<a name='L125'></a><a href='#L125'>125</a>
+<a name='L126'></a><a href='#L126'>126</a>
+<a name='L127'></a><a href='#L127'>127</a>
+<a name='L128'></a><a href='#L128'>128</a>
+<a name='L129'></a><a href='#L129'>129</a>
+<a name='L130'></a><a href='#L130'>130</a>
+<a name='L131'></a><a href='#L131'>131</a>
+<a name='L132'></a><a href='#L132'>132</a>
+<a name='L133'></a><a href='#L133'>133</a>
+<a name='L134'></a><a href='#L134'>134</a>
+<a name='L135'></a><a href='#L135'>135</a>
+<a name='L136'></a><a href='#L136'>136</a>
+<a name='L137'></a><a href='#L137'>137</a>
+<a name='L138'></a><a href='#L138'>138</a>
+<a name='L139'></a><a href='#L139'>139</a></td><td class="line-coverage quiet"><span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span></td><td class="text"><pre class="prettyprint lang-js">import { useEffect, useRef, useState } from 'react'
+import { Send, Loader2, Eraser, RotateCcw, Terminal } from 'lucide-react'
+import { toast } from '@/components/Toast'
+&nbsp;
+interface ChatMsg {
+  role: 'user' | 'assistant'
+  content: string
+}
+&nbsp;
+export default function <span class="fstat-no" title="function not covered" >Chat() {</span>
+  const [models, setModels<span class="cstat-no" title="statement not covered" >] = useState&lt;string[]&gt;([])</span>
+  const [model, setModel<span class="cstat-no" title="statement not covered" >] = useState('')</span>
+  const [messages, setMessages<span class="cstat-no" title="statement not covered" >] = useState&lt;ChatMsg[]&gt;([])</span>
+  const [input, setInput<span class="cstat-no" title="statement not covered" >] = useState('')</span>
+  const [systemPrompt, setSystemPrompt<span class="cstat-no" title="statement not covered" >] = useState('')</span>
+  const [busy, setBusy<span class="cstat-no" title="statement not covered" >] = useState(false)</span>
+  const [elapsed, setElapsed<span class="cstat-no" title="statement not covered" >] = useState(0)</span>
+  const <span class="cstat-no" title="statement not covered" >bottomRef = useRef&lt;HTMLDivElement&gt;(null)</span>
+  const <span class="cstat-no" title="statement not covered" >timerRef = useRef&lt;ReturnType&lt;typeof setInterval&gt; | null&gt;(null)</span>
+&nbsp;
+<span class="cstat-no" title="statement not covered" >  useEffect(<span class="fstat-no" title="function not covered" >() =&gt; {</span></span>
+<span class="cstat-no" title="statement not covered" >    fetch('/v1/models').then(<span class="fstat-no" title="function not covered" >r =&gt; <span class="cstat-no" title="statement not covered" >r</span>.json())</span>.then(<span class="fstat-no" title="function not covered" >d =&gt; {</span></span>
+      const <span class="cstat-no" title="statement not covered" >list = (d.data || []).map(<span class="fstat-no" title="function not covered" >(m</span>: any) =&gt; <span class="cstat-no" title="statement not covered" >m.id || m.alias || m)</span>.filter(Boolean)</span>
+<span class="cstat-no" title="statement not covered" >      setModels(list)</span>
+<span class="cstat-no" title="statement not covered" >      if (list.length &amp;&amp; !model) <span class="cstat-no" title="statement not covered" >setModel(list[0])</span></span>
+    }).catch(<span class="fstat-no" title="function not covered" >() =&gt; {</span>
+<span class="cstat-no" title="statement not covered" >      setModels(['deepseek-v4-flash', 'agnes-3.0-flash', 'gemini-3.5-flash-lite', 'hy4', 'sensenova-6.8-flash'])</span>
+<span class="cstat-no" title="statement not covered" >      setModel('deepseek-v4-flash')</span>
+    })
+  }, [])
+&nbsp;
+<span class="cstat-no" title="statement not covered" >  useEffect(<span class="fstat-no" title="function not covered" >() =&gt; {</span> <span class="cstat-no" title="statement not covered" >bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }</span>, [messages])</span>
+&nbsp;
+  async function <span class="fstat-no" title="function not covered" >send() {</span>
+    const text = <span class="cstat-no" title="statement not covered" >input.trim()</span>
+<span class="cstat-no" title="statement not covered" >    if (!text || busy) <span class="cstat-no" title="statement not covered" >return</span></span>
+<span class="cstat-no" title="statement not covered" >    if (!model) { <span class="cstat-no" title="statement not covered" >toast('请选模型'); <span class="cstat-no" title="statement not covered" >r</span>eturn }</span></span>
+    const msgs: ChatMsg[] = <span class="cstat-no" title="statement not covered" >[...messages, { role: 'user', content: text }]</span>
+<span class="cstat-no" title="statement not covered" >    setMessages(msgs)</span>
+<span class="cstat-no" title="statement not covered" >    setInput('')</span>
+<span class="cstat-no" title="statement not covered" >    setBusy(true)</span>
+<span class="cstat-no" title="statement not covered" >    setElapsed(0)</span>
+<span class="cstat-no" title="statement not covered" >    timerRef.current = setInterval(<span class="fstat-no" title="function not covered" >() =&gt; <span class="cstat-no" title="statement not covered" >s</span>etElapsed(<span class="fstat-no" title="function not covered" >e =&gt; <span class="cstat-no" title="statement not covered" >e</span> + 1)</span>, 1</span>000)</span>
+<span class="cstat-no" title="statement not covered" >    try {</span>
+      // 走网关 /v1/chat/completions 测链路（模型 + key + 路由）
+      const res = <span class="cstat-no" title="statement not covered" >await fetch('/v1/chat/completions', {</span>
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages: [
+            ...(systemPrompt.trim() ? [{ role: 'system', content: systemPrompt }] : []),
+            ...msgs.slice(-8).map(<span class="fstat-no" title="function not covered" >m =&gt; (<span class="cstat-no" title="statement not covered" >{</span> role: m.role, content: m.content }))</span>,
+          ],
+          stream: false,
+        }),
+      })
+      const data = <span class="cstat-no" title="statement not covered" >await res.json().catch(<span class="fstat-no" title="function not covered" >() =&gt; (<span class="cstat-no" title="statement not covered" >{</span>}))</span></span>
+      const content = <span class="cstat-no" title="statement not covered" >data.choices?.[0]?.message?.content</span>
+        || data.choices?.[0]?.text
+        || (typeof data === 'string' ? data : JSON.stringify(data))
+<span class="cstat-no" title="statement not covered" >      setMessages([...msgs, { role: 'assistant', content: content || `(空响应 ${res.status})` }])</span>
+<span class="cstat-no" title="statement not covered" >      if (!res.ok) <span class="cstat-no" title="statement not covered" >toast(`请求失败：${res.status}`)</span></span>
+    } catch (e: any) {
+<span class="cstat-no" title="statement not covered" >      setMessages([...msgs, { role: 'assistant', content: `⚠ 错误：${e?.message || e}` }])</span>
+    } finally {
+<span class="cstat-no" title="statement not covered" >      setBusy(false)</span>
+<span class="cstat-no" title="statement not covered" >      if (timerRef.current) <span class="cstat-no" title="statement not covered" >clearInterval(timerRef.current)</span></span>
+    }
+  }
+&nbsp;
+  function <span class="fstat-no" title="function not covered" >clearChat() {</span> <span class="cstat-no" title="statement not covered" >setMessages([]); <span class="cstat-no" title="statement not covered" >s</span>etElapsed(0) }</span>
+&nbsp;
+<span class="cstat-no" title="statement not covered" >  return (</span>
+    &lt;div className="space-y-4"&gt;
+      {/* 头部 */}
+      &lt;div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between"&gt;
+        &lt;div&gt;
+          &lt;h2 className="text-lg font-semibold"&gt;在线测试&lt;/h2&gt;
+          &lt;p className="text-sm text-gray-500"&gt;选模型发消息，验证网关链路（模型 + 密钥 + 路由）&lt;/p&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+&nbsp;
+      {/* 参数栏 */}
+      &lt;div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800"&gt;
+        &lt;div className="grid grid-cols-1 gap-3 lg:grid-cols-2"&gt;
+          &lt;div&gt;
+            &lt;label className="mb-1 block text-xs text-gray-500"&gt;模型&lt;/label&gt;
+            &lt;select value={model} onChange={<span class="fstat-no" title="function not covered" >e =&gt; <span class="cstat-no" title="statement not covered" >s</span>etModel(e.target.value)} c</span>lassName="w-full rounded border border-gray-300 px-2 py-1.5 font-mono text-sm dark:border-gray-600 dark:bg-gray-700"&gt;
+              {models.length === 0 &amp;&amp; &lt;option value=""&gt;（无模型）&lt;/option&gt;}
+              {models.map(<span class="fstat-no" title="function not covered" >m =&gt; <span class="cstat-no" title="statement not covered" >&lt;</span>option key={m} value={m}&gt;{m}&lt;/option&gt;)</span>}
+            &lt;/select&gt;
+          &lt;/div&gt;
+          &lt;div&gt;
+            &lt;label className="mb-1 block text-xs text-gray-500"&gt;System Prompt（可选）&lt;/label&gt;
+            &lt;input value={systemPrompt} onChange={<span class="fstat-no" title="function not covered" >e =&gt; <span class="cstat-no" title="statement not covered" >s</span>etSystemPrompt(e.target.value)} p</span>laceholder="你是一个有用的助手"
+              className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-700" /&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+&nbsp;
+      {/* 对话区 */}
+      &lt;div className="flex h-[52vh] flex-col rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800"&gt;
+        &lt;div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700"&gt;
+          &lt;span className="flex items-center gap-1.5 text-sm font-medium"&gt;&lt;Terminal className="h-4 w-4" /&gt;对话&lt;/span&gt;
+          {busy &amp;&amp; &lt;span className="text-xs text-gray-400"&gt;耗时 {elapsed}s…&lt;/span&gt;}
+          &lt;button onClick={clearChat} className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600"&gt;&lt;Eraser className="h-3 w-3" /&gt;清空&lt;/button&gt;
+        &lt;/div&gt;
+        &lt;div className="flex-1 space-y-3 overflow-y-auto p-4"&gt;
+          {messages.length === 0 &amp;&amp; &lt;div className="flex h-full items-center justify-center text-gray-400"&gt;发送一条消息测试模型连通性&lt;/div&gt;}
+          {messages.map(<span class="fstat-no" title="function not covered" >(m</span>, i) =&gt; (
+<span class="cstat-no" title="statement not covered" >            &lt;div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}&gt;</span>
+              &lt;div className={`max-w-[80%] whitespace-pre-wrap rounded-lg px-3 py-2 text-sm ${m.role === 'user' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200'}`}&gt;
+                {m.content}
+              &lt;/div&gt;
+            &lt;/div&gt;
+          ))}
+          &lt;div ref={bottomRef} /&gt;
+        &lt;/div&gt;
+        &lt;div className="border-t border-gray-200 p-3 dark:border-gray-700"&gt;
+          &lt;div className="flex gap-2"&gt;
+            &lt;textarea
+              value={input}
+              onChange={<span class="fstat-no" title="function not covered" >e =&gt; <span class="cstat-no" title="statement not covered" >s</span>etInput(e.target.value)}</span>
+              onKeyDown={<span class="fstat-no" title="function not covered" >e =&gt; {</span> <span class="cstat-no" title="statement not covered" >if (e.key === 'Enter' &amp;&amp; !e.shiftKey) { <span class="cstat-no" title="statement not covered" >e.preventDefault(); <span class="cstat-no" title="statement not covered" >s</span>end() }</span> }</span>}
+              placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+              rows={2}
+              className="flex-1 resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700"
+            /&gt;
+            &lt;button onClick={send} disabled={busy || !input.trim()} className="flex w-20 items-center justify-center rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"&gt;
+              {busy ? &lt;Loader2 className="h-4 w-4 animate-spin" /&gt; : &lt;Send className="h-4 w-4" /&gt;}
+            &lt;/button&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  )
+}
+&nbsp;</pre></td></tr></table></pre>
+
+                <div class='push'></div><!-- for sticky footer -->
+            </div><!-- /wrapper -->
+            <div class='footer quiet pad2 space-top1 center small'>
+                Code coverage generated by
+                <a href="https://vitest.dev/" target="_blank" rel="noopener noreferrer">Vitest</a>
+                at 2026-11-23T17:19:00.211Z
+            </div>
+        <script src="../prettify.js"></script>
+        <script>
+            window.onload = function () {
+                prettyPrint();
+            };
+        </script>
+        <script src="../sorter.js"></script>
+        <script src="../block-navigation.js"></script>
+    </body>
+</html>
+    
