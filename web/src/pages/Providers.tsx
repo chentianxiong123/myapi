@@ -368,7 +368,8 @@ export default function Providers() {
                     </span>
                     <button onClick={() => addModel(idx, activeProto)} className="text-xs text-blue-600 hover:text-blue-700">+ 添加</button>
                   </div>
-                  <table className="w-full text-left text-sm">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm">
                     <thead>
                       <tr className="border-b border-gray-200 dark:border-gray-700">
                         <th className="pb-2 font-medium text-gray-500">Name（上游真实名）</th>
@@ -428,7 +429,8 @@ export default function Providers() {
                           )
                         })}
                     </tbody>
-                  </table>
+                    </table>
+                  </div>
                   {protocolCount(p, activeProto) === 0 && (
                     <p className="py-3 text-center text-xs text-gray-400">该协议下还没有模型，点「+ 添加」</p>
                   )}

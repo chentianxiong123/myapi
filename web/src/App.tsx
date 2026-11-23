@@ -20,7 +20,7 @@ export default function App() {
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar active={tab} onSelect={setTab} />
-      <main className="flex-1 overflow-y-auto p-6">
+      <main className="flex-1 overflow-y-auto p-4 pt-16 md:p-6 md:pt-6">
         <Toast />
         {tab === 'dashboard' && <Dashboard />}
         {tab === 'models' && <Models />}

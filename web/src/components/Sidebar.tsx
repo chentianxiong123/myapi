@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   LayoutDashboard, List, ScrollText, Settings, Server,
-  Play, Sun, Moon, Languages, ChevronsLeft, ChevronsRight, Layers, Network, KeyRound, MessageSquare, Globe, Plug
+  Play, Sun, Moon, Languages, ChevronsLeft, ChevronsRight, Layers, Network, KeyRound, MessageSquare, Globe, Plug,
+  Menu, X,
 } from 'lucide-react'
 import { useTheme } from '@/contexts/ThemeContext'
 
@@ -27,6 +28,7 @@ interface Props {
 
 export default function Sidebar({ active, onSelect }: Props) {
   const [collapsed, setCollapsed] = useState(false)
+  const [mobileOpen, setMobileOpen] = useState(false)
   const { theme, setTheme } = useTheme()
   const { i18n } = useTranslation()
 
@@ -40,24 +42,18 @@ export default function Sidebar({ active, onSelect }: Props) {
     localStorage.setItem('language', next)
   }
 
-  return (
-    <aside
-      className={`flex h-screen flex-col border-r border-gray-200 bg-white transition-all dark:border-gray-700 dark:bg-gray-800 ${
-        collapsed ? 'w-16' : 'w-56'
-      }`}
-    >
-      {/* Logo */}
-      <div className="flex h-14 items-center gap-2 border-b border-gray-200 px-4 dark:border-gray-700">
-        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-blue-600 text-xs text-white">MY</div>
-        {!collapsed && <span className="font-bold">myapi</span>}
-      </div>
+  function select(id: string) {
+    onSelect(id)
+    setMobileOpen(false)
+  }
 
-      {/* 导航 */}
+  const NavContent = ({ showLabel, showCollapse }: { showLabel: boolean; showCollapse: boolean }) => (
+    <>
       <nav className="flex-1 space-y-1 overflow-y-auto p-2">
         {navItems.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
-            onClick={() => onSelect(id)}
+            onClick={() => select(id)}
             title={i18n.t(label)}
             className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm ${
               active === id
@@ -66,29 +62,75 @@ export default function Sidebar({ active, onSelect }: Props) {
             }`}
           >
             <Icon className="h-4 w-4 shrink-0" />
-            {!collapsed && <span>{i18n.t(label)}</span>}
+            {showLabel && <span>{i18n.t(label)}</span>}
           </button>
         ))}
       </nav>
 
-      {/* 底部工具 */}
       <div className="space-y-1 border-t border-gray-200 p-2 dark:border-gray-700">
         <button onClick={toggleTheme}
           className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700">
           {theme === 'dark' ? <Sun className="h-4 w-4 shrink-0" /> : <Moon className="h-4 w-4 shrink-0" />}
-          {!collapsed && <span>{theme === 'dark' ? '浅色' : '深色'}</span>}
+          {showLabel && <span>{theme === 'dark' ? '浅色' : '深色'}</span>}
         </button>
         <button onClick={toggleLanguage}
           className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700">
           <Languages className="h-4 w-4 shrink-0" />
-          {!collapsed && <span>{i18n.language === 'zh' ? '中文' : 'English'}</span>}
+          {showLabel && <span>{i18n.language === 'zh' ? '中文' : 'English'}</span>}
         </button>
-        <button onClick={() => setCollapsed(!collapsed)}
-          className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700">
-          {collapsed ? <ChevronsRight className="h-4 w-4 shrink-0" /> : <ChevronsLeft className="h-4 w-4 shrink-0" />}
-          {!collapsed && <span>收起</span>}
-        </button>
+        {showCollapse && (
+          <button onClick={() => setCollapsed(!collapsed)}
+            className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700">
+            {collapsed ? <ChevronsRight className="h-4 w-4 shrink-0" /> : <ChevronsLeft className="h-4 w-4 shrink-0" />}
+            {showLabel && <span>收起</span>}
+          </button>
+        )}
       </div>
-    </aside>
+    </>
+  )
+
+  return (
+    <>
+      {/* 移动端顶栏（<md）*/}
+      <header className="fixed inset-x-0 top-0 z-40 flex h-14 items-center gap-3 border-b border-gray-200 bg-white px-3 md:hidden dark:border-gray-700 dark:bg-gray-800">
+        <button onClick={() => setMobileOpen(true)} className="rounded-lg p-1.5 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700">
+          <Menu className="h-5 w-5" />
+        </button>
+        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-600 text-xs text-white">MY</div>
+        <span className="font-bold">myapi</span>
+      </header>
+
+      {/* 移动端抽屉 + 遮罩 */}
+      {mobileOpen && (
+        <div className="fixed inset-0 z-50 md:hidden">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setMobileOpen(false)} />
+          <aside className="absolute inset-y-0 left-0 flex w-64 flex-col border-r border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
+            <div className="flex h-14 items-center justify-between border-b border-gray-200 px-4 dark:border-gray-700">
+              <div className="flex items-center gap-2">
+                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-600 text-xs text-white">MY</div>
+                <span className="font-bold">myapi</span>
+              </div>
+              <button onClick={() => setMobileOpen(false)} className="rounded-lg p-1.5 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <NavContent showLabel showCollapse={false} />
+          </aside>
+        </div>
+      )}
+
+      {/* 桌面侧边栏（≥md）*/}
+      <aside
+        className={`hidden h-screen flex-col border-r border-gray-200 bg-white transition-all md:flex dark:border-gray-700 dark:bg-gray-800 ${
+          collapsed ? 'md:w-16' : 'md:w-56'
+        }`}
+      >
+        <div className="flex h-14 items-center gap-2 border-b border-gray-200 px-4 dark:border-gray-700">
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-blue-600 text-xs text-white">MY</div>
+          {!collapsed && <span className="font-bold">myapi</span>}
+        </div>
+        <NavContent showLabel={!collapsed} showCollapse />
+      </aside>
+    </>
   )
 }
