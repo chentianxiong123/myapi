@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react'
-import { RefreshCw, Filter, Download } from 'lucide-react'
+import { RefreshCw, Filter, Download, ChevronDown, Check, X, Columns, ListFilter } from 'lucide-react'
 import type { RequestLog } from '@/lib/types'
 import { exportCSV, exportJSON } from '@/lib/export'
 import RequestLogTable from '@/components/RequestLogTable'
+import {
+  resolveRequestLogColumns, setRequestLogColumn, TOGGLEABLE_REQUEST_LOG_COLUMNS,
+  STATUS_CODE_OPTIONS, type RequestLogColumnId,
+} from '@/lib/requestLogColumns'
 
 export default function Logs() {
   const [logs, setLogs] = useState<RequestLog[]>([])
@@ -11,7 +15,11 @@ export default function Logs() {
   const [filterModel, setFilterModel] = useState('')
   const [filterProvider, setFilterProvider] = useState('')
   const [filterError, setFilterError] = useState<'all' | 'error' | 'success'>('all')
+  const [filterStatus, setFilterStatus] = useState<number | undefined>(undefined)
   const [limit, setLimit] = useState(100)
+  const [columns, setColumns] = useState<RequestLogColumnId[]>(() => resolveRequestLogColumns(undefined))
+  const [colOverrides, setColOverrides] = useState<Record<string, boolean>>({})
+  const [openMenu, setOpenMenu] = useState<'status' | 'columns' | null>(null)
 
   useEffect(() => { loadLogs() }, [limit])
 
@@ -34,8 +42,18 @@ export default function Logs() {
     if (filterProvider && !log.provider.includes(filterProvider)) return false
     if (filterError === 'error' && !log.error) return false
     if (filterError === 'success' && log.error) return false
+    if (filterStatus !== undefined && log.status_code !== filterStatus) return false
     return true
   })
+
+  function toggleColumn(id: RequestLogColumnId) {
+    const next = setRequestLogColumn(colOverrides, id, !columns.includes(id))
+    setColOverrides(next)
+    setColumns(resolveRequestLogColumns(next))
+  }
+
+  const statusLabel = filterStatus === undefined ? '全部状态码' : String(filterStatus)
+  const shownToggleable = TOGGLEABLE_REQUEST_LOG_COLUMNS.filter(({ id }) => columns.includes(id)).length
 
   return (
     <div className="space-y-4">
@@ -53,7 +71,7 @@ export default function Logs() {
         </div>
       </div>
 
-      {/* 筛选栏（学 new-api 通用日志） */}
+      {/* 筛选栏（学 new-api 通用日志 + cc-switch 状态码/列选择） */}
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
         <Filter className="h-4 w-4 text-gray-400" />
         <input value={filterModel} onChange={e => setFilterModel(e.target.value)} placeholder="模型名称..."
@@ -66,6 +84,60 @@ export default function Logs() {
           <option value="success">成功</option>
           <option value="error">错误</option>
         </select>
+
+        {/* 状态码筛选（学 cc-switch STATUS_CODE_OPTIONS） */}
+        <div className="relative">
+          <button onClick={() => setOpenMenu(openMenu === 'status' ? null : 'status')}
+            className="flex items-center gap-1 rounded border border-gray-300 px-2 py-1 text-sm dark:border-gray-600 dark:bg-gray-700">
+            <ListFilter className="h-3.5 w-3.5" />
+            {statusLabel}
+            <ChevronDown className="h-3.5 w-3.5" />
+          </button>
+          {openMenu === 'status' && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setOpenMenu(null)} />
+              <div className="absolute right-0 z-50 mt-1 w-40 rounded-lg border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-600 dark:bg-gray-800">
+                <button onClick={() => { setFilterStatus(undefined); setOpenMenu(null) }}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-700">
+                  {filterStatus === undefined ? <Check className="h-3.5 w-3.5" /> : <span className="w-3.5" />}
+                  全部状态码
+                </button>
+                {STATUS_CODE_OPTIONS.map(code => (
+                  <button key={code} onClick={() => { setFilterStatus(code); setOpenMenu(null) }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-700">
+                    {filterStatus === code ? <Check className="h-3.5 w-3.5" /> : <span className="w-3.5" />}
+                    <span className="tabular-nums">{code}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* 列选择器（学 cc-switch TOGGLEABLE_REQUEST_LOG_COLUMNS） */}
+        <div className="relative">
+          <button onClick={() => setOpenMenu(openMenu === 'columns' ? null : 'columns')}
+            className="flex items-center gap-1 rounded border border-gray-300 px-2 py-1 text-sm dark:border-gray-600 dark:bg-gray-700">
+            <Columns className="h-3.5 w-3.5" />
+            列 {shownToggleable}/{TOGGLEABLE_REQUEST_LOG_COLUMNS.length}
+            <ChevronDown className="h-3.5 w-3.5" />
+          </button>
+          {openMenu === 'columns' && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setOpenMenu(null)} />
+              <div className="absolute right-0 z-50 mt-1 w-44 rounded-lg border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-600 dark:bg-gray-800">
+                {TOGGLEABLE_REQUEST_LOG_COLUMNS.map(({ id, label }) => (
+                  <button key={id} onClick={() => toggleColumn(id)}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-700">
+                    {columns.includes(id) ? <Check className="h-3.5 w-3.5" /> : <span className="w-3.5" />}
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+
         <select value={limit} onChange={e => setLimit(parseInt(e.target.value))}
           className="rounded border border-gray-300 px-2 py-1 text-sm dark:border-gray-600 dark:bg-gray-700">
           <option value={50}>50 条</option>
@@ -76,7 +148,7 @@ export default function Logs() {
         <span className="ml-auto text-xs text-gray-400">显示 {filtered.length} / {logs.length} 条</span>
       </div>
 
-      <RequestLogTable logs={filtered} loading={loading} />
+      <RequestLogTable logs={filtered} loading={loading} columns={columns} />
     </div>
   )
 }
@@ -113,7 +185,7 @@ function generateMockLogs(count: number): RequestLog[] {
       latency_ms: latency,
       duration_s: duration,
       output_speed_tps: output_tokens / duration,
-      status_code: error ? 502 : 200,
+      status_code: error ? [400, 401, 429, 500][i % 4] : 200,
       error,
       is_stream: true,
     }

@@ -109,7 +109,7 @@ export default function Dashboard() {
           </button>
         ))}
       </div>
-      {tab === 'logs' && <RequestLogTable logs={logs} loading={loading} compact />}
+      {tab === 'logs' && <RequestLogTable logs={logs} loading={loading} columns={['time','app','model','output','ttft','status_code']} />}
       {tab === 'providers' && <ProviderStats providers={providers} loading={loading} />}
       {tab === 'models' && (
         <div className="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
