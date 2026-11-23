@@ -10,7 +10,8 @@
     "deploy": "部署",
     "tokens": "密钥",
     "chat": "在线测试",
-    "proxypools": "代理池"
+    "proxypools": "代理池",
+    "mcp": "MCP 接口"
   },
   "dashboard": {
     "title": "仪表盘",

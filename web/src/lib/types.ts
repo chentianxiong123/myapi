@@ -17,13 +17,14 @@ export interface Provider {
 }
 
 // 模型类型（学 9router /v1/models 分类：chat/webSearch/webFetch/embedding）
-export type ModelKind = 'chat' | 'webSearch' | 'webFetch' | 'embedding'
+export type ModelKind = 'chat' | 'webSearch' | 'webFetch' | 'embedding' | 'vision'
 
 export const MODEL_KINDS: Array<{ id: ModelKind; label: string; endpoint: string }> = [
   { id: 'chat', label: '对话（chat）', endpoint: '/v1/chat/completions' },
   { id: 'webSearch', label: 'Web 搜索（search）', endpoint: '/v1/search' },
   { id: 'webFetch', label: '网页抓取（fetch）', endpoint: '/v1/web-fetch' },
   { id: 'embedding', label: '嵌入（embedding）', endpoint: '/v1/embeddings' },
+  { id: 'vision', label: '识图（vision）', endpoint: '/v1/chat/completions' },
 ]
 
 export const MODEL_PROTOCOLS: Array<{ id: ModelProtocol; label: string; path: string }> = [
@@ -265,4 +266,26 @@ export interface ModelRoute {
   proxy: string           // 代理 URL（IPv4/IPv6；空=直连）
   weight: number          // 路由权重（权重高调用多）
   quota: number           // 独立额度（已用 tokens，独立算额度）
+}
+
+// MCP 接口（搜索/识图作为 MCP 工具暴露给 agent，学 9router mcp_tools）
+export type McpToolType = 'search' | 'vision'
+
+export interface McpToolConfig {
+  tool: McpToolType        // search / vision
+  enabled: boolean
+  models: string[]         // 绑定哪些模型（webSearch 模型→search；vision 模型→vision）
+  max_results: number      // search: 最大结果数
+  search_type: string      // search: web/news/x
+}
+
+export interface McpServerConfig {
+  id: string
+  name: string             // MCP server 名（如 myapi-search）
+  command: string          // 启动命令（如 npx / 可执行路径）
+  args: string             // 参数
+  env: Record<string, string>
+  transport: 'stdio' | 'http' | 'sse'
+  url: string              // http/sse 端点
+  enabled: boolean
 }
