@@ -8,6 +8,7 @@ interface Props {
 }
 
 type ChartType = 'area' | 'bar'
+type Metric = 'requests' | 'tokens'
 
 export default function TrendChart({ data, loading }: Props) {
   const [chartType, setChartType] = useState<ChartType>('area')
@@ -30,25 +31,16 @@ export default function TrendChart({ data, loading }: Props) {
       <div className="mb-4 flex items-center justify-between">
         <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">趋势</h3>
         <div className="flex gap-2">
-          {/* 图表类型切换 */}
           <div className="flex rounded-lg bg-gray-100 p-0.5 dark:bg-gray-700">
-            <button
-              onClick={() => setChartType('area')}
-              className={`rounded px-2 py-0.5 text-xs ${chartType === 'area' ? 'bg-white shadow dark:bg-gray-800' : 'text-gray-500'}`}
-            >面积</button>
-            <button
-              onClick={() => setChartType('bar')}
-              className={`rounded px-2 py-0.5 text-xs ${chartType === 'bar' ? 'bg-white shadow dark:bg-gray-800' : 'text-gray-500'}`}
-            >柱状</button>
+            <button onClick={() => setChartType('area')}
+              className={`rounded px-2 py-0.5 text-xs ${chartType === 'area' ? 'bg-white shadow dark:bg-gray-800' : 'text-gray-500'}`}>面积</button>
+            <button onClick={() => setChartType('bar')}
+              className={`rounded px-2 py-0.5 text-xs ${chartType === 'bar' ? 'bg-white shadow dark:bg-gray-800' : 'text-gray-500'}`}>柱状</button>
           </div>
-          {/* 指标切换 */}
           <div className="flex rounded-lg bg-gray-100 p-0.5 dark:bg-gray-700">
             {Object.entries(metrics).map(([key, v]) => (
-              <button
-                key={key}
-                onClick={() => setMetric(key as Metric)}
-                className={`rounded px-2 py-0.5 text-xs ${metric === key ? 'bg-white shadow dark:bg-gray-800' : 'text-gray-500'}`}
-              >{v.label}</button>
+              <button key={key} onClick={() => setMetric(key as Metric)}
+                className={`rounded px-2 py-0.5 text-xs ${metric === key ? 'bg-white shadow dark:bg-gray-800' : 'text-gray-500'}`}>{v.label}</button>
             ))}
           </div>
         </div>
@@ -66,7 +58,7 @@ export default function TrendChart({ data, loading }: Props) {
           <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e5e7eb', fontSize: '12px' }} />
           <Legend wrapperStyle={{ fontSize: '12px' }} />
           {chartType === 'area' ? (
-            <Area type="monotone" dataKey={m.key} name={m.label} stroke={m.color} strokeWidth={2} fill={`url(#colorMetric)`} />
+            <Area type="monotone" dataKey={m.key} name={m.label} stroke={m.color} strokeWidth={2} fill="url(#colorMetric)" />
           ) : (
             <Bar dataKey={m.key} name={m.label} fill={m.color} radius={[4, 4, 0, 0]} />
           )}
