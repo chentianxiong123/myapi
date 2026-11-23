@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { RefreshCw, Filter, XCircle, CheckCircle } from 'lucide-react'
+import { RefreshCw, Filter, XCircle, CheckCircle, Download } from "lucide-react"
+import { exportJSON, exportCSV } from "@/lib/export"
 import type { RequestLog } from '@/lib/types'
 
 const COLUMNS = [
@@ -77,7 +78,9 @@ export default function Logs() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold">请求日志</h2>
-        <button onClick={loadLogs} disabled={refreshing}
+        <button onClick={() => exportCSV(filtered, "request-logs")} className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700"><Download className="h-4 w-4" />导出 CSV</button>
+          <button onClick={() => exportJSON(filtered, "request-logs")} className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700"><Download className="h-4 w-4" />导出 JSON</button>
+          <button onClick={loadLogs} disabled={refreshing}
           className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700 disabled:opacity-50">
           <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />刷新
         </button>
