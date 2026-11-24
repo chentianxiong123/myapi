@@ -28,6 +28,8 @@ pub struct S {
     pub pins: gateway::PinStore,
     /// 限流计数（滑动窗口，防打爆上游）
     pub rates: gateway::RateStore,
+    /// 响应缓存（相同请求返回缓存，省 token）
+    pub cache: gateway::ResponseCacheStore,
 }
 
 impl S {
@@ -38,6 +40,7 @@ impl S {
             health: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             pins: gateway::new_pin_store(),
             rates: gateway::new_rate_store(),
+            cache: gateway::new_response_cache(),
         }
     }
 }
@@ -270,7 +273,7 @@ async fn gateway_chat(
 ) -> axum::response::Response {
     let auth = headers.get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    gateway::forward_chat(&s.root, &s.health, &s.pins, &s.rates, auth, payload).await
+    gateway::forward_chat(&s.root, &s.health, &s.pins, &s.rates, auth, payload, &s.cache).await
 }
 
 /// POST /v1/embeddings：复用路由+failover，走 /embeddings（无流式）
@@ -281,7 +284,7 @@ async fn gateway_embeddings(
 ) -> axum::response::Response {
     let auth = headers.get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    gateway::forward_embeddings(&s.root, &s.health, &s.pins, &s.rates, auth, payload).await
+    gateway::forward_embeddings(&s.root, &s.health, &s.pins, &s.rates, auth, payload, &s.cache).await
 }
 
 /// GET /v1/logs：查询最近请求日志（observability）
@@ -643,7 +646,7 @@ mod tests {
 
         let state = S::new(dir.path().to_path_buf());
         let payload = json!({"model": "up-model", "messages": [{"role": "user", "content": "hello"}]});
-        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         // 验证上游收到：Authorization Bearer + 上游真实模型名
@@ -670,7 +673,7 @@ mod tests {
 
         let state = S::new(dir.path().to_path_buf());
         let payload = json!({"model": "up-model", "messages": [{"role": "user", "content": "hi"}]});
-        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         // 单通道：上游 500 → 5xx 触发 failover 但无下一通道 → 502（网关语义：所有通道失败）
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 
@@ -709,7 +712,7 @@ mod tests {
         let state = S::new(dir.path().to_path_buf());
         // 用对外别名 my-model → 两个通道都能服务，但 ch1 上游 up-bad 会 404
         let payload = json!({"model": "up-bad", "messages": [{"role": "user", "content": "hi"}]});
-        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         // ch1 404 → failover 但只有 ch1 服务 up-bad，最终 404/502
         assert!(resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -722,7 +725,7 @@ mod tests {
 
         let state = S::new(dir.path().to_path_buf());
         let payload = json!({"model": "up-model", "messages": [{"role": "user", "content": "hi"}]});
-        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         assert!(resp.status() == StatusCode::INTERNAL_SERVER_ERROR || resp.status() == StatusCode::BAD_GATEWAY || resp.status() == StatusCode::SERVICE_UNAVAILABLE);
     }
 
@@ -748,7 +751,7 @@ mod tests {
         let state = S::new(dir.path().to_path_buf());
         // 请求用对外别名
         let payload = json!({"model": "my-alias", "messages": [{"role": "user", "content": "hi"}]});
-        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         // 上游收到的是真实名 real-model（不是别名）
@@ -774,7 +777,7 @@ mod tests {
 
         let state = S::new(dir.path().to_path_buf());
         let payload = json!({"model": "up-model", "stream": true, "messages": [{"role": "user", "content": "hi"}]});
-        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         assert_eq!(resp.status(), StatusCode::OK);
         // body 是流（能 collect 出 SSE 数据）—— 核心断言：上游 SSE body 透传到客户端
         let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
@@ -848,7 +851,7 @@ mod tests {
         // 连发 4 次：ch1 每次先失败（500），failover 到 ch2 成功 → 整体 200
         // 但 ch1 连续失败 2 次 → 熔断 open → 后续请求不再打 ch1
         for _ in 0..4 {
-            let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload.clone()).await;
+            let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload.clone(), &state.cache).await;
             assert_eq!(resp.status(), StatusCode::OK, "failover 到 ch2 应成功");
         }
 
@@ -910,7 +913,7 @@ mod tests {
         // 同 session_id 发 3 次（首次成功后 pin，后续复用同通道）
         for _ in 0..3 {
             let payload = json!({"model": "my-model", "session_id": "sess-sticky", "messages": [{"role": "user", "content": "hi"}]});
-            let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+            let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
             assert_eq!(resp.status(), StatusCode::OK);
         }
 
@@ -957,7 +960,7 @@ mod tests {
         let state = S::new(dir.path().to_path_buf());
         for _ in 0..5 {
             let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
-            let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+            let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
             assert_eq!(resp.status(), StatusCode::OK, "限流应 failover 到 ch2，整体仍 200");
         }
 
@@ -1008,7 +1011,7 @@ mod tests {
         let state = S::new(dir.path().to_path_buf());
         let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
         // 单通道成功请求（验证 recovery 后通道恢复服务）
-        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
     }
@@ -1035,7 +1038,7 @@ mod tests {
 
         let state = S::new(dir.path().to_path_buf());
         let payload = json!({"model": "embed-model", "input": "hello world"});
-        let resp = gateway::forward_embeddings(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        let resp = gateway::forward_embeddings(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         // 上游收到 embeddings 路径 + input
@@ -1074,13 +1077,13 @@ mod tests {
         let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
 
         // 无 Bearer → 401
-        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload.clone()).await;
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload.clone(), &state.cache).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         // 错 key → 401
-        let resp2 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, Some("Bearer wrong"), payload.clone()).await;
+        let resp2 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, Some("Bearer wrong"), payload.clone(), &state.cache).await;
         assert_eq!(resp2.status(), StatusCode::UNAUTHORIZED);
         // 对 key → 放行 200
-        let resp3 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, Some("Bearer sk-downstream-secret"), payload).await;
+        let resp3 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, Some("Bearer sk-downstream-secret"), payload, &state.cache).await;
         assert_eq!(resp3.status(), StatusCode::OK);
         // 上游只被对 key 那 1 次调用（前两次 401 没转发）
         assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
@@ -1103,7 +1106,7 @@ mod tests {
 
         let state = S::new(dir.path().to_path_buf());
         let payload = json!({"model": "up-model", "messages": [{"role": "user", "content": "hi"}]});
-        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         assert_eq!(resp.status(), StatusCode::OK);
         // 透传上游关键 header
         assert_eq!(resp.headers().get("x-request-id").and_then(|v| v.to_str().ok()), Some("req-123"));
@@ -1129,7 +1132,7 @@ mod tests {
 
         let state = S::new(dir.path().to_path_buf());
         let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
-        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         // 401 致命错误直接透传（不换成 502）
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(upstream.received_requests().await.unwrap().len(), 1, "致命 4xx 不 failover");
@@ -1155,7 +1158,7 @@ mod tests {
 
         let state = S::new(dir.path().to_path_buf());
         let payload = json!({"model": "up-model", "messages": [{"role": "user", "content": "hi"}]});
-        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let logs = gateway_logs::query_recent(&dir.path(), 5).unwrap();
@@ -1198,12 +1201,12 @@ mod tests {
         let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
 
         // 第 1 次：预算内（0 < 100），放行，记 200 token
-        let resp1 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, Some("Bearer sk-user"), payload.clone()).await;
+        let resp1 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, Some("Bearer sk-user"), payload.clone(), &state.cache).await;
         assert_eq!(resp1.status(), StatusCode::OK);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await; // 等日志落库
 
         // 第 2 次：已用 200 > 预算 100 → 429
-        let resp2 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, Some("Bearer sk-user"), payload).await;
+        let resp2 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, Some("Bearer sk-user"), payload, &state.cache).await;
         assert_eq!(resp2.status(), StatusCode::TOO_MANY_REQUESTS, "超每日 token 预算应 429");
     }
 
@@ -1228,7 +1231,7 @@ mod tests {
 
         let state = S::new(dir.path().to_path_buf());
         let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
-        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         // 500 可重试 → 退避后 failover 到 ch2 → 整体 200
         assert_eq!(resp.status(), StatusCode::OK);
         // ch1(500) 至少被试 1 次
@@ -1284,7 +1287,7 @@ mod tests {
 
         let state = S::new(dir.path().to_path_buf());
         let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
-        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         // ch1 的 500 被配成致命 → 直接透传 500（不 failover 到 ch2）
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR, "通道把 500 配成致命应透传");
         // ch1(m1) 只被调 1 次（致命不 failover）
@@ -1317,9 +1320,150 @@ mod tests {
 
         let state = S::new(dir.path().to_path_buf());
         let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
-        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         // 全局默认 500 可重试 → failover 到 ch2 → 200
         assert_eq!(resp.status(), StatusCode::OK, "全局默认 500 可重试应 failover");
+    }
+
+
+    // ==================== 三个新功能真测：响应缓存/上下文过滤/模型降级链 ====================
+
+    #[tokio::test]
+    async fn response_cache_hits_second_request() {
+        // 响应缓存（学 LiteLLM caching）：相同请求第 2 次命中缓存，上游只被调 1 次
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "cached", "choices": [{"message": {"role": "assistant", "content": "hello"}}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 1}
+            })))
+            .expect(1) // 只被调 1 次（第 2 次命中缓存）
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        let cfg = json!({
+            "listen": 0,
+            "response_cache": {"enabled": true, "ttl_seconds": 300, "max_entries": 100},
+            "providers": [{
+                "name": "p", "base_url": format!("{}/v1", upstream.uri()),
+                "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk-up"}],
+                "channels": [{"id": "ch1", "name": "c", "key_name": "主",
+                              "models": [{"name": "m", "alias": "my-model"}]}],
+            }],
+        });
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
+
+        // 第 1 次：未命中，转发上游
+        let r1 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload.clone(), &state.cache).await;
+        assert_eq!(r1.status(), StatusCode::OK);
+        let b1 = http_body_util::BodyExt::collect(r1.into_body()).await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&b1).contains("hello"));
+
+        // 第 2 次：命中缓存（上游只调 1 次），返回同样内容 + x-cache: HIT
+        let r2 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(r2.status(), StatusCode::OK);
+        assert_eq!(r2.headers().get("x-cache").and_then(|v| v.to_str().ok()), Some("HIT"), "第 2 次应命中缓存");
+        let b2 = http_body_util::BodyExt::collect(r2.into_body()).await.unwrap().to_bytes();
+        assert_eq!(b1.to_vec(), b2.to_vec(), "缓存返回同样 body");
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1, "上游只调 1 次");
+    }
+
+    #[tokio::test]
+    async fn context_window_filter_skips_small_channel() {
+        // 上下文窗口过滤（学 LiteLLM max_input_tokens）：ch1 窗口 10（装不下），ch2 窗口大 → 路由到 ch2
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "big"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "big", "choices": []})))
+            .mount(&upstream).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "small"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "small", "choices": []})))
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        // ch1 服务 my-model→small，窗口 10（很小）；ch2 服务 my-model→big，窗口大
+        let cfg = json!({
+            "listen": 0,
+            "providers": [{
+                "name": "p", "base_url": format!("{}/v1", upstream.uri()),
+                "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk-up"}],
+                "channels": [
+                    {"id": "ch1", "name": "小窗口", "key_name": "主", "max_input_tokens": 10,
+                     "models": [{"name": "small", "alias": "my-model"}]},
+                    {"id": "ch2", "name": "大窗口", "key_name": "主", "max_input_tokens": 100000,
+                     "models": [{"name": "big", "alias": "my-model"}]},
+                ],
+            }],
+        });
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+
+        let state = S::new(dir.path().to_path_buf());
+        // 长文本（>10 token 的估算）：ch1 装不下 → 应路由到 ch2(big)
+        let long_text = "x".repeat(200);
+        let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": long_text}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        // 实际打到 big（ch2），不是 small（ch1 被过滤）
+        let reqs = upstream.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["model"], "big", "长请求应路由到大窗口通道 ch2");
+    }
+
+    #[tokio::test]
+    async fn model_fallback_chain_tries_backup_model() {
+        // 模型级降级链（学 LiteLLM fallbacks）：主模型所有通道失败 → 降级到备选模型
+        let upstream = MockServer::start().await;
+        // 主模型 gpt-4 通道恒 500
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "gpt-4"})))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&upstream).await;
+        // 备选 gpt-4o 通道 200
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "gpt-4o"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "fallback", "choices": [], "model": "gpt-4o"})))
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        let cfg = json!({
+            "listen": 0,
+            "model_fallback": {"enabled": true, "chains": {"gpt-4": ["gpt-4o"]}},
+            "providers": [{
+                "name": "p", "base_url": format!("{}/v1", upstream.uri()),
+                "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk-up"}],
+                "channels": [
+                    {"id": "ch-gpt4", "name": "gpt4通道", "key_name": "主",
+                     "models": [{"name": "gpt-4", "alias": "gpt-4"}]},
+                    {"id": "ch-gpt4o", "name": "gpt4o通道", "key_name": "主",
+                     "models": [{"name": "gpt-4o", "alias": "gpt-4o"}]},
+                ],
+            }],
+        });
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+
+        let state = S::new(dir.path().to_path_buf());
+        // 请求 gpt-4 → 其通道 500 → 降级到 gpt-4o → 200
+        let payload = json!({"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(resp.status(), StatusCode::OK, "主模型失败应降级到备选模型");
+        let b = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let v: Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["model"], "gpt-4o", "实际由备选模型 gpt-4o 服务");
     }
 
 }

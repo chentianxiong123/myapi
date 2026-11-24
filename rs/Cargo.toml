@@ -17,6 +17,8 @@ thiserror = "1"
 
 futures-core = "0.3"
 bytes = "1"
+sha2 = "0.10"
+http-body-util = "0.1"
 
 [dev-dependencies]
 # HTTP 集成测试：axum oneshot 要 tower ServiceExt + http-body-util 读 body

@@ -120,6 +120,9 @@ pub struct Channel {
     /// 通道级重试覆盖（空=继承全局 retry）；只配想改的字段
     #[serde(default)]
     pub retry: Option<RetryOverride>,
+    /// 该通道模型的最大输入 token（上下文窗口过滤：超长请求跳过装不下的通道）
+    #[serde(default)]
+    pub max_input_tokens: Option<i64>,
 }
 
 fn default_weight() -> u32 { 1 }
@@ -181,6 +184,46 @@ pub struct GatewayConfig {
     /// 下游鉴权（agent 调网关校验 Bearer key）
     #[serde(default)]
     pub auth: AuthConfig,
+    /// 响应缓存（相同请求返回缓存，省 token，学 LiteLLM caching）
+    #[serde(default)]
+    pub response_cache: ResponseCacheConfig,
+    /// 模型级降级链（gpt-4 挂→降级 gpt-4o，区别于通道级 failover，学 LiteLLM fallbacks）
+    #[serde(default)]
+    pub model_fallback: ModelFallbackConfig,
+}
+
+/// 响应缓存配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseCacheConfig {
+    /// 是否启用
+    #[serde(default)]
+    pub enabled: bool,
+    /// 缓存 TTL 秒
+    #[serde(default = "def_cache_ttl")]
+    pub ttl_seconds: u64,
+    /// 最大缓存条目（防内存涨，个人网关够用）
+    #[serde(default = "def_cache_max_entries")]
+    pub max_entries: usize,
+}
+
+fn def_cache_ttl() -> u64 { 300 }
+fn def_cache_max_entries() -> usize { 1000 }
+
+impl Default for ResponseCacheConfig {
+    fn default() -> Self {
+        Self { enabled: false, ttl_seconds: def_cache_ttl(), max_entries: def_cache_max_entries() }
+    }
+}
+
+/// 模型级降级链配置
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelFallbackConfig {
+    /// 是否启用
+    #[serde(default)]
+    pub enabled: bool,
+    /// 降级链：主模型 → [备选模型...]（按序尝试）。键=对外请求的模型名
+    #[serde(default)]
+    pub chains: std::collections::HashMap<String, Vec<String>>,
 }
 
 fn def_listen() -> u16 { 8380 }
@@ -762,6 +805,7 @@ pub fn ordered_candidates(
     requested_model: &str,
     health: &HealthMap,
     pin_channel_id: Option<&str>,
+    input_tokens: i64,
 ) -> Vec<SelectedChannel> {
     let hs = health.try_read().ok();
     let hs = hs.as_deref();
@@ -783,7 +827,12 @@ pub fn ordered_candidates(
     }
     if candidates.is_empty() { return Vec::new(); }
 
-    // 按策略选出的首选 index（apply_strategy 处理熔断过滤 + 策略排序）
+    // 上下文窗口过滤（学 LiteLLM max_input_tokens）：超长请求跳过装不下的通道
+    if input_tokens > 0 {
+        candidates.retain(|(_, c, _)| c.max_input_tokens.map_or(true, |max| input_tokens <= max));
+        if candidates.is_empty() { return Vec::new(); }
+    }
+
     let first = apply_strategy(&candidates, hs, cb, strategy);
 
     // 构造 SelectedChannel 列表：首选在前，其余按原序在后
@@ -908,6 +957,7 @@ pub async fn forward_generic(
     auth_header: Option<&str>,
     payload: serde_json::Value,
     upstream_path: &str,
+    cache: &ResponseCacheStore,
 ) -> axum::response::Response {
     let config = load_config(root);
     // 下游鉴权：校验 Bearer key（api_keys 配了才校验，空=内网不鉴权）
@@ -940,7 +990,7 @@ pub async fn forward_generic(
 
     // Auto 模式：model=auto 且开启 auto_mode → 聚合所有可用模型按 capability+延迟排序，逐个试，失败 fallback 下一个
     if requested_model == "auto" && config.routing.auto_mode_enabled {
-        let candidates = auto_candidates(&config, &payload, health);
+        let candidates = auto_candidates(&config, &payload, health); // Auto 已按能力过滤
         if candidates.is_empty() {
             return error_response(404, "auto: 无可用模型");
         }
@@ -977,13 +1027,25 @@ pub async fn forward_generic(
         return error_response(502, &format!("auto: 所有候选失败, 最后错误: {}", last_err));
     }
 
+    // 响应缓存查询（学 LiteLLM caching）：非流式 + 启用缓存 → 命中直接返回
+    if config.response_cache.enabled && !payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let ck = cache_key(&requested_model, &payload);
+        if let Some(c) = cache_get(cache, &ck, config.response_cache.ttl_seconds).await {
+            let mut r = axum::response::Response::builder().status(c.status);
+            if let Some(ct) = c.content_type { r = r.header("content-type", ct); }
+            r = r.header("x-cache", "HIT");
+            return r.body(axum::body::Body::from(c.body)).unwrap_or_else(|_| error_response(500, "缓存回放失败"));
+        }
+    }
+
     // 非 Auto：候选链 + failover（逐个试，失败切下一个，受 max_retries 限制）
     // 黏性：从 pin 表取上次通道提到链首（复用），失败则 failover 到其他通道
     let pinned_id = match pin_key.as_deref() {
         Some(k) => pins.read().await.get(k).map(|e| e.channel_id.clone()),
         None => None,
     };
-    let candidates = ordered_candidates(&config, &requested_model, health, pinned_id.as_deref());
+    let input_tokens = estimate_input_tokens(&payload);
+    let candidates = ordered_candidates(&config, &requested_model, health, pinned_id.as_deref(), input_tokens);
     if candidates.is_empty() {
         return (
             axum::http::StatusCode::NOT_FOUND,
@@ -1009,6 +1071,17 @@ pub async fn forward_generic(
                         pins.write().await.insert(k.to_string(), PinEntry { channel_id: cand.channel.id.clone(), pinned_at: now_secs() });
                     }
                 }
+                // 响应缓存存储（学 LiteLLM caching）：非流式 + 启用缓存 → 存 body
+                if config.response_cache.enabled && !payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    let (parts, body) = resp.into_parts();
+                    let ct = parts.headers.get("content-type").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+                    let bytes = http_body_util::BodyExt::collect(body).await.map(|b| b.to_bytes().to_vec()).unwrap_or_default();
+                    let ck = cache_key(&requested_model, &payload);
+                    cache_put(cache, ck, CachedResponse { status: parts.status.as_u16(), content_type: ct, body: bytes.clone(), cached_at: std::time::Instant::now() }, config.response_cache.max_entries).await;
+                    let mut r = axum::response::Response::from_parts(parts, axum::body::Body::empty());
+                    *r.body_mut() = axum::body::Body::from(bytes);
+                    return r;
+                }
                 return resp;
             }
             Err(e) => {
@@ -1023,6 +1096,28 @@ pub async fn forward_generic(
                 }
                 attempted += 1;
                 continue; // failover 下一个
+            }
+        }
+    }
+    // 模型级降级链（学 LiteLLM fallbacks）：主模型所有通道失败 → 按降级链试备选模型
+    if config.model_fallback.enabled {
+        if let Some(chain) = config.model_fallback.chains.get(&requested_model) {
+            for fb_model in chain {
+                let fb_candidates = ordered_candidates(&config, fb_model, health, None, input_tokens);
+                if fb_candidates.is_empty() { continue; }
+                let fb_max = config.retry.max_retries.min(fb_candidates.len());
+                for cand in fb_candidates.iter().take(fb_max.max(1)) {
+                    if let Some(rpm) = cand.channel.rpm {
+                        if is_rate_limited(rates, &cand.channel.id, rpm) { continue; }
+                    }
+                    let policy = resolve_retry_policy(&config.retry, cand.channel.retry.as_ref());
+                    let mut fb_payload = payload.clone();
+                    fb_payload["model"] = serde_json::Value::String(fb_model.clone());
+                    match forward_one(root, &config, health, cand, fb_model, &fb_payload, upstream_path, dkey.as_deref(), &policy).await {
+                        Ok(resp) => return resp,
+                        Err(e) => { if !e.is_retryable() { return error_response(e.status().unwrap_or(502), &e.message()); } continue; }
+                    }
+                }
             }
         }
     }
@@ -1058,6 +1153,64 @@ impl ForwardError {
             ForwardError::Retryable { msg, .. } | ForwardError::Fatal { msg, .. } => msg.clone(),
         }
     }
+}
+
+/// 粗估 input token（不引 tokenizer SDK：4 字符≈1 token，个人网关够用）
+pub fn estimate_input_tokens(payload: &serde_json::Value) -> i64 {
+    let mut total: i64 = 0;
+    if let Some(msgs) = payload.get("messages").and_then(|v| v.as_array()) {
+        for m in msgs {
+            if let Some(c) = m.get("content").and_then(|v| v.as_str()) {
+                total += (c.len() as i64) / 4 + 1;
+            }
+        }
+    }
+    total
+}
+
+/// 响应缓存条目
+#[derive(Clone)]
+pub struct CachedResponse {
+    pub status: u16,
+    pub content_type: Option<String>,
+    pub body: Vec<u8>,
+    pub cached_at: std::time::Instant,
+}
+
+/// 响应缓存 store（全局共享）
+pub type ResponseCacheStore = std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, CachedResponse>>>;
+pub fn new_response_cache() -> ResponseCacheStore {
+    std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// 缓存 key（学 LiteLLM cache-response：SHA256(model + messages)）
+pub fn cache_key(model: &str, payload: &serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(model.as_bytes());
+    if let Some(msgs) = payload.get("messages") {
+        hasher.update(msgs.to_string().as_bytes());
+    }
+    let h = hasher.finalize();
+    h.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+}
+
+/// 查缓存（TTL 内有效）
+pub async fn cache_get(store: &ResponseCacheStore, key: &str, ttl_seconds: u64) -> Option<CachedResponse> {
+    let map = store.read().await;
+    map.get(key).cloned().filter(|c| c.cached_at.elapsed().as_secs() < ttl_seconds)
+}
+
+/// 存缓存（超 max_entries 淘汰最旧）
+pub async fn cache_put(store: &ResponseCacheStore, key: String, resp: CachedResponse, max_entries: usize) {
+    let mut map = store.write().await;
+    if map.len() >= max_entries {
+        // 淘汰最旧（按 cached_at）
+        if let Some(oldest) = map.iter().min_by_key(|(_, v)| v.cached_at).map(|(k, _)| k.clone()) {
+            map.remove(&oldest);
+        }
+    }
+    map.insert(key, resp);
 }
 
 /// 合并全局重试策略 + 通道级覆盖（通道只配想改的字段，其余继承全局）
@@ -1373,8 +1526,9 @@ pub async fn forward_chat(
     rates: &RateStore,
     auth_header: Option<&str>,
     payload: serde_json::Value,
+    cache: &ResponseCacheStore,
 ) -> axum::response::Response {
-    forward_generic(root, health, pins, rates, auth_header, payload, "/chat/completions").await
+    forward_generic(root, health, pins, rates, auth_header, payload, "/chat/completions", cache).await
 }
 
 /// embeddings 端点（复用路由+failover，走 /embeddings，无流式）
@@ -1385,13 +1539,14 @@ pub async fn forward_embeddings(
     rates: &RateStore,
     auth_header: Option<&str>,
     payload: serde_json::Value,
+    cache: &ResponseCacheStore,
 ) -> axum::response::Response {
     // embeddings 不流式，强制去掉 stream 标记
     let mut p = payload;
     if let Some(obj) = p.as_object_mut() {
         obj.remove("stream");
     }
-    forward_generic(root, health, pins, rates, auth_header, p, "/embeddings").await
+    forward_generic(root, health, pins, rates, auth_header, p, "/embeddings", cache).await
 }
 
 
@@ -1610,7 +1765,7 @@ mod tests {
                 path: None,
                 key_name: None,
                 models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }],
-                weight: 1, rpm: None, retry: None }],
+                weight: 1, rpm: None, retry: None, max_input_tokens: None }],
             proxy: String::new(),
         });
         let h = health_map();
@@ -1633,9 +1788,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
+                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
                 Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
+                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
             ],
             proxy: String::new(),
         });
@@ -1660,9 +1815,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
+                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
                 Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
+                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
             ],
             proxy: String::new(),
         });
@@ -1690,7 +1845,7 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None }],
+                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None }],
             proxy: String::new(),
         });
         let h = health_map();
@@ -1710,7 +1865,7 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None }],
+                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None }],
             proxy: String::new(),
         });
         let h = health_map();
@@ -1740,9 +1895,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "slow".into(), name: "slow".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
                 Channel { id: "fast".into(), name: "fast".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
             ],
             proxy: String::new(),
         });
@@ -1784,9 +1939,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
                 Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
             ],
             proxy: String::new(),
         });
@@ -1845,7 +2000,7 @@ mod tests {
             channels: vec![Channel {
                 id: "ch-text".into(), name: "text".into(), path: None, key_name: None,
                 models: vec![ChannelModel { name: "text-only".into(), alias: None, capabilities: vec![] }],
-                weight: 1, rpm: None, retry: None }],
+                weight: 1, rpm: None, retry: None, max_input_tokens: None }],
             proxy: String::new(),
         });
         let h = health_map();
@@ -1866,10 +2021,10 @@ mod tests {
             channels: vec![
                 Channel { id: "ch-slow".into(), name: "slow".into(), path: None, key_name: None,
                     models: vec![ChannelModel { name: "m-slow".into(), alias: None, capabilities: vec!["vision".into()] }],
-                    weight: 1, rpm: None, retry: None },
+                    weight: 1, rpm: None, retry: None, max_input_tokens: None },
                 Channel { id: "ch-fast".into(), name: "fast".into(), path: None, key_name: None,
                     models: vec![ChannelModel { name: "m-fast".into(), alias: None, capabilities: vec!["vision".into()] }],
-                    weight: 1, rpm: None, retry: None },
+                    weight: 1, rpm: None, retry: None, max_input_tokens: None },
             ],
             proxy: String::new(),
         });
@@ -1897,7 +2052,7 @@ mod tests {
             channels: vec![Channel {
                 id: "ch-open".into(), name: "open".into(), path: None, key_name: None,
                 models: vec![ChannelModel { name: "m".into(), alias: None, capabilities: vec![] }],
-                weight: 1, rpm: None, retry: None }],
+                weight: 1, rpm: None, retry: None, max_input_tokens: None }],
             proxy: String::new(),
         });
         let h = health_map();
@@ -1923,18 +2078,18 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "chA".into(), name: "a".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
                 Channel { id: "chB".into(), name: "b".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
             ],
             proxy: String::new(),
         });
         let h = health_map();
         // 无 pin：应返回两条候选（failover 链完整）
-        let cands = ordered_candidates(&cfg, "my-model", &h, None);
+        let cands = ordered_candidates(&cfg, "my-model", &h, None, 0);
         assert_eq!(cands.len(), 2, "应返回完整 failover 链");
         // pin chB：应提到链首
-        let cands2 = ordered_candidates(&cfg, "my-model", &h, Some("chB"));
+        let cands2 = ordered_candidates(&cfg, "my-model", &h, Some("chB"), 0);
         assert_eq!(cands2[0].channel.id, "chB", "pin 通道应优先");
     }
 
@@ -1946,7 +2101,7 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "chOff".into(), name: "off".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None }],
+                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None }],
             proxy: String::new(),
         });
         cfg.providers.push(Provider {
@@ -1954,11 +2109,11 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "chOn".into(), name: "on".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None }],
+                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None }],
             proxy: String::new(),
         });
         let h = health_map();
-        let cands = ordered_candidates(&cfg, "my-model", &h, None);
+        let cands = ordered_candidates(&cfg, "my-model", &h, None, 0);
         assert_eq!(cands.len(), 1, "disabled provider 应被跳过");
         assert_eq!(cands[0].channel.id, "chOn");
     }
