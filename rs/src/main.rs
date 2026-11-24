@@ -123,6 +123,14 @@ async fn post_sync_diff(Json(payload): Json<Value>) -> axum::Json<Value> {
     axum::Json(api::node_diff(&payload).await)
 }
 
+/// POST /api/apply：显式触发批量下发（改完配置一键下发所有 agent，学 LiteLLM 手动 apply）
+/// 比静默自动下发更安全可控：前端保存配置后可调，返回每 agent 应用结果。
+async fn post_apply() -> axum::Json<Value> {
+    // 直调 cli::apply_hosts（同进程，不用 api::run_central 子进程）
+    let r = crate::cli::apply_hosts("", false, &[], &[]).await;
+    axum::Json(serde_json::json!({"ok": r.get("ok").cloned().unwrap_or(serde_json::Value::Bool(true)), "result": r}))
+}
+
 // ---- GET handlers ----
 async fn get_index(State(_s): State<S>) -> axum::response::Response {
     let p = root().join("web").join("static").join("index.html");
@@ -351,6 +359,7 @@ async fn main() {
         .route("/api/deploy/instances", get(get_deploy_instances).put(put_deploy_instances))
         .route("/api/sync/config", get(get_sync_config))
         .route("/api/sync/diff", post(post_sync_diff))
+        .route("/api/apply", post(post_apply))
         .route("/api/adapters", get(|| async { axum::Json(serde_json::json!({"ok": true, "names": api::get_adapters_info().get("names").cloned().unwrap_or_default(), "hosts": api::get_adapters_info().get("hosts").cloned().unwrap_or_default(), "adapter_instances": api::get_adapters_info().get("adapter_instances").cloned().unwrap_or_default(), "targets": api::get_adapters_info().get("targets").cloned().unwrap_or_default(), "strategies": api::get_adapters_info().get("strategies").cloned().unwrap_or_default()})) }))
         .route("/api/models", get(|| async { axum::Json(api::get_models().await) }))
         .route("/api/nodes", get(|| async { axum::Json(api::get_nodes().await) }))
