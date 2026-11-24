@@ -1001,4 +1001,101 @@ mod tests {
         assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
     }
 
+
+    // ==================== wiremock 场景补测：embeddings/下游鉴权/透传 header ====================
+
+    #[tokio::test]
+    async fn forward_embeddings_hits_embeddings_path() {
+        // /v1/embeddings → 上游 /v1/embeddings（不同 upstream_path），无流式
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "object": "list",
+                "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+                "usage": {"prompt_tokens": 3, "total_tokens": 3}
+            })))
+            .expect(1)
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "embed-model"));
+
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "embed-model", "input": "hello world"});
+        let resp = gateway::forward_embeddings(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 上游收到 embeddings 路径 + input
+        let reqs = upstream.received_requests().await.unwrap();
+        assert_eq!(reqs[0].url.path(), "/v1/embeddings");
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["input"], "hello world");
+    }
+
+    #[tokio::test]
+    async fn downstream_auth_rejects_missing_or_wrong_key() {
+        // 配 auth.api_keys → 无 Bearer / 错 key → 401；对 key → 放行
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x", "choices": []})))
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        // gateway.yaml 配下游鉴权 key
+        let cfg = json!({
+            "listen": 0,
+            "auth": {"api_keys": ["sk-downstream-secret"]},
+            "providers": [{
+                "name": "p", "base_url": format!("{}/v1", upstream.uri()),
+                "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk-up"}],
+                "channels": [{"id": "ch1", "name": "c", "key_name": "主",
+                              "models": [{"name": "m", "alias": "my-model"}]}],
+            }],
+        });
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
+
+        // 无 Bearer → 401
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload.clone()).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        // 错 key → 401
+        let resp2 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, Some("Bearer wrong"), payload.clone()).await;
+        assert_eq!(resp2.status(), StatusCode::UNAUTHORIZED);
+        // 对 key → 放行 200
+        let resp3 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, Some("Bearer sk-downstream-secret"), payload).await;
+        assert_eq!(resp3.status(), StatusCode::OK);
+        // 上游只被对 key 那 1 次调用（前两次 401 没转发）
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn forward_passes_through_upstream_headers() {
+        // 上游回 x-request-id → 网关透传给客户端
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200)
+                .set_body_json(json!({"id": "x", "choices": []}))
+                .insert_header("x-request-id", "req-123")
+                .insert_header("openai-organization", "org-abc"))
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "up-model", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        // 透传上游关键 header
+        assert_eq!(resp.headers().get("x-request-id").and_then(|v| v.to_str().ok()), Some("req-123"));
+        assert_eq!(resp.headers().get("openai-organization").and_then(|v| v.to_str().ok()), Some("org-abc"));
+    }
+
 }
