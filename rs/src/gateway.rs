@@ -36,6 +36,9 @@ pub struct Channel {
     /// 路由权重（默认 1）
     #[serde(default = "default_weight")]
     pub weight: u32,
+    /// 每分钟请求上限（RPM，空=不限）；超限当不可用跳过（防打爆上游）
+    #[serde(default)]
+    pub rpm: Option<u32>,
 }
 
 fn default_weight() -> u32 { 1 }
@@ -608,6 +611,35 @@ pub fn new_pin_store() -> PinStore {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
+// ==================== 限流（防打爆上游，学 LiteLLM rpm/tpm）====================
+
+/// 限流计数：通道 id → 最近请求时间戳列表（滑动窗口）
+pub type RateStore = Arc<RwLock<HashMap<String, Vec<u64>>>>;
+
+pub fn new_rate_store() -> RateStore {
+    Arc::new(RwLock::new(HashMap::new()))
+}
+
+const RATE_WINDOW_SECS: u64 = 60;
+
+/// 检查通道是否被限流：滑动窗口内请求数 ≥ rpm → 限流（超限跳过该通道）
+pub fn is_rate_limited(store: &RateStore, channel_id: &str, rpm: u32) -> bool {
+    let now = now_secs();
+    let mut map = match store.try_write() {
+        Ok(m) => m,
+        Err(_) => return false, // 拿不到锁不拦（宁放行不误杀）
+    };
+    let list = map.entry(channel_id.to_string()).or_default();
+    // 清掉窗口外的旧时间戳
+    list.retain(|&t| now.saturating_sub(t) < RATE_WINDOW_SECS);
+    if list.len() >= rpm as usize {
+        true // 超限
+    } else {
+        list.push(now); // 记本次
+        false
+    }
+}
+
 /// 从请求提取 session 标识（pin key）。
 /// 优先级：X-Session-Id header > Authorization Bearer key hash（学 LiteLLM api-key affinity）
 pub fn session_key(payload: &serde_json::Value, auth_header: Option<&str>) -> Option<String> {
@@ -783,6 +815,7 @@ pub async fn forward_generic(
     root: &std::path::Path,
     health: &HealthMap,
     pins: &PinStore,
+    rates: &RateStore,
     auth_header: Option<&str>,
     payload: serde_json::Value,
     upstream_path: &str,
@@ -812,6 +845,10 @@ pub async fn forward_generic(
                 upstream_model: cand.upstream_model.clone(),
                 api_key: cand.api_key.clone(),
             };
+            // 限流：通道配了 rpm 且超限 → 跳过（防打爆上游）
+            if let Some(rpm) = cand.channel.rpm {
+                if is_rate_limited(rates, &cand.channel.id, rpm) { continue; }
+            }
             match forward_one(root, &config, health, &sel, &requested_model, &payload, upstream_path).await {
                 Ok(resp) => return resp,
                 Err(e) => {
@@ -841,6 +878,10 @@ pub async fn forward_generic(
     let max_retries = config.routing.max_retries.min(candidates.len());
     let mut last_err = String::new();
     for cand in candidates.iter().take(max_retries.max(1)) {
+        // 限流：通道配了 rpm 且超限 → 跳过（防打爆上游）
+        if let Some(rpm) = cand.channel.rpm {
+            if is_rate_limited(rates, &cand.channel.id, rpm) { continue; }
+        }
         match forward_one(root, &config, health, cand, &requested_model, &payload, upstream_path).await {
             Ok(resp) => {
                 // 成功：更新黏性 pin 到这条通道（供后续复用）
@@ -980,10 +1021,11 @@ pub async fn forward_chat(
     root: &std::path::Path,
     health: &HealthMap,
     pins: &PinStore,
+    rates: &RateStore,
     auth_header: Option<&str>,
     payload: serde_json::Value,
 ) -> axum::response::Response {
-    forward_generic(root, health, pins, auth_header, payload, "/chat/completions").await
+    forward_generic(root, health, pins, rates, auth_header, payload, "/chat/completions").await
 }
 
 /// embeddings 端点（复用路由+failover，走 /embeddings，无流式）
@@ -991,6 +1033,7 @@ pub async fn forward_embeddings(
     root: &std::path::Path,
     health: &HealthMap,
     pins: &PinStore,
+    rates: &RateStore,
     auth_header: Option<&str>,
     payload: serde_json::Value,
 ) -> axum::response::Response {
@@ -999,7 +1042,7 @@ pub async fn forward_embeddings(
     if let Some(obj) = p.as_object_mut() {
         obj.remove("stream");
     }
-    forward_generic(root, health, pins, auth_header, p, "/embeddings").await
+    forward_generic(root, health, pins, rates, auth_header, p, "/embeddings").await
 }
 
 
@@ -1169,7 +1212,7 @@ mod tests {
                 path: None,
                 key_name: None,
                 models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }],
-                weight: 1,
+                weight: 1, rpm: None,
             }],
             proxy: String::new(),
         });
@@ -1193,9 +1236,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
+                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
                 Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
+                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
             ],
             proxy: String::new(),
         });
@@ -1220,9 +1263,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
+                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
                 Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
+                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
             ],
             proxy: String::new(),
         });
@@ -1250,7 +1293,7 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 }],
+                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None }],
             proxy: String::new(),
         });
         let h = health_map();
@@ -1270,7 +1313,7 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 }],
+                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None }],
             proxy: String::new(),
         });
         let h = health_map();
@@ -1300,9 +1343,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "slow".into(), name: "slow".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
                 Channel { id: "fast".into(), name: "fast".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
             ],
             proxy: String::new(),
         });
@@ -1344,9 +1387,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
                 Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
             ],
             proxy: String::new(),
         });
@@ -1405,7 +1448,7 @@ mod tests {
             channels: vec![Channel {
                 id: "ch-text".into(), name: "text".into(), path: None, key_name: None,
                 models: vec![ChannelModel { name: "text-only".into(), alias: None, capabilities: vec![] }],
-                weight: 1,
+                weight: 1, rpm: None,
             }],
             proxy: String::new(),
         });
@@ -1427,10 +1470,10 @@ mod tests {
             channels: vec![
                 Channel { id: "ch-slow".into(), name: "slow".into(), path: None, key_name: None,
                     models: vec![ChannelModel { name: "m-slow".into(), alias: None, capabilities: vec!["vision".into()] }],
-                    weight: 1 },
+                    weight: 1, rpm: None },
                 Channel { id: "ch-fast".into(), name: "fast".into(), path: None, key_name: None,
                     models: vec![ChannelModel { name: "m-fast".into(), alias: None, capabilities: vec!["vision".into()] }],
-                    weight: 1 },
+                    weight: 1, rpm: None },
             ],
             proxy: String::new(),
         });
@@ -1458,7 +1501,7 @@ mod tests {
             channels: vec![Channel {
                 id: "ch-open".into(), name: "open".into(), path: None, key_name: None,
                 models: vec![ChannelModel { name: "m".into(), alias: None, capabilities: vec![] }],
-                weight: 1,
+                weight: 1, rpm: None,
             }],
             proxy: String::new(),
         });
@@ -1485,9 +1528,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "chA".into(), name: "a".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
                 Channel { id: "chB".into(), name: "b".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
             ],
             proxy: String::new(),
         });
@@ -1508,7 +1551,7 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "chOff".into(), name: "off".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 }],
+                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None }],
             proxy: String::new(),
         });
         cfg.providers.push(Provider {
@@ -1516,7 +1559,7 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "chOn".into(), name: "on".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 }],
+                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None }],
             proxy: String::new(),
         });
         let h = health_map();
@@ -1544,5 +1587,37 @@ mod tests {
         assert!(validate_auth(&auth, Some("Bearer wrong")).is_err());
         // 对 key → 放行
         assert!(validate_auth(&auth, Some("Bearer sk-secret")).is_ok());
+    }
+
+    // ---- 限流测试（防打爆上游）----
+
+    #[test]
+    fn rate_limit_allows_under_rpm() {
+        let store = new_rate_store();
+        // 限 10 rpm，发 5 次 → 都放行
+        for _ in 0..5 {
+            assert!(!is_rate_limited(&store, "ch1", 10), "未超限应放行");
+        }
+    }
+
+    #[test]
+    fn rate_limit_blocks_over_rpm() {
+        let store = new_rate_store();
+        // 限 3 rpm，发 3 次（都放行），第 4 次应拦
+        for _ in 0..3 {
+            assert!(!is_rate_limited(&store, "ch2", 3));
+        }
+        assert!(is_rate_limited(&store, "ch2", 3), "超 rpm 应限流");
+    }
+
+    #[test]
+    fn rate_limit_per_channel_independent() {
+        let store = new_rate_store();
+        // ch1 打满，ch2 不受影响（按通道独立计数）
+        for _ in 0..3 {
+            is_rate_limited(&store, "ch1", 3);
+        }
+        assert!(is_rate_limited(&store, "ch1", 3), "ch1 应限流");
+        assert!(!is_rate_limited(&store, "ch2", 3), "ch2 应独立放行");
     }
 }

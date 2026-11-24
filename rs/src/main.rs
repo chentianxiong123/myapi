@@ -26,6 +26,8 @@ struct S {
     health: gateway::HealthMap,
     /// 黏性路由 pin 表（学 LiteLLM affinity，省 token）
     pins: gateway::PinStore,
+    /// 限流计数（滑动窗口，防打爆上游）
+    rates: gateway::RateStore,
 }
 
 fn root() -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")) }
@@ -157,7 +159,7 @@ async fn gateway_chat(
 ) -> axum::response::Response {
     let auth = headers.get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    gateway::forward_chat(&s.root, &s.health, &s.pins, auth, payload).await
+    gateway::forward_chat(&s.root, &s.health, &s.pins, &s.rates, auth, payload).await
 }
 
 /// POST /v1/embeddings：复用路由+failover，走 /embeddings（无流式）
@@ -168,7 +170,7 @@ async fn gateway_embeddings(
 ) -> axum::response::Response {
     let auth = headers.get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    gateway::forward_embeddings(&s.root, &s.health, &s.pins, auth, payload).await
+    gateway::forward_embeddings(&s.root, &s.health, &s.pins, &s.rates, auth, payload).await
 }
 
 /// GET /v1/logs：查询最近请求日志（observability）
@@ -194,6 +196,7 @@ async fn main() {
         root: root(),
         health: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         pins: gateway::new_pin_store(),
+        rates: gateway::new_rate_store(),
     };
     // 网关请求日志表（幂等）
     if let Err(e) = gateway_logs::init_table(&state.root) {
