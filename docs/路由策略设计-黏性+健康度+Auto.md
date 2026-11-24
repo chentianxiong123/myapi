@@ -45,10 +45,45 @@
 
 **工具历史扁平化**（panel 模型不能 loop 工具）：把 tool 调用压成纯文本，保留上下文但去掉工具循环。
 
-### ③ cc-switch（端点测速，最简单）
+### ③ cc-switch（标准三态熔断器 + 故障转移队列）⭐ 熔断最规范
 
-- **EndpointSpeedTest**：在 provider 卡片测端点延迟，按 `latency` 升序排序（快的优先）
-- 无自动路由/failover，只是**手动测速参考**
+**熔断器三态机**（`types/proxy.ts` `CircuitState = "closed" | "open" | "half_open"`）：
+```
+closed（关闭=正常放行）
+  → 连续失败达 failureThreshold 或 错误率 > errorRateThreshold
+  → open（打开=熔断，跳过该供应商）
+  → 等 timeoutSeconds 后
+  → half_open（半开=试探恢复）
+  → 连续成功达 successThreshold → closed
+  → 失败 → open
+```
+
+**CircuitBreakerConfig 可配参数（比 LiteLLM 更细）**：
+| 参数 | 含义 | 建议 |
+|---|---|---|
+| `failureThreshold` | 连续失败多少次开熔断 | 3-10 |
+| `errorRateThreshold` | 错误率阈值(%) | — |
+| `minRequests` | 错误率有意义的最小请求数 | — |
+| `successThreshold` | **半开下成功多少次关闭熔断器** | — |
+| `timeoutSeconds` | 打开后等多久尝试恢复 | 30-120 |
+
+**CircuitBreakerStats 运行态**：state / consecutiveFailures / consecutiveSuccesses / totalRequests / failedRequests
+
+**供应商健康四态**：healthy / degraded / failed / **unknown**（比我们三态多 unknown）
+
+**故障转移队列（failover queue）**：
+- 队列配多个供应商，按 `sortIndex` **优先级顺序依次尝试**（请求失败按序 fallback）
+- 某个连续失败达阈值 → 熔断器打开 → 一段时间内跳过
+- **手动重置熔断器**（`useResetCircuitBreaker`）
+- **流式/非流式分开超时**：`streamingFirstByteTimeout` / `streamingIdleTimeout` / `nonStreamingTimeout`
+
+**亮点（LiteLLM 没有的）**：
+1. **标准三态 + 半开恢复**（LiteLLM 只有冷却时长，无显式半开试探）
+2. **手动重置熔断器**（运维可手动解除）
+3. **故障转移队列可视化配置**（拖拽优先级）
+4. **流式/非流式分开超时**
+
+> 我之前把 cc-switch 误判为"最简单、无 failover"是错的——它的熔断器其实是**三家最规范的**（标准三态机 + 半开 + 手动重置）。
 
 ---
 
@@ -146,10 +181,18 @@ routing:
 │   ├── 启用 [✓]
 │   ├── 粒度：[会话 ▼]（会话/API-key/连续性）
 │   └── TTL：[300] 秒
-├── 熔断
-│   ├── 失败率阈值：[50]%
-│   ├── 冷却时长：[5] 秒
-│   └── 最小请求数：[5]
+├── 熔断（三态：closed/open/half_open，学 cc-switch）
+│   ├── 连续失败阈值：[5] 次（建议 3-10）
+│   ├── 错误率阈值：[50]%
+│   ├── 最小请求数：[5]（错误率有意义的最小量）
+│   ├── 恢复等待：[30] 秒（open→half_open，建议 30-120）
+│   └── 恢复成功阈值：[3] 次（half_open→closed）
+├── 超时（学 cc-switch 流式/非流式分开）
+│   ├── 流式首字超时：[30] 秒
+│   ├── 流式空闲超时：[60] 秒
+│   └── 非流式超时：[120] 秒
+├── 故障转移队列（学 cc-switch，拖拽优先级）
+│   └── 通道顺序：① → ② → ③（依次 fallback）
 ├── 全挂兜底：[降级继续(keep-all) ▼]
 ├── 延迟窗口：[60] 秒
 └── Auto 模式（未来）
