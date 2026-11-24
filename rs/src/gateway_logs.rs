@@ -319,3 +319,94 @@ pub fn query_daily(root: &std::path::Path, days: u32) -> Result<Value, String> {
     for r in rows { out.push(r.map_err(|e| e.to_string())?); }
     Ok(json!({ "object": "list", "data": out }))
 }
+
+// ==================== 测试（SQLite CRUD + 聚合，全用 tempfile 隔离）====================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// 建临时 db（先建 config 子目录，SQLite 不自动建父目录）
+    fn temp_db() -> (TempDir, std::path::PathBuf) {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        init_table(dir.path()).unwrap();
+        let root = dir.path().to_path_buf(); // 先 clone，再 move dir（保持 TempDir alive 到函数结束）
+        (dir, root)
+    }
+
+    fn entry(model: &str, provider: &str, channel: &str, status: u16, ttft: u64, lat: u64, in_tok: i64, out_tok: i64) -> LogEntry {
+        LogEntry {
+            model: model.into(), provider: provider.into(), channel: channel.into(),
+            status, latency_ms: lat, ttft_ms: ttft,
+            input_tokens: Some(in_tok), output_tokens: Some(out_tok), error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn log_and_query_recent() {
+        let (_d, root) = temp_db();
+        log_request(root.clone(), entry("gpt", "p1", "ch1", 200, 100, 500, 10, 20)).await;
+        log_request(root.clone(), entry("gpt", "p1", "ch1", 200, 120, 600, 15, 25)).await;
+        let v = query_recent(&root, 10).unwrap();
+        let data = v.get("data").and_then(|x| x.as_array()).unwrap();
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0].get("model").and_then(|x| x.as_str()), Some("gpt"));
+    }
+
+    #[tokio::test]
+    async fn query_summary_counts_and_tokens() {
+        let (_d, root) = temp_db();
+        log_request(root.clone(), entry("gpt", "p1", "ch1", 200, 100, 500, 10, 20)).await;
+        log_request(root.clone(), entry("gpt", "p1", "ch1", 500, 100, 500, 10, 20)).await;
+        let v = query_summary(&root).unwrap();
+        assert_eq!(v.get("total_requests").and_then(|x| x.as_i64()), Some(2));
+        assert_eq!(v.get("success_count").and_then(|x| x.as_i64()), Some(1));
+        assert_eq!(v.get("error_count").and_then(|x| x.as_i64()), Some(1));
+        assert_eq!(v.get("total_input_tokens").and_then(|x| x.as_i64()), Some(20));
+        assert_eq!(v.get("total_output_tokens").and_then(|x| x.as_i64()), Some(40));
+    }
+
+    #[tokio::test]
+    async fn query_stats_groups_by_channel() {
+        let (_d, root) = temp_db();
+        log_request(root.clone(), entry("gpt", "p1", "ch1", 200, 100, 500, 10, 20)).await;
+        log_request(root.clone(), entry("gpt", "p2", "ch2", 200, 200, 800, 10, 20)).await;
+        let v = query_stats(&root).unwrap();
+        let data = v.get("data").and_then(|x| x.as_array()).unwrap();
+        assert_eq!(data.len(), 2); // 两个通道
+    }
+
+    #[tokio::test]
+    async fn query_provider_stats_groups_by_provider() {
+        let (_d, root) = temp_db();
+        log_request(root.clone(), entry("gpt", "p1", "ch1", 200, 100, 500, 10, 20)).await;
+        log_request(root.clone(), entry("gpt", "p1", "ch2", 200, 100, 500, 10, 20)).await;
+        log_request(root.clone(), entry("gpt", "p2", "ch3", 200, 100, 500, 10, 20)).await;
+        let v = query_provider_stats(&root).unwrap();
+        let data = v.get("data").and_then(|x| x.as_array()).unwrap();
+        assert_eq!(data.len(), 2); // p1(2) + p2(1)
+        // p1 排第一（请求数多）
+        assert_eq!(data[0].get("name").and_then(|x| x.as_str()), Some("p1"));
+        assert_eq!(data[0].get("total_requests").and_then(|x| x.as_i64()), Some(2));
+    }
+
+    #[tokio::test]
+    async fn empty_db_summary_returns_zeros() {
+        let (_d, root) = temp_db();
+        let v = query_summary(&root).unwrap();
+        assert_eq!(v.get("total_requests").and_then(|x| x.as_i64()), Some(0));
+        assert_eq!(v.get("success_count").and_then(|x| x.as_i64()), Some(0));
+        assert_eq!(v.get("total_input_tokens").and_then(|x| x.as_i64()), Some(0));
+    }
+
+    #[tokio::test]
+    async fn trend_and_daily_return_arrays() {
+        let (_d, root) = temp_db();
+        log_request(root.clone(), entry("gpt", "p1", "ch1", 200, 100, 500, 10, 20)).await;
+        let trend = query_trend(&root, 24).unwrap();
+        assert!(trend.get("data").and_then(|x| x.as_array()).is_some());
+        let daily = query_daily(&root, 7).unwrap();
+        assert!(daily.get("data").and_then(|x| x.as_array()).is_some());
+    }
+}
