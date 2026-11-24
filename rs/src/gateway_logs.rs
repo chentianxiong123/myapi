@@ -179,12 +179,12 @@ pub fn query_summary(root: &std::path::Path) -> Result<Value, String> {
     let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
     let v = conn.query_row(
         "SELECT COUNT(*),
-                SUM(CASE WHEN status < 400 THEN 1 ELSE 0 END),
-                SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
-                SUM(COALESCE(input_tokens,0)),
-                SUM(COALESCE(output_tokens,0)),
-                AVG(ttft_ms),
-                AVG(latency_ms)
+                COALESCE(SUM(CASE WHEN status < 400 THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(COALESCE(input_tokens,0)),0),
+                COALESCE(SUM(COALESCE(output_tokens,0)),0),
+                COALESCE(AVG(ttft_ms),0),
+                COALESCE(AVG(latency_ms),0)
          FROM request_logs",
         [],
         |r| Ok((

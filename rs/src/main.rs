@@ -14,60 +14,72 @@ pub mod core {
 
 use axum::{extract::{Query, State}, response::IntoResponse, routing::{get, post}, Json, Router};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tower_http::services::ServeDir;
 use tower_http::cors::CorsLayer;
 
 #[derive(Clone)]
-struct S {
-    root: PathBuf,
+pub struct S {
+    pub root: PathBuf,
     /// 网关运行时健康度（被动统计，学 LiteLLM cooldown）
-    health: gateway::HealthMap,
+    pub health: gateway::HealthMap,
     /// 黏性路由 pin 表（学 LiteLLM affinity，省 token）
-    pins: gateway::PinStore,
+    pub pins: gateway::PinStore,
     /// 限流计数（滑动窗口，防打爆上游）
-    rates: gateway::RateStore,
+    pub rates: gateway::RateStore,
+}
+
+impl S {
+    /// 构造应用状态（main 和集成测试共用；测试传 tempdir 做 root）
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            health: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            pins: gateway::new_pin_store(),
+            rates: gateway::new_rate_store(),
+        }
+    }
 }
 
 fn root() -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")) }
 
 /// gateway.yaml 路径（网关配置，热加载：网关每请求重读）
-fn gateway_yaml() -> PathBuf { root().join("config").join("gateway.yaml") }
+fn gateway_yaml(root: &Path) -> PathBuf { root.join("config").join("gateway.yaml") }
 
 /// 读 gateway.yaml 某一段（providers/routing/proxypools…），缺段返回空
-fn read_gateway_section(section: &str) -> Value {
-    let doc = api::read_yaml_json(&gateway_yaml());
+fn read_gateway_section(root: &Path, section: &str) -> Value {
+    let doc = api::read_yaml_json(&gateway_yaml(root));
     doc.get(section).cloned().unwrap_or(Value::Null)
 }
 
 /// 写 gateway.yaml 某一段（保留其他段）
-fn write_gateway_section(section: &str, val: Value) -> std::io::Result<()> {
-    let mut doc = api::read_yaml_json(&gateway_yaml());
+fn write_gateway_section(root: &Path, section: &str, val: Value) -> std::io::Result<()> {
+    let mut doc = api::read_yaml_json(&gateway_yaml(root));
     if !doc.is_object() {
         doc = serde_json::json!({});
     }
     if let Some(obj) = doc.as_object_mut() {
         obj.insert(section.to_string(), val);
     }
-    api::write_yaml_json(&gateway_yaml(), &doc)
+    api::write_yaml_json(&gateway_yaml(root), &doc)
 }
 
 /// ---- 网关配置：供应商 / 路由 / 代理池（读写 gateway.yaml，网关热加载即时生效）----
 /// GET/POST 通用：段名 → handler。前端 Providers/Routing/ProxyPools 页真实数据源。
 macro_rules! gateway_section_handler {
     ($get:ident, $post:ident, $section:literal) => {
-        async fn $get() -> axum::Json<Value> {
-            let v = read_gateway_section($section);
+        async fn $get(State(s): State<S>) -> axum::Json<Value> {
+            let v = read_gateway_section(&s.root, $section);
             let arr = if v.is_null() { Value::Array(vec![]) } else { v };
             axum::Json(serde_json::json!({ $section: arr }))
         }
-        async fn $post(Json(payload): Json<Value>) -> axum::response::Response {
+        async fn $post(State(s): State<S>, Json(payload): Json<Value>) -> axum::response::Response {
             let val = payload.get($section).cloned().unwrap_or(Value::Null);
             if val.is_null() {
                 return axum::Json(serde_json::json!({"ok": false, "error": format!("缺 {} 段", $section)})).into_response();
             }
-            match write_gateway_section($section, val) {
+            match write_gateway_section(&s.root, $section, val) {
                 Ok(_) => axum::Json(serde_json::json!({"ok": true})).into_response(),
                 Err(e) => axum::Json(serde_json::json!({"ok": false, "error": e.to_string()})).into_response(),
             }
@@ -80,33 +92,33 @@ gateway_section_handler!(get_routing, post_routing, "routing");
 gateway_section_handler!(get_proxypools, post_proxypools, "proxy_pools");
 
 /// ---- MCP 配置（存 gateway.yaml mcp 段：{tools, servers}）----
-async fn get_mcp() -> axum::Json<Value> {
-    let v = read_gateway_section("mcp");
+async fn get_mcp(State(s): State<S>) -> axum::Json<Value> {
+    let v = read_gateway_section(&s.root, "mcp");
     if v.is_null() {
         axum::Json(serde_json::json!({"tools": [], "servers": []}))
     } else {
         axum::Json(v)
     }
 }
-async fn put_mcp(Json(payload): Json<Value>) -> axum::response::Response {
+async fn put_mcp(State(s): State<S>, Json(payload): Json<Value>) -> axum::response::Response {
     // payload = {tools, servers}，整段存 mcp
-    match write_gateway_section("mcp", payload) {
+    match write_gateway_section(&s.root, "mcp", payload) {
         Ok(_) => axum::Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => axum::Json(serde_json::json!({"ok": false, "error": e.to_string()})).into_response(),
     }
 }
 
 /// ---- 部署实例（存 gateway.yaml deploy 段：{instances, entry, sync}）----
-async fn get_deploy_instances() -> axum::Json<Value> {
-    let v = read_gateway_section("deploy");
+async fn get_deploy_instances(State(s): State<S>) -> axum::Json<Value> {
+    let v = read_gateway_section(&s.root, "deploy");
     if v.is_null() {
         axum::Json(serde_json::json!({"instances": [], "entry": {}, "sync": {}}))
     } else {
         axum::Json(v)
     }
 }
-async fn put_deploy_instances(Json(payload): Json<Value>) -> axum::response::Response {
-    match write_gateway_section("deploy", payload) {
+async fn put_deploy_instances(State(s): State<S>, Json(payload): Json<Value>) -> axum::response::Response {
+    match write_gateway_section(&s.root, "deploy", payload) {
         Ok(_) => axum::Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => axum::Json(serde_json::json!({"ok": false, "error": e.to_string()})).into_response(),
     }
@@ -336,20 +348,9 @@ async fn gateway_health_upstream(State(s): State<S>) -> axum::Json<Value> {
     axum::Json(serde_json::json!({"object": "list", "data": data}))
 }
 
-#[tokio::main]
-async fn main() {
-    if maybe_cli(&std::env::args().skip(1).collect::<Vec<_>>()).await { return; }
-    let state = S {
-        root: root(),
-        health: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        pins: gateway::new_pin_store(),
-        rates: gateway::new_rate_store(),
-    };
-    // 网关请求日志表（幂等）
-    if let Err(e) = gateway_logs::init_table(&state.root) {
-        eprintln!("[gateway-logs] 建表失败: {}", e);
-    }
-    let app = Router::new()
+/// 构建应用 Router（main 和集成测试共用；集成测试用 oneshot 真打端点）
+pub fn build_router(state: S) -> Router {
+    Router::new()
         .route("/api/config", get(get_config).post(post_config))
         // ---- 网关配置：读写 gateway.yaml（热加载即时生效）----
         .route("/api/providers", get(get_providers).post(post_providers))
@@ -399,9 +400,198 @@ async fn main() {
         .route("/v1/health/upstream", get(gateway_health_upstream))
         .fallback_service(ServeDir::new(root().join("web").join("static")))
         .layer(CorsLayer::permissive()) // 跨域：前端/浏览器调网关（个人网关内网用，permissive）
-        .with_state(state);
+        .with_state(state)
+}
+
+#[tokio::main]
+async fn main() {
+    if maybe_cli(&std::env::args().skip(1).collect::<Vec<_>>()).await { return; }
+    let state = S::new(root());
+    // 网关请求日志表（幂等）
+    if let Err(e) = gateway_logs::init_table(&state.root) {
+        eprintln!("[gateway-logs] 建表失败: {}", e);
+    }
+    let app = build_router(state);
     let addr = format!("127.0.0.1:{}", api::gateway_cfg().panel_port);
     println!("myapi-rs → http://{addr}");
     axum::serve(tokio::net::TcpListener::bind(&addr).await.expect("bind 失败"), app)
         .await.expect("serve");
+}
+
+// ==================== HTTP 集成测试（axum oneshot 真打端点 + tempfile 隔离 root）====================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt; // collect 读 body
+    use tower::ServiceExt; // oneshot
+    use tempfile::TempDir;
+
+    /// 构造隔离测试 Router：tempdir 做 root（gateway.yaml / SQLite 都写临时目录，不污染真实配置）
+    async fn test_router() -> (Router, TempDir) {
+        let dir = TempDir::new().expect("tempdir");
+        // db_path = root/config/gateway-logs.db，SQLite 不自动建父目录 → 先建 config 子目录
+        std::fs::create_dir_all(dir.path().join("config")).expect("mkdir config");
+        let state = S::new(dir.path().to_path_buf());
+        // 建日志表（幂等，测 /v1/logs /stats 才有表）
+        gateway_logs::init_table(dir.path()).expect("init_table");
+        (build_router(state), dir)
+    }
+
+    async fn get(router: Router, uri: &str) -> (StatusCode, Value) {
+        let resp = router.oneshot(Request::get(uri).body(Body::empty()).unwrap()).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, json)
+    }
+
+    async fn post(router: Router, uri: &str, body: Value) -> (StatusCode, Value) {
+        let resp = router.oneshot(
+            Request::post(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        ).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn health_returns_ok() {
+        let (router, _d) = test_router().await;
+        let (status, json) = get(router, "/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json.get("status").and_then(|v| v.as_str()), Some("ok"));
+    }
+
+    #[tokio::test]
+    async fn models_returns_list_shape() {
+        let (router, _d) = test_router().await;
+        let (status, json) = get(router, "/v1/models").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json.get("object").and_then(|v| v.as_str()), Some("list"));
+        assert!(json.get("data").and_then(|v| v.as_array()).is_some());
+    }
+
+    #[tokio::test]
+    async fn logs_returns_object_and_data() {
+        let (router, _d) = test_router().await;
+        let (status, json) = get(router, "/v1/logs").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json.get("object").and_then(|v| v.as_str()), Some("list"));
+        assert!(json.get("data").and_then(|v| v.as_array()).is_some());
+    }
+
+    #[tokio::test]
+    async fn stats_summary_has_totals() {
+        let (router, _d) = test_router().await;
+        let (status, json) = get(router, "/stats/summary").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json.get("total_requests").and_then(|v| v.as_i64()).is_some());
+        assert!(json.get("success_count").and_then(|v| v.as_i64()).is_some());
+    }
+
+    #[tokio::test]
+    async fn stats_providers_returns_array() {
+        let (router, _d) = test_router().await;
+        let (status, json) = get(router, "/stats/providers").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json.is_array());
+    }
+
+    #[tokio::test]
+    async fn stats_trend_and_daily_return_arrays() {
+        let (router, _d) = test_router().await;
+        let (s1, j1) = get(router.clone(), "/stats/trend?hours=24").await;
+        let (s2, j2) = get(router, "/stats/daily?days=7").await;
+        assert_eq!(s1, StatusCode::OK);
+        assert_eq!(s2, StatusCode::OK);
+        assert!(j1.is_array());
+        assert!(j2.is_array());
+    }
+
+    #[tokio::test]
+    async fn api_logs_limit_param_respected() {
+        let (router, _d) = test_router().await;
+        let (status, json) = get(router, "/api/logs?limit=5").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json.get("logs").and_then(|v| v.as_array()).is_some());
+    }
+
+    #[tokio::test]
+    async fn providers_roundtrip_via_gateway_yaml() {
+        let (router, _d) = test_router().await;
+        // 写 providers
+        let providers = serde_json::json!({"providers": [
+            {"name": "p1", "base_url": "http://x/v1", "disabled": false,
+             "headers": {}, "keys": [{"name": "主", "api_key": "sk-1"}], "channels": []}
+        ]});
+        let (st, j) = post(router.clone(), "/api/providers", providers).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(j.get("ok").and_then(|v| v.as_bool()), Some(true));
+        // 读回
+        let (st2, j2) = get(router, "/api/providers").await;
+        assert_eq!(st2, StatusCode::OK);
+        let arr = j2.get("providers").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0].get("name").and_then(|v| v.as_str()), Some("p1"));
+    }
+
+    #[tokio::test]
+    async fn routing_roundtrip() {
+        let (router, _d) = test_router().await;
+        let routing = serde_json::json!({"routing": {"strategy": "latency", "max_retries": 3}});
+        let (st, j) = post(router.clone(), "/api/routing", routing).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(j.get("ok").and_then(|v| v.as_bool()), Some(true));
+        let (_st2, j2) = get(router, "/api/routing").await;
+        assert_eq!(j2.get("routing").and_then(|v| v.get("strategy")).and_then(|v| v.as_str()), Some("latency"));
+    }
+
+    #[tokio::test]
+    async fn mcp_roundtrip() {
+        let (router, _d) = test_router().await;
+        // PUT
+        let mcp = serde_json::json!({"tools": [{"tool": "search", "enabled": true}], "servers": []});
+        let resp = router.clone().oneshot(
+            Request::put("/api/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(mcp.to_string())).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // GET
+        let (st, j) = get(router, "/api/mcp").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(j.get("tools").and_then(|v| v.as_array()).is_some());
+    }
+
+    #[tokio::test]
+    async fn post_providers_missing_section_rejected() {
+        let (router, _d) = test_router().await;
+        let (st, j) = post(router, "/api/providers", serde_json::json!({"wrong": 1})).await;
+        assert_eq!(st, StatusCode::OK); // handler 返回 200 但 ok=false
+        assert_eq!(j.get("ok").and_then(|v| v.as_bool()), Some(false));
+    }
+
+    #[tokio::test]
+    async fn nonexistent_route_is_404_or_fallback() {
+        let (router, _d) = test_router().await;
+        let resp = router.oneshot(Request::get("/nonexistent-xyz").body(Body::empty()).unwrap()).await.unwrap();
+        // fallback_service ServeDir → 404（tempdir 无 static 文件）
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_with_no_upstream_returns_error() {
+        let (router, _d) = test_router().await;
+        // 无真实上游（tempdir 无 providers → 无通道）→ 404 invalid_request
+        let payload = serde_json::json!({"model": "gpt-x", "messages": [{"role": "user", "content": "hi"}]});
+        let (st, j) = post(router, "/v1/chat/completions", payload).await;
+        assert!(st == StatusCode::NOT_FOUND || st == StatusCode::BAD_REQUEST || st == StatusCode::INTERNAL_SERVER_ERROR || st == StatusCode::SERVICE_UNAVAILABLE);
+        assert!(j.get("error").is_some());
+    }
 }

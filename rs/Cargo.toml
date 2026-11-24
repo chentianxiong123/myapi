@@ -15,6 +15,13 @@ glob = "0.3"
 rusqlite = { version = "0.31", features = ["bundled"] }
 thiserror = "1"
 
+[dev-dependencies]
+# HTTP 集成测试：axum oneshot 要 tower ServiceExt + http-body-util 读 body
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+# 测试用临时目录（隔离 gateway.yaml / SQLite 写，不污染真实配置）
+tempfile = "3"
+
 [profile.release]
 # 分发形态：体积/内存优先（opt-level z + 单 codegen + 去 unwinding 表）
 strip = true
