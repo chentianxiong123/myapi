@@ -17,6 +17,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::services::ServeDir;
+use tower_http::cors::CorsLayer;
 
 #[derive(Clone)]
 struct S {
@@ -229,6 +230,7 @@ async fn main() {
         .route("/v1/logs", get(gateway_logs))
         .route("/v1/stats", get(gateway_stats))
         .fallback_service(ServeDir::new(root().join("web").join("static")))
+        .layer(CorsLayer::permissive()) // 跨域：前端/浏览器调网关（个人网关内网用，permissive）
         .with_state(state);
     let addr = format!("127.0.0.1:{}", api::gateway_cfg().panel_port);
     println!("myapi-rs → http://{addr}");
