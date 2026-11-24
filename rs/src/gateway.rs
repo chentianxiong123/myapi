@@ -86,6 +86,23 @@ pub struct GatewayConfig {
 
 fn def_listen() -> u16 { 8380 }
 
+/// TTFT 滑动窗口大小（学 LiteLLM lowest_latency max_latency_list_size=10）
+const LATENCY_WINDOW_SIZE: usize = 10;
+/// 延迟 buffer 比例（学 lowest_latency_buffer，避免延迟接近时反复横跳）
+const LATENCY_BUFFER_RATIO: f64 = 0.2;
+/// 无延迟记录通道的中性分数（低于已知的差通道，但不抢最快的）
+const NEUTRAL_LATENCY_SCORE: f64 = 60_000.0;
+
+/// 平均 TTFT * buffer 系数（延迟感知打分，越低越好）
+fn avg_ttft_with_buffer(h: &ChannelHealth) -> f64 {
+    if h.ttft_window.is_empty() {
+        return NEUTRAL_LATENCY_SCORE;
+    }
+    let sum: f64 = h.ttft_window.iter().map(|&x| x as f64).sum();
+    let avg = sum / h.ttft_window.len() as f64;
+    avg * (1.0 + LATENCY_BUFFER_RATIO)
+}
+
 /// 熔断器配置（学 cc-switch 三态机 + LiteLLM 失败率判定）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CircuitBreakerConfig {
@@ -154,6 +171,8 @@ pub struct ChannelHealth {
     pub last_ttft_ms: u64,
     /// 最近一次失败的时间戳（秒），open→half_open 恢复超时用
     pub last_failure_at: u64,
+    /// TTFT 滑动窗口（学 LiteLLM lowest_latency：存最近 N 次 TTFT，取平均选最低）
+    pub ttft_window: Vec<u64>,
 }
 
 /// 熔断三态（closed/open/half_open，学 cc-switch）
@@ -203,6 +222,11 @@ pub async fn record_outcome(
     if ok {
         h.consecutive_successes += 1;
         h.consecutive_failures = 0;
+        // TTFT 滑动窗口采样（学 LiteLLM lowest_latency：存最近 N 次 TTFT 取平均）
+        h.ttft_window.push(ttft_ms);
+        if h.ttft_window.len() > LATENCY_WINDOW_SIZE {
+            h.ttft_window.remove(0);
+        }
         match h.state {
             CircuitState::Closed => {}
             CircuitState::HalfOpen => {
@@ -292,19 +316,25 @@ pub fn select_channel(
     }
     if candidates.is_empty() { return None; }
 
-    // 优先选可用通道（非熔断）；若全熔断则 KeepAll 兼底（第一个），避免一熔全瘫
-    // 用 for 循环而非闭包 find，避免捕获 RwLockReadGuard（borrow 冲突）
+    // 延迟感知选通道（学 LiteLLM lowest_latency）：可用通道里选平均 TTFT 最低的
+    // buffer 防横跳：分数 = avg_ttft * (1+buffer) 对比，延迟接近时不切
     let hs = health_snapshot.as_deref();
-    let mut chosen_idx: Option<usize> = None;
+    let mut best_idx: Option<usize> = None;
+    let mut best_score: f64 = f64::MAX;
     for (i, cand) in candidates.iter().enumerate() {
-        let available = hs
-            .and_then(|map| map.get(&cand.1.id))
-            .map(|h| is_available(h, cb))
-            .unwrap_or(true); // 无记录=可用
-        if available { chosen_idx = Some(i); break; }
+        let h_opt = hs.and_then(|map| map.get(&cand.1.id));
+        // 熔断过滤：不可用则跳过
+        let available = h_opt.map(|h| is_available(h, cb)).unwrap_or(true);
+        if !available { continue; }
+        // 延迟分数：无记录=中性高分（给新通道机会但不优先）
+        let score = h_opt.map(avg_ttft_with_buffer).unwrap_or(NEUTRAL_LATENCY_SCORE);
+        if score < best_score {
+            best_score = score;
+            best_idx = Some(i);
+        }
     }
     // 全熔断 → 兼底取第一个（LiteLLM when_all_unhealthy: keep-all）
-    let idx = chosen_idx.unwrap_or(0);
+    let idx = best_idx.unwrap_or(0);
     let (provider, channel, m) = candidates[idx];
     let api_key = resolve_key(provider, channel).unwrap_or_default();
     Some(SelectedChannel {
@@ -824,5 +854,47 @@ mod tests {
         let m = pins.read().await;
         let age = now_secs().saturating_sub(m.get("sess:t").unwrap().pinned_at);
         assert!(age < 300, "TTL 过期后应重新 pin（pinned_at 刷新）");
+    }
+
+    #[tokio::test]
+    async fn latency_picks_lowest_ttft() {
+        let mut cfg = GatewayConfig::default();
+        cfg.sticky = StickyConfig { enabled: false, ttl_seconds: 300 }; // 关黏性，纯测延迟
+        cfg.providers.push(Provider {
+            name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![
+                Channel { id: "slow".into(), name: "slow".into(), path: None, key_name: None,
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()) }], weight: 1 },
+                Channel { id: "fast".into(), name: "fast".into(), path: None, key_name: None,
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()) }], weight: 1 },
+            ],
+            proxy: String::new(),
+        });
+        let h = health_map();
+        // slow 通道平均 TTFT 800ms，fast 通道 200ms
+        for _ in 0..5 {
+            record_outcome(&h, "slow", true, 800, &cfg.circuit_breaker, false).await;
+            record_outcome(&h, "fast", true, 200, &cfg.circuit_breaker, false).await;
+        }
+        // 延迟感知应选 fast 通道
+        let sel = select_channel(&cfg, "my-model", &h);
+        assert_eq!(sel.unwrap().channel.id, "fast", "应选 TTFT 最低的通道");
+    }
+
+    #[tokio::test]
+    async fn latency_window_capped_at_10() {
+        let h = health_map();
+        let c = cb();
+        // 记录 20 次成功，TTFT 递增
+        for i in 0..20 {
+            record_outcome(&h, "ch1", true, (i as u64) * 10, &c, false).await;
+        }
+        let m = h.read().await;
+        let hc = m.get("ch1").unwrap();
+        assert_eq!(hc.ttft_window.len(), LATENCY_WINDOW_SIZE, "窗口应封顶 10");
+        // 最近 10 个是 i=10..19 → ttft 100..190
+        assert_eq!(hc.ttft_window.first(), Some(&100), "窗口应是最 recent 的 10 个");
     }
 }
