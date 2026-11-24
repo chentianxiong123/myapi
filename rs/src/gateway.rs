@@ -79,6 +79,9 @@ pub struct GatewayConfig {
     /// 熔断器参数（学 cc-switch 三态 + LiteLLM 失败率）
     #[serde(default)]
     pub circuit_breaker: CircuitBreakerConfig,
+    /// 黏性路由（省token，学 LiteLLM affinity）
+    #[serde(default)]
+    pub sticky: StickyConfig,
 }
 
 fn def_listen() -> u16 { 8380 }
@@ -116,6 +119,23 @@ impl Default for CircuitBreakerConfig {
             recovery_timeout_seconds: def_recovery_timeout(),
             recovery_success_threshold: def_recovery_success(),
         }
+    }
+}
+
+/// 黏性路由配置（学 LiteLLM deployment affinity，为 prompt cache 省token）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StickyConfig {
+    #[serde(default = "def_sticky_enabled")]
+    pub enabled: bool,
+    /// pin 保持秒数（TTL，过期重选）
+    #[serde(default = "def_sticky_ttl")]
+    pub ttl_seconds: u64,
+}
+fn def_sticky_enabled() -> bool { true }
+fn def_sticky_ttl() -> u64 { 300 }
+impl Default for StickyConfig {
+    fn default() -> Self {
+        Self { enabled: def_sticky_enabled(), ttl_seconds: def_sticky_ttl() }
     }
 }
 
@@ -306,6 +326,119 @@ fn resolve_key(provider: &Provider, channel: &Channel) -> Option<String> {
     }
 }
 
+// ==================== 黏性路由（学 LiteLLM deployment affinity，prompt cache 省 token）====================
+
+/// pin 条目：通道 id + 打 pin 的时间戳
+#[derive(Debug, Clone)]
+pub struct PinEntry {
+    pub channel_id: String,
+    pub pinned_at: u64,
+}
+
+/// pin 表：pin_key → PinEntry（全局共享）
+pub type PinStore = Arc<RwLock<HashMap<String, PinEntry>>>;
+
+pub fn new_pin_store() -> PinStore {
+    Arc::new(RwLock::new(HashMap::new()))
+}
+
+/// 从请求提取 session 标识（pin key）。
+/// 优先级：X-Session-Id header > Authorization Bearer key hash（学 LiteLLM api-key affinity）
+pub fn session_key(payload: &serde_json::Value, auth_header: Option<&str>) -> Option<String> {
+    // 1. 显式 session id（agent 传 X-Session-Id）
+    if let Some(sid) = payload.get("session_id").and_then(|v| v.as_str()) {
+        if !sid.is_empty() {
+            return Some(format!("sess:{}", sid));
+        }
+    }
+    // 2. 下游 API key（同一 key 的连续请求黏同一通道）
+    if let Some(auth) = auth_header {
+        if let Some(token) = auth.strip_prefix("Bearer ") {
+            // hash 一下不存明文
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            token.hash(&mut h);
+            return Some(format!("key:{:016x}", h.finish()));
+        }
+    }
+    None
+}
+
+/// 带黏性的通道选择：有有效 pin 且通道可用→复用；否则新选并打 pin
+pub fn select_channel_sticky(
+    config: &GatewayConfig,
+    requested_model: &str,
+    health: &HealthMap,
+    pins: &PinStore,
+    pin_key: Option<&str>,
+) -> Option<SelectedChannel> {
+    let cb = &config.circuit_breaker;
+    // 1. 查有效 pin（TTL 内 + 通道仍健康）
+    if let Some(key) = pin_key {
+        if config.sticky.enabled {
+            if let Ok(map) = pins.try_read() {
+                if let Some(entry) = map.get(key) {
+                    let age = now_secs().saturating_sub(entry.pinned_at);
+                    if age < config.sticky.ttl_seconds {
+                        // pin 有效，验证通道仍可用
+                        let channel_ok = {
+                            let hm_guard = health.try_read().ok();
+                            match hm_guard.as_deref().and_then(|hm| hm.get(&entry.channel_id)) {
+                                Some(h) => is_available(h, cb),
+                                None => true,
+                            }
+                        };
+                        if channel_ok {
+                            if let Some(sel) = find_channel_by_id(config, &entry.channel_id, requested_model) {
+                                return Some(sel);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. 无有效 pin → 按熔断/健康选通道
+    let selected = select_channel(config, requested_model, health)?;
+
+    // 3. 打 pin（供下次复用）
+    if let Some(key) = pin_key {
+        if config.sticky.enabled {
+            if let Ok(mut map) = pins.try_write() {
+                map.insert(key.to_string(), PinEntry {
+                    channel_id: selected.channel.id.clone(),
+                    pinned_at: now_secs(),
+                });
+            }
+        }
+    }
+    Some(selected)
+}
+
+/// 按 channel id + 模型名定位通道（黏性复用用）
+fn find_channel_by_id(config: &GatewayConfig, channel_id: &str, requested_model: &str) -> Option<SelectedChannel> {
+    for provider in &config.providers {
+        if provider.disabled { continue; }
+        for channel in &provider.channels {
+            if channel.id != channel_id { continue; }
+            for m in &channel.models {
+                let external = m.alias.as_deref().unwrap_or(&m.name);
+                if external == requested_model || m.name == requested_model {
+                    return Some(SelectedChannel {
+                        provider: provider.clone(),
+                        channel: channel.clone(),
+                        upstream_model: m.name.clone(),
+                        api_key: resolve_key(provider, channel).unwrap_or_default(),
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
 // ==================== 配置加载（读 config/gateway.yaml）====================
 
 pub fn load_config(root: &std::path::Path) -> GatewayConfig {
@@ -324,13 +457,16 @@ pub fn load_config(root: &std::path::Path) -> GatewayConfig {
 pub async fn forward_chat(
     root: &std::path::Path,
     health: &HealthMap,
+    pins: &PinStore,
+    auth_header: Option<&str>,
     payload: serde_json::Value,
 ) -> axum::response::Response {
     let config = load_config(root);
     let requested_model = payload.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
-    // 1. 选通道
-    let selected = match select_channel(&config, &requested_model, health) {
+    // 1. 黏性选通道（session/key pin → TTL 内复用同通道，省 token）
+    let pin_key = session_key(&payload, auth_header);
+    let selected = match select_channel_sticky(&config, &requested_model, health, pins, pin_key.as_deref()) {
         Some(s) => s,
         None => {
             return (
@@ -580,5 +716,113 @@ mod tests {
         }
         let sel = select_channel(&cfg, "my-model", &h);
         assert!(sel.is_some(), "全熔断时 KeepAll 仍应返回通道");
+    }
+
+    #[tokio::test]
+    async fn sticky_reuses_same_channel() {
+        let mut cfg = GatewayConfig::default();
+        cfg.sticky = StickyConfig { enabled: true, ttl_seconds: 300 };
+        // 两条通道都能服务 my-model
+        cfg.providers.push(Provider {
+            name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![
+                Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
+                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()) }], weight: 1 },
+                Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
+                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()) }], weight: 1 },
+            ],
+            proxy: String::new(),
+        });
+        let h = health_map();
+        let pins = new_pin_store();
+        // 第一次选通道（应 pin 到 ch1，第一个候选）
+        let s1 = select_channel_sticky(&cfg, "my-model", &h, &pins, Some("sess:abc"));
+        assert!(s1.is_some());
+        let ch1_id = s1.unwrap().channel.id.clone();
+        // 第二次同 session → 应复用同通道（黏性）
+        let s2 = select_channel_sticky(&cfg, "my-model", &h, &pins, Some("sess:abc"));
+        assert_eq!(s2.unwrap().channel.id, ch1_id, "同 session 应黏同通道");
+    }
+
+    #[tokio::test]
+    async fn sticky_repins_when_channel_unhealthy() {
+        let mut cfg = GatewayConfig::default();
+        cfg.sticky = StickyConfig { enabled: true, ttl_seconds: 300 };
+        cfg.providers.push(Provider {
+            name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![
+                Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
+                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()) }], weight: 1 },
+                Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
+                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()) }], weight: 1 },
+            ],
+            proxy: String::new(),
+        });
+        let h = health_map();
+        let pins = new_pin_store();
+        // 先 pin 到 ch1
+        let s1 = select_channel_sticky(&cfg, "my-model", &h, &pins, Some("sess:xyz"));
+        let ch1 = s1.unwrap().channel.id.clone();
+        assert_eq!(ch1, "ch1");
+        // ch1 连续失败 5 次 → open（但 ch2 健康，非单部署）
+        for _ in 0..5 {
+            record_outcome(&h, "ch1", false, 0, &cfg.circuit_breaker, false).await;
+        }
+        // 同 session 再选 → ch1 熔断，应重新 pin 到 ch2
+        let s2 = select_channel_sticky(&cfg, "my-model", &h, &pins, Some("sess:xyz"));
+        assert_eq!(s2.unwrap().channel.id, "ch2", "pin 的通道熔断应重新 pin");
+    }
+
+    #[tokio::test]
+    async fn sticky_disabled_always_fresh() {
+        let mut cfg = GatewayConfig::default();
+        cfg.sticky = StickyConfig { enabled: false, ttl_seconds: 300 };
+        cfg.providers.push(Provider {
+            name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
+                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()) }], weight: 1 }],
+            proxy: String::new(),
+        });
+        let h = health_map();
+        let pins = new_pin_store();
+        // 关闭黏性 → 不打 pin
+        let _ = select_channel_sticky(&cfg, "my-model", &h, &pins, Some("sess:1"));
+        let map = pins.try_read().unwrap();
+        assert!(map.is_empty(), "黏性关闭不应打 pin");
+    }
+
+    #[tokio::test]
+    async fn sticky_ttl_expired_repins() {
+        let mut cfg = GatewayConfig::default();
+        cfg.sticky = StickyConfig { enabled: true, ttl_seconds: 300 };
+        cfg.providers.push(Provider {
+            name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
+                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()) }], weight: 1 }],
+            proxy: String::new(),
+        });
+        let h = health_map();
+        let pins = new_pin_store();
+        // pin 到 ch1
+        let _ = select_channel_sticky(&cfg, "my-model", &h, &pins, Some("sess:t"));
+        // 把 pinned_at 拨回 301 秒前（TTL 300 已过期）
+        {
+            let mut m = pins.write().await;
+            m.get_mut("sess:t").unwrap().pinned_at = now_secs() - 301;
+        }
+        // TTL 过期 → pin 失效 → 重新选 + 重新 pin（pinned_at 更新）
+        let sel = select_channel_sticky(&cfg, "my-model", &h, &pins, Some("sess:t"));
+        assert!(sel.is_some());
+        let m = pins.read().await;
+        let age = now_secs().saturating_sub(m.get("sess:t").unwrap().pinned_at);
+        assert!(age < 300, "TTL 过期后应重新 pin（pinned_at 刷新）");
     }
 }

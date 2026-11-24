@@ -22,6 +22,8 @@ struct S {
     root: PathBuf,
     /// 网关运行时健康度（被动统计，学 LiteLLM cooldown）
     health: gateway::HealthMap,
+    /// 黏性路由 pin 表（学 LiteLLM affinity，省 token）
+    pins: gateway::PinStore,
 }
 
 fn root() -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")) }
@@ -145,15 +147,25 @@ async fn gateway_models(State(s): State<S>) -> axum::Json<Value> {
     axum::Json(serde_json::json!({"object": "list", "data": gateway::list_models(&cfg)}))
 }
 
-/// POST /v1/chat/completions：选通道 → 转发上游 → 回传
-async fn gateway_chat(State(s): State<S>, Json(payload): Json<Value>) -> axum::response::Response {
-    gateway::forward_chat(&s.root, &s.health, payload).await
+/// POST /v1/chat/completions：黏性选通道 → 转发上游 → 回传
+async fn gateway_chat(
+    State(s): State<S>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<Value>,
+) -> axum::response::Response {
+    let auth = headers.get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    gateway::forward_chat(&s.root, &s.health, &s.pins, auth, payload).await
 }
 
 #[tokio::main]
 async fn main() {
     if maybe_cli(&std::env::args().skip(1).collect::<Vec<_>>()).await { return; }
-    let state = S { root: root(), health: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())) };
+    let state = S {
+        root: root(),
+        health: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        pins: gateway::new_pin_store(),
+    };
     let app = Router::new()
         .route("/api/config", get(get_config).post(post_config))
         .route("/api/adapters", get(|| async { axum::Json(serde_json::json!({"ok": true, "names": api::get_adapters_info().get("names").cloned().unwrap_or_default(), "hosts": api::get_adapters_info().get("hosts").cloned().unwrap_or_default(), "adapter_instances": api::get_adapters_info().get("adapter_instances").cloned().unwrap_or_default(), "targets": api::get_adapters_info().get("targets").cloned().unwrap_or_default(), "strategies": api::get_adapters_info().get("strategies").cloned().unwrap_or_default()})) }))
