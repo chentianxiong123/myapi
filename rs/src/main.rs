@@ -189,6 +189,11 @@ async fn gateway_stats(State(s): State<S>) -> axum::Json<Value> {
     }
 }
 
+/// GET /health：健康检查（探活，容器/k8s 探针/负载均衡用）
+async fn health() -> axum::Json<Value> {
+    axum::Json(serde_json::json!({"status": "ok"}))
+}
+
 #[tokio::main]
 async fn main() {
     if maybe_cli(&std::env::args().skip(1).collect::<Vec<_>>()).await { return; }
@@ -230,8 +235,10 @@ async fn main() {
         .route("/v1/models", get(gateway_models))
         .route("/v1/chat/completions", post(gateway_chat))
         .route("/v1/embeddings", post(gateway_embeddings))
+        .route("/v1/completions", post(gateway_chat)) // legacy 端点：同一 handler（OpenAI 兼容）
         .route("/v1/logs", get(gateway_logs))
         .route("/v1/stats", get(gateway_stats))
+        .route("/health", get(health))
         .fallback_service(ServeDir::new(root().join("web").join("static")))
         .layer(CorsLayer::permissive()) // 跨域：前端/浏览器调网关（个人网关内网用，permissive）
         .with_state(state);
