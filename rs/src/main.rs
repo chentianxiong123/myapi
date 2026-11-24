@@ -12,7 +12,7 @@ pub mod core {
     pub mod probe;
 }
 
-use axum::{extract::State, response::IntoResponse, routing::{get, post}, Json, Router};
+use axum::{extract::{Query, State}, response::IntoResponse, routing::{get, post}, Json, Router};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -280,6 +280,43 @@ async fn gateway_stats(State(s): State<S>) -> axum::Json<Value> {
     }
 }
 
+/// GET /api/logs：请求日志（前端 Logs 页数据源，同 /v1/logs 但支持 ?limit=）
+async fn api_logs(State(s): State<S>, Query(q): Query<std::collections::HashMap<String, String>>) -> axum::Json<Value> {
+    let limit = q.get("limit").and_then(|v| v.parse::<usize>().ok()).unwrap_or(100);
+    match gateway_logs::query_recent(&s.root, limit) {
+        Ok(v) => axum::Json(serde_json::json!({"logs": v.get("data").cloned().unwrap_or_default()})),
+        Err(e) => axum::Json(serde_json::json!({"error": {"message": e, "type": "api_error"}})),
+    }
+}
+
+/// ---- 仪表盘聚合端点（前端 Dashboard 页真实数据源）----
+async fn stats_summary(State(s): State<S>) -> axum::Json<Value> {
+    match gateway_logs::query_summary(&s.root) {
+        Ok(v) => axum::Json(v),
+        Err(e) => axum::Json(serde_json::json!({"error": {"message": e, "type": "api_error"}})),
+    }
+}
+async fn stats_providers(State(s): State<S>) -> axum::Json<Value> {
+    match gateway_logs::query_provider_stats(&s.root) {
+        Ok(v) => axum::Json(v.get("data").cloned().unwrap_or_default()),
+        Err(e) => axum::Json(serde_json::json!({"error": {"message": e, "type": "api_error"}})),
+    }
+}
+async fn stats_trend(State(s): State<S>, Query(q): Query<std::collections::HashMap<String, String>>) -> axum::Json<Value> {
+    let hours = q.get("hours").and_then(|v| v.parse::<u32>().ok()).unwrap_or(24);
+    match gateway_logs::query_trend(&s.root, hours) {
+        Ok(v) => axum::Json(v.get("data").cloned().unwrap_or_default()),
+        Err(e) => axum::Json(serde_json::json!({"error": {"message": e, "type": "api_error"}})),
+    }
+}
+async fn stats_daily(State(s): State<S>, Query(q): Query<std::collections::HashMap<String, String>>) -> axum::Json<Value> {
+    let days = q.get("days").and_then(|v| v.parse::<u32>().ok()).unwrap_or(30);
+    match gateway_logs::query_daily(&s.root, days) {
+        Ok(v) => axum::Json(v.get("data").cloned().unwrap_or_default()),
+        Err(e) => axum::Json(serde_json::json!({"error": {"message": e, "type": "api_error"}})),
+    }
+}
+
 /// GET /health：健康检查（探活，容器/k8s 探针/负载均衡用）
 async fn health() -> axum::Json<Value> {
     axum::Json(serde_json::json!({"status": "ok"}))
@@ -343,6 +380,12 @@ async fn main() {
         .route("/v1/completions", post(gateway_chat)) // legacy 端点：同一 handler（OpenAI 兼容）
         .route("/v1/logs", get(gateway_logs))
         .route("/v1/stats", get(gateway_stats))
+        // ---- 仪表盘/日志页真实数据源 ----
+        .route("/api/logs", get(api_logs))
+        .route("/stats/summary", get(stats_summary))
+        .route("/stats/providers", get(stats_providers))
+        .route("/stats/trend", get(stats_trend))
+        .route("/stats/daily", get(stats_daily))
         .route("/health", get(health))
         .route("/v1/health/upstream", get(gateway_health_upstream))
         .fallback_service(ServeDir::new(root().join("web").join("static")))

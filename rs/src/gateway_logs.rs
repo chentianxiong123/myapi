@@ -171,3 +171,151 @@ pub fn query_stats(root: &std::path::Path) -> Result<Value, String> {
     }
     Ok(json!({ "object": "list", "data": out }))
 }
+
+// ==================== 仪表盘聚合（对齐前端 /stats/* 端点）====================
+
+/// 总览：/stats/summary（总请求数/成功/错误率/token/延迟/速度）
+pub fn query_summary(root: &std::path::Path) -> Result<Value, String> {
+    let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
+    let v = conn.query_row(
+        "SELECT COUNT(*),
+                SUM(CASE WHEN status < 400 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
+                SUM(COALESCE(input_tokens,0)),
+                SUM(COALESCE(output_tokens,0)),
+                AVG(ttft_ms),
+                AVG(latency_ms)
+         FROM request_logs",
+        [],
+        |r| Ok((
+            r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?,
+            r.get::<_, i64>(3)?, r.get::<_, i64>(4)?,
+            r.get::<_, f64>(5).unwrap_or(0.0), r.get::<_, f64>(6).unwrap_or(0.0),
+        )),
+    ).map_err(|e| e.to_string())?;
+    let (total, success, errors, in_tok, out_tok, avg_ttft, avg_latency) = v;
+    let success_rate = if total > 0 { success as f64 / total as f64 * 100.0 } else { 0.0 };
+    let error_rate = if total > 0 { errors as f64 / total as f64 * 100.0 } else { 0.0 };
+    // 输出速度：out_tok / 平均延迟（ms→s）
+    let avg_speed = if avg_latency > 0.0 { out_tok as f64 / (avg_latency / 1000.0) } else { 0.0 };
+    Ok(json!({
+        "total_requests": total,
+        "success_count": success,
+        "success_rate": (success_rate * 100.0).round() / 100.0,
+        "error_count": errors,
+        "error_rate": (error_rate * 100.0).round() / 100.0,
+        "total_input_tokens": in_tok,
+        "total_output_tokens": out_tok,
+        "total_cache_creation_tokens": 0, // 表暂无 cache 字段，先返 0
+        "total_cache_read_tokens": 0,
+        "real_total_tokens": in_tok + out_tok,
+        "cache_hit_rate": 0.0,
+        "avg_ttft_ms": (avg_ttft * 10.0).round() / 10.0,
+        "avg_latency_ms": (avg_latency * 10.0).round() / 10.0,
+        "avg_speed_tps": (avg_speed * 10.0).round() / 10.0,
+    }))
+}
+
+/// 按供应商聚合：/stats/providers（对齐前端 ProviderStat）
+pub fn query_provider_stats(root: &std::path::Path) -> Result<Value, String> {
+    let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT provider,
+                COUNT(*) AS total,
+                SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS errors,
+                AVG(ttft_ms),
+                AVG(latency_ms),
+                SUM(COALESCE(input_tokens,0)),
+                SUM(COALESCE(output_tokens,0))
+         FROM request_logs
+         GROUP BY provider
+         ORDER BY total DESC"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| {
+        let total: i64 = row.get(1)?;
+        let errors: i64 = row.get(2)?;
+        let err_rate = if total > 0 { errors as f64 / total as f64 * 100.0 } else { 0.0 };
+        let status = if err_rate > 10.0 { "error" } else if err_rate > 0.0 { "cooldown" } else { "healthy" };
+        Ok(json!({
+            "name": row.get::<_, String>(0)?,
+            "base_url": "",
+            "status": status,
+            "total_requests": total,
+            "avg_ttft_ms": (row.get::<_, f64>(3).unwrap_or(0.0) * 10.0).round() / 10.0,
+            "error_rate": (err_rate * 100.0).round() / 100.0,
+            "weight": 1,
+            "total_input_tokens": row.get::<_, i64>(5)?,
+            "total_output_tokens": row.get::<_, i64>(6)?,
+            "total_cache_read_tokens": 0,
+            "total_cache_creation_tokens": 0,
+            "cache_hit_rate": 0.0,
+        }))
+    }).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows { out.push(r.map_err(|e| e.to_string())?); }
+    Ok(json!({ "object": "list", "data": out }))
+}
+
+/// 趋势（按小时，近 N 小时）：/stats/trend?hours=24（对齐前端 TrendPoint）
+pub fn query_trend(root: &std::path::Path, hours: u32) -> Result<Value, String> {
+    let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT substr(ts,1,13) AS hour,
+                COUNT(*) AS total,
+                SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS errors,
+                AVG(ttft_ms),
+                SUM(COALESCE(input_tokens,0)),
+                SUM(COALESCE(output_tokens,0))
+         FROM request_logs
+         WHERE ts >= datetime('now', ?1)
+         GROUP BY hour
+         ORDER BY hour ASC"
+    ).map_err(|e| e.to_string())?;
+    let since = format!("-{} hours", hours);
+    let rows = stmt.query_map(params![since], |row| {
+        Ok(json!({
+            "time": row.get::<_, String>(0)?,
+            "requests": row.get::<_, i64>(1)?,
+            "avg_ttft_ms": (row.get::<_, f64>(3).unwrap_or(0.0) * 10.0).round() / 10.0,
+            "errors": row.get::<_, i64>(2)?,
+            "input_tokens": row.get::<_, i64>(4)?,
+            "output_tokens": row.get::<_, i64>(5)?,
+            "cache_read_tokens": 0,
+        }))
+    }).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows { out.push(r.map_err(|e| e.to_string())?); }
+    Ok(json!({ "object": "list", "data": out }))
+}
+
+/// 日聚合（近 N 天）：/stats/daily?days=30（对齐前端 DailyPoint）
+pub fn query_daily(root: &std::path::Path, days: u32) -> Result<Value, String> {
+    let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT substr(ts,1,10) AS day,
+                COUNT(*) AS total,
+                SUM(COALESCE(input_tokens,0)),
+                SUM(COALESCE(output_tokens,0))
+         FROM request_logs
+         WHERE ts >= datetime('now', ?1)
+         GROUP BY day
+         ORDER BY day ASC"
+    ).map_err(|e| e.to_string())?;
+    let since = format!("-{} days", days);
+    let rows = stmt.query_map(params![since], |row| {
+        let in_tok: i64 = row.get(2)?;
+        let out_tok: i64 = row.get(3)?;
+        Ok(json!({
+            "date": row.get::<_, String>(0)?,
+            "requests": row.get::<_, i64>(1)?,
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "total_tokens": in_tok + out_tok,
+        }))
+    }).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows { out.push(r.map_err(|e| e.to_string())?); }
+    Ok(json!({ "object": "list", "data": out }))
+}
