@@ -1240,4 +1240,86 @@ mod tests {
         assert!(m1_hits >= 1, "可重试 5xx 应先试 ch1");
     }
 
+
+    // ==================== 重试策略可配置真测：全局默认 + 每通道覆盖 ====================
+
+    #[tokio::test]
+    async fn channel_retry_override_makes_500_fatal() {
+        // 通道级覆盖：ch1 把 500 配成致命（fatal_status 含 500）→ 401 式直接透传 500，不 failover 到 ch2
+        // 全局默认 500 可重试，但 ch1 覆盖成致命 → 验证通道配置优先
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "m1"})))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1) // 只被调 1 次（500 被配成致命，不 failover）
+            .mount(&upstream).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "m2"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "ok", "choices": []})))
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        // ch1 带 retry 覆盖：fatal_status 含 500（把全局可重试的 500 变致命）
+        let cfg = json!({
+            "listen": 0,
+            "retry": {"max_retries": 3, "retry_on_status": [408, 409, 429, 500, 502, 503, 504],
+                       "fatal_status": [400, 401, 403, 404]},
+            "providers": [{
+                "name": "p", "base_url": format!("{}/v1", upstream.uri()),
+                "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk-up"}],
+                "channels": [
+                    {"id": "ch1", "name": "覆盖成致命", "key_name": "主",
+                     "retry": {"fatal_status": [400, 401, 403, 404, 500]},  // 500 致命
+                     "models": [{"name": "m1", "alias": "my-model"}]},
+                    {"id": "ch2", "name": "正常", "key_name": "主",
+                     "models": [{"name": "m2", "alias": "my-model"}]},
+                ],
+            }],
+        });
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        // ch1 的 500 被配成致命 → 直接透传 500（不 failover 到 ch2）
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR, "通道把 500 配成致命应透传");
+        // ch1(m1) 只被调 1 次（致命不 failover）
+        let reqs = upstream.received_requests().await.unwrap();
+        let m1_hits = reqs.iter().filter(|r| {
+            let b: Value = serde_json::from_slice(&r.body).unwrap_or(json!({}));
+            b["model"] == "m1"
+        }).count();
+        assert_eq!(m1_hits, 1, "致命 500 不 failover，ch1 只调 1 次");
+    }
+
+    #[tokio::test]
+    async fn global_retry_default_5xx_fails_over() {
+        // 全局默认（无通道覆盖）：500 可重试 → failover 到 ch2（对照上面的通道覆盖）
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "m1"})))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&upstream).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "m2"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "ok", "choices": []})))
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        // 不配通道级 retry → 用全局默认（500 可重试）
+        write_two_channel_yaml(dir.path(), &format!("{}/v1", upstream.uri()), "m1", "m2", false);
+
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        // 全局默认 500 可重试 → failover 到 ch2 → 200
+        assert_eq!(resp.status(), StatusCode::OK, "全局默认 500 可重试应 failover");
+    }
+
 }

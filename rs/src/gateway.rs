@@ -19,8 +19,86 @@ pub struct NamedKey {
     pub api_key: String,
 }
 
-/// 通道：供应商内部一条具体接入方式（key × 路径 × 模型映射三件套绑死，学 LiteLLM Deployment）
+/// 重试策略（全局默认，每通道可用 retry 字段覆盖部分项）。学 LiteLLM retry/allowed_fails_policy
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryConfig {
+    /// 最大重试次数（failover 尝试多少条通道）
+    #[serde(default = "def_retry_max")]
+    pub max_retries: usize,
+    /// 哪些状态码可重试（failover 到其他通道）
+    #[serde(default = "def_retry_on_status")]
+    pub retry_on_status: Vec<u16>,
+    /// 哪些状态码致命（直接透传，不 failover）——鉴权/参数错误换通道也没用
+    #[serde(default = "def_fatal_status")]
+    pub fatal_status: Vec<u16>,
+    /// 退避起始毫秒
+    #[serde(default = "def_backoff_initial")]
+    pub backoff_initial_ms: u64,
+    /// 退避上限毫秒
+    #[serde(default = "def_backoff_max")]
+    pub backoff_max_ms: u64,
+    /// jitter 比例 [0,1)，防雪崩
+    #[serde(default = "def_jitter")]
+    pub jitter: f64,
+    /// 是否尊重上游 retry-after 响应头
+    #[serde(default = "def_respect_retry_after")]
+    pub respect_retry_after: bool,
+}
+
+fn def_retry_max() -> usize { 3 }
+fn def_retry_on_status() -> Vec<u16> { vec![408, 409, 429, 500, 502, 503, 504] }
+fn def_fatal_status() -> Vec<u16> { vec![400, 401, 403, 404] }
+fn def_backoff_initial() -> u64 { 500 }
+fn def_backoff_max() -> u64 { 8000 }
+fn def_jitter() -> f64 { 0.75 }
+fn def_respect_retry_after() -> bool { true }
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: def_retry_max(),
+            retry_on_status: def_retry_on_status(),
+            fatal_status: def_fatal_status(),
+            backoff_initial_ms: def_backoff_initial(),
+            backoff_max_ms: def_backoff_max(),
+            jitter: def_jitter(),
+            respect_retry_after: def_respect_retry_after(),
+        }
+    }
+}
+
+impl RetryConfig {
+    /// 状态码是否可重试（failover）：在 retry_on_status 或 5xx 默认可重试
+    pub fn is_retryable(&self, status: u16) -> bool {
+        self.retry_on_status.contains(&status) || (status >= 500 && !self.fatal_status.contains(&status))
+    }
+    /// 状态码是否致命（直接透传）
+    pub fn is_fatal(&self, status: u16) -> bool {
+        self.fatal_status.contains(&status)
+    }
+}
+
+/// 通道级重试覆盖：只配想改的字段，None=继承全局 RetryConfig
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RetryOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_on_status: Option<Vec<u16>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fatal_status: Option<Vec<u16>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff_initial_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff_max_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub respect_retry_after: Option<bool>,
+}
+
+/// 通道：供应商内部一条具体接入方式（key × 路径 × 模型映射三件套绑死，学 LiteLLM Deployment）
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Channel {
     pub id: String,
     pub name: String,
@@ -39,6 +117,9 @@ pub struct Channel {
     /// 每分钟请求上限（RPM，空=不限）；超限当不可用跳过（防打爆上游）
     #[serde(default)]
     pub rpm: Option<u32>,
+    /// 通道级重试覆盖（空=继承全局 retry）；只配想改的字段
+    #[serde(default)]
+    pub retry: Option<RetryOverride>,
 }
 
 fn default_weight() -> u32 { 1 }
@@ -91,6 +172,9 @@ pub struct GatewayConfig {
     /// 路由策略（延迟感知/权重/随机/最闲）
     #[serde(default)]
     pub routing: RoutingConfig,
+    /// 重试策略（全局默认，学 LiteLLM retry；通道可覆盖）
+    #[serde(default)]
+    pub retry: RetryConfig,
     /// 超时（流式首字/非流式，学 cc-switch）
     #[serde(default)]
     pub timeout: TimeoutConfig,
@@ -588,8 +672,7 @@ pub fn select_channel(
         provider: (*provider).clone(),
         channel: (*channel).clone(),
         upstream_model: m.name.clone(),
-        api_key,
-    })
+        api_key })
 }
 
 /// 解析通道实际用的 key：key_name 指定 → 池里找同名；否则用第一个（主）
@@ -713,8 +796,7 @@ pub fn ordered_candidates(
             provider: (*p).clone(),
             channel: (*c).clone(),
             upstream_model: m.name.clone(),
-            api_key: resolve_key(p, c).unwrap_or_default(),
-        });
+            api_key: resolve_key(p, c).unwrap_or_default() });
         used[i] = true;
     };
 
@@ -795,8 +877,7 @@ fn find_channel_by_id(config: &GatewayConfig, channel_id: &str, requested_model:
                         provider: provider.clone(),
                         channel: channel.clone(),
                         upstream_model: m.name.clone(),
-                        api_key: resolve_key(provider, channel).unwrap_or_default(),
-                    });
+                        api_key: resolve_key(provider, channel).unwrap_or_default() });
                 }
             }
         }
@@ -870,13 +951,13 @@ pub async fn forward_generic(
                 provider: cand.provider.clone(),
                 channel: cand.channel.clone(),
                 upstream_model: cand.upstream_model.clone(),
-                api_key: cand.api_key.clone(),
-            };
+                api_key: cand.api_key.clone() };
             // 限流：通道配了 rpm 且超限 → 跳过（防打爆上游）
             if let Some(rpm) = cand.channel.rpm {
                 if is_rate_limited(rates, &cand.channel.id, rpm) { continue; }
             }
-            match forward_one(root, &config, health, &sel, &requested_model, &payload, upstream_path, dkey.as_deref()).await {
+            let policy = resolve_retry_policy(&config.retry, cand.channel.retry.as_ref());
+            match forward_one(root, &config, health, &sel, &requested_model, &payload, upstream_path, dkey.as_deref(), &policy).await {
                 Ok(resp) => return resp,
                 Err(e) => {
                     // 错误分类（学 LiteLLM）：致命 4xx（鉴权/参数）重试也没用 → 直接透传
@@ -886,7 +967,7 @@ pub async fn forward_generic(
                     last_err = e.message();
                     // 可重试：退避（0.5×2→8s + jitter，尊重 retry-after）再 failover
                     if attempted as usize + 1 < candidates.len() {
-                        tokio::time::sleep(retry_delay(attempted, e.retry_after())).await;
+                        tokio::time::sleep(retry_delay(&policy, attempted, e.retry_after())).await;
                     }
                     attempted += 1;
                     continue; // fallback 下一个
@@ -911,7 +992,7 @@ pub async fn forward_generic(
             })),
         ).into_response();
     }
-    let max_retries = config.routing.max_retries.min(candidates.len());
+    let max_retries = config.retry.max_retries.min(candidates.len());
     let mut last_err = String::new();
     let mut attempted: u32 = 0; // 已重试次数（退避指数用）
     for cand in candidates.iter().take(max_retries.max(1)) {
@@ -919,7 +1000,8 @@ pub async fn forward_generic(
         if let Some(rpm) = cand.channel.rpm {
             if is_rate_limited(rates, &cand.channel.id, rpm) { continue; }
         }
-        match forward_one(root, &config, health, cand, &requested_model, &payload, upstream_path, dkey.as_deref()).await {
+        let policy = resolve_retry_policy(&config.retry, cand.channel.retry.as_ref());
+        match forward_one(root, &config, health, cand, &requested_model, &payload, upstream_path, dkey.as_deref(), &policy).await {
             Ok(resp) => {
                 // 成功：更新黏性 pin 到这条通道（供后续复用）
                 if let Some(k) = pin_key.as_deref() {
@@ -937,7 +1019,7 @@ pub async fn forward_generic(
                 last_err = e.message();
                 // 可重试：退避（0.5×2→8s + jitter，尊重 retry-after）再 failover
                 if attempted as usize + 1 < max_retries.max(1) {
-                    tokio::time::sleep(retry_delay(attempted, e.retry_after())).await;
+                    tokio::time::sleep(retry_delay(&policy, attempted, e.retry_after())).await;
                 }
                 attempted += 1;
                 continue; // failover 下一个
@@ -978,10 +1060,19 @@ impl ForwardError {
     }
 }
 
-/// 哪些状态码可重试（学 LiteLLM should_retry_status）：408 请求超时 / 409 冲突 / 429 限流 / 5xx 服务端错误。
-/// 其余 4xx（400/401/403/404）是客户端错误，换通道也没用，不重试。
-fn should_retry_status(status: u16) -> bool {
-    matches!(status, 408 | 409 | 429) || status >= 500
+/// 合并全局重试策略 + 通道级覆盖（通道只配想改的字段，其余继承全局）
+fn resolve_retry_policy<'a>(global: &'a RetryConfig, channel_override: Option<&'a RetryOverride>) -> RetryConfig {
+    let mut policy = global.clone();
+    if let Some(o) = channel_override {
+        if let Some(v) = o.max_retries { policy.max_retries = v; }
+        if let Some(ref v) = o.retry_on_status { policy.retry_on_status = v.clone(); }
+        if let Some(ref v) = o.fatal_status { policy.fatal_status = v.clone(); }
+        if let Some(v) = o.backoff_initial_ms { policy.backoff_initial_ms = v; }
+        if let Some(v) = o.backoff_max_ms { policy.backoff_max_ms = v; }
+        if let Some(v) = o.jitter { policy.jitter = v; }
+        if let Some(v) = o.respect_retry_after { policy.respect_retry_after = v; }
+    }
+    policy
 }
 
 /// 从上游响应头读 retry-after（秒），仅尊重 ≤ 60s 的（学 LiteLLM MAX_HONOURED_RETRY_AFTER）
@@ -994,17 +1085,21 @@ fn parse_retry_after(resp: &reqwest::Response) -> Option<std::time::Duration> {
 
 /// 重试退避延迟（学 LiteLLM Backoff）：0.5s 起，指数 ×2 到 8s 封顶，加 0.75 jitter 防雪崩。
 /// 优先尊重上游 retry-after。attempted=已重试次数。
-fn retry_delay(attempted: u32, retry_after: Option<std::time::Duration>) -> std::time::Duration {
-    const INITIAL: f64 = 0.5;
-    const MAX: f64 = 8.0;
-    const JITTER: f64 = 0.75;
+/// 重试退避延迟（学 LiteLLM Backoff）：initial 起 ×2 到 max 封顶，加 jitter 防雪崩。
+/// 尊重上游 retry-after（若 policy 允许）。attempted=已重试次数。
+fn retry_delay(policy: &RetryConfig, attempted: u32, retry_after: Option<std::time::Duration>) -> std::time::Duration {
+    let initial = policy.backoff_initial_ms as f64 / 1000.0;
+    let max = policy.backoff_max_ms as f64 / 1000.0;
+    let jitter = policy.jitter;
     // 尊重上游明确要求的 retry-after
-    if let Some(ra) = retry_after {
-        return ra + std::time::Duration::from_secs_f64(JITTER * pseudo_rand());
+    if policy.respect_retry_after {
+        if let Some(ra) = retry_after {
+            return ra + std::time::Duration::from_secs_f64(jitter * pseudo_rand());
+        }
     }
-    let doubled = INITIAL * 2f64.powi(attempted as i32);
-    let secs = doubled.min(MAX);
-    std::time::Duration::from_secs_f64(secs + JITTER * pseudo_rand())
+    let doubled = initial * 2f64.powi(attempted as i32);
+    let secs = doubled.min(max);
+    std::time::Duration::from_secs_f64(secs + jitter * pseudo_rand())
 }
 
 /// 轻量伪随机 [0,1)，从纳秒时间戳取，避免引 rand 依赖（jitter 防雪崩够用）
@@ -1024,6 +1119,7 @@ async fn forward_one(
     payload: &serde_json::Value,
     upstream_path: &str,
     dkey: Option<&str>,
+    policy: &RetryConfig,
 ) -> Result<axum::response::Response, ForwardError> {
     // 把请求里的模型名换成上游真实名
     let mut upstream_payload = payload.clone();
@@ -1062,9 +1158,16 @@ async fn forward_one(
     let ok = status.is_success();
     record_outcome(health, &selected.channel.id, ok, ttft, cb, false).await;
 
-    // 上游 5xx → 返 Err 触发 failover（换下一通道重试）；4xx 客户端错误仍透传（换通道也没用）
-    // 学 LiteLLM：服务端错误可重试到其他 deployment，客户端错误（鉴权/参数）不可
-    if status.is_server_error() {
+    // 错误分类（学 LiteLLM，可配置）：致命 4xx（鉴权/参数）直接透传；可重试状态码返 Err 触发 failover
+    let code = status.as_u16();
+    if status.is_server_error() && policy.is_fatal(code) {
+        // 5xx 但被配成致命（罕见）→ 透传
+        return Err(ForwardError::Fatal { status: Some(code), msg: format!("上游错误（配置为致命）{}", code) });
+    }
+    if status.is_client_error() && policy.is_fatal(code) {
+        return Err(ForwardError::Fatal { status: Some(code), msg: format!("上游客户端错误 {}", code) });
+    }
+    if status.is_server_error() || (status.is_client_error() && policy.is_retryable(code)) {
         // 先记日志（failover 早返回跳过了后面的日志分支）
         crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
             model: requested_model.into(),
@@ -1507,8 +1610,7 @@ mod tests {
                 path: None,
                 key_name: None,
                 models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }],
-                weight: 1, rpm: None,
-            }],
+                weight: 1, rpm: None, retry: None }],
             proxy: String::new(),
         });
         let h = health_map();
@@ -1531,9 +1633,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
+                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
                 Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
+                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
             ],
             proxy: String::new(),
         });
@@ -1558,9 +1660,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
+                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
                 Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
+                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
             ],
             proxy: String::new(),
         });
@@ -1588,7 +1690,7 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None }],
+                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None }],
             proxy: String::new(),
         });
         let h = health_map();
@@ -1608,7 +1710,7 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None }],
+                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None }],
             proxy: String::new(),
         });
         let h = health_map();
@@ -1638,9 +1740,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "slow".into(), name: "slow".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
                 Channel { id: "fast".into(), name: "fast".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
             ],
             proxy: String::new(),
         });
@@ -1682,9 +1784,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
                 Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
             ],
             proxy: String::new(),
         });
@@ -1743,8 +1845,7 @@ mod tests {
             channels: vec![Channel {
                 id: "ch-text".into(), name: "text".into(), path: None, key_name: None,
                 models: vec![ChannelModel { name: "text-only".into(), alias: None, capabilities: vec![] }],
-                weight: 1, rpm: None,
-            }],
+                weight: 1, rpm: None, retry: None }],
             proxy: String::new(),
         });
         let h = health_map();
@@ -1765,10 +1866,10 @@ mod tests {
             channels: vec![
                 Channel { id: "ch-slow".into(), name: "slow".into(), path: None, key_name: None,
                     models: vec![ChannelModel { name: "m-slow".into(), alias: None, capabilities: vec!["vision".into()] }],
-                    weight: 1, rpm: None },
+                    weight: 1, rpm: None, retry: None },
                 Channel { id: "ch-fast".into(), name: "fast".into(), path: None, key_name: None,
                     models: vec![ChannelModel { name: "m-fast".into(), alias: None, capabilities: vec!["vision".into()] }],
-                    weight: 1, rpm: None },
+                    weight: 1, rpm: None, retry: None },
             ],
             proxy: String::new(),
         });
@@ -1796,8 +1897,7 @@ mod tests {
             channels: vec![Channel {
                 id: "ch-open".into(), name: "open".into(), path: None, key_name: None,
                 models: vec![ChannelModel { name: "m".into(), alias: None, capabilities: vec![] }],
-                weight: 1, rpm: None,
-            }],
+                weight: 1, rpm: None, retry: None }],
             proxy: String::new(),
         });
         let h = health_map();
@@ -1823,9 +1923,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "chA".into(), name: "a".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
                 Channel { id: "chB".into(), name: "b".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None },
             ],
             proxy: String::new(),
         });
@@ -1846,7 +1946,7 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "chOff".into(), name: "off".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None }],
+                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None }],
             proxy: String::new(),
         });
         cfg.providers.push(Provider {
@@ -1854,7 +1954,7 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "chOn".into(), name: "on".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None }],
+                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None }],
             proxy: String::new(),
         });
         let h = health_map();
