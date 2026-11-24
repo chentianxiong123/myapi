@@ -341,11 +341,15 @@ pub struct RoutingConfig {
     /// Auto 模式开关（model=auto 时才生效）
     #[serde(default = "def_auto_enabled")]
     pub auto_mode_enabled: bool,
+    /// 最大重试数（failover 尝试多少条通道）
+    #[serde(default = "def_max_retries")]
+    pub max_retries: usize,
 }
+fn def_max_retries() -> usize { 3 }
 fn def_auto_enabled() -> bool { true }
 impl Default for RoutingConfig {
     fn default() -> Self {
-        Self { strategy: RoutingStrategy::default(), auto_mode_enabled: def_auto_enabled() }
+        Self { strategy: RoutingStrategy::default(), auto_mode_enabled: def_auto_enabled(), max_retries: def_max_retries() }
     }
 }
 
@@ -594,6 +598,65 @@ pub fn session_key(payload: &serde_json::Value, auth_header: Option<&str>) -> Op
 }
 
 /// 带黏性的通道选择：有有效 pin 且通道可用→复用；否则新选并打 pin
+/// 按路由策略返回排序后的候选链（普通路由 failover 用）。
+/// 可用通道优先按策略排序；全熔断则 KeepAll 兑底（原顺序）。pin 的通道提到最前。
+pub fn ordered_candidates(
+    config: &GatewayConfig,
+    requested_model: &str,
+    health: &HealthMap,
+    pin_channel_id: Option<&str>,
+) -> Vec<SelectedChannel> {
+    let hs = health.try_read().ok();
+    let hs = hs.as_deref();
+    let cb = &config.circuit_breaker;
+    let strategy = &config.routing.strategy;
+
+    // 收集能服务该模型的候选
+    let mut candidates: Vec<(&Provider, &Channel, &ChannelModel)> = Vec::new();
+    for provider in &config.providers {
+        if provider.disabled { continue; }
+        for channel in &provider.channels {
+            for m in &channel.models {
+                let external = m.alias.as_deref().unwrap_or(&m.name);
+                if external == requested_model || m.name == requested_model {
+                    candidates.push((provider, channel, m));
+                }
+            }
+        }
+    }
+    if candidates.is_empty() { return Vec::new(); }
+
+    // 按策略选出的首选 index（apply_strategy 处理熔断过滤 + 策略排序）
+    let first = apply_strategy(&candidates, hs, cb, strategy);
+
+    // 构造 SelectedChannel 列表：首选在前，其余按原序在后
+    let mut ordered: Vec<SelectedChannel> = Vec::new();
+    let mut used = vec![false; candidates.len()];
+    let push = |ordered: &mut Vec<SelectedChannel>, i: usize, used: &mut Vec<bool>| {
+        if used[i] { return; }
+        let (p, c, m) = candidates[i];
+        ordered.push(SelectedChannel {
+            provider: (*p).clone(),
+            channel: (*c).clone(),
+            upstream_model: m.name.clone(),
+            api_key: resolve_key(p, c).unwrap_or_default(),
+        });
+        used[i] = true;
+    };
+
+    // pin 的通道最优先（黏性复用）
+    if let Some(pin_id) = pin_channel_id {
+        if let Some(i) = candidates.iter().position(|(_, c, _)| c.id == pin_id) {
+            push(&mut ordered, i, &mut used);
+        }
+    }
+    push(&mut ordered, first, &mut used);
+    for i in 0..candidates.len() {
+        push(&mut ordered, i, &mut used);
+    }
+    ordered
+}
+
 pub fn select_channel_sticky(
     config: &GatewayConfig,
     requested_model: &str,
@@ -718,19 +781,41 @@ pub async fn forward_chat(
         return error_response(502, &format!("auto: 所有候选失败, 最后错误: {}", last_err));
     }
 
-    // 非 Auto：黏性选通道 → 转发
-    let selected = match select_channel_sticky(&config, &requested_model, health, pins, pin_key.as_deref()) {
-        Some(s) => s,
-        None => {
-            return (
-                axum::http::StatusCode::NOT_FOUND,
-                axum::Json(serde_json::json!({
-                    "error": {"message": format!("模型 {} 无可用通道", requested_model), "type": "invalid_request_error"}
-                })),
-            ).into_response();
-        }
+    // 非 Auto：候选链 + failover（逐个试，失败切下一个，受 max_retries 限制）
+    // 黏性：从 pin 表取上次通道提到链首（复用），失败则 failover 到其他通道
+    let pinned_id = match pin_key.as_deref() {
+        Some(k) => pins.read().await.get(k).map(|e| e.channel_id.clone()),
+        None => None,
     };
-    forward_one(&config, health, &selected, &requested_model, &payload).await.unwrap_or_else(|e| error_response(502, &e))
+    let candidates = ordered_candidates(&config, &requested_model, health, pinned_id.as_deref());
+    if candidates.is_empty() {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({
+                "error": {"message": format!("模型 {} 无可用通道", requested_model), "type": "invalid_request_error"}
+            })),
+        ).into_response();
+    }
+    let max_retries = config.routing.max_retries.min(candidates.len());
+    let mut last_err = String::new();
+    for cand in candidates.iter().take(max_retries.max(1)) {
+        match forward_one(&config, health, cand, &requested_model, &payload).await {
+            Ok(resp) => {
+                // 成功：更新黏性 pin 到这条通道（供后续复用）
+                if let Some(k) = pin_key.as_deref() {
+                    if config.sticky.enabled {
+                        pins.write().await.insert(k.to_string(), PinEntry { channel_id: cand.channel.id.clone(), pinned_at: now_secs() });
+                    }
+                }
+                return resp;
+            }
+            Err(e) => {
+                last_err = e;
+                continue; // failover 下一个
+            }
+        }
+    }
+    error_response(502, &format!("所有通道失败（试了 {} 条）: {}", max_retries.max(1), last_err))
 }
 
 /// 转发到单个通道（Auto 和普通路由共用）：失败返回 Err(msg)，成功返回响应
@@ -1143,7 +1228,7 @@ mod tests {
 
     fn two_chan_cfg(strategy: RoutingStrategy) -> GatewayConfig {
         let mut cfg = GatewayConfig::default();
-        cfg.routing = RoutingConfig { strategy, auto_mode_enabled: true };
+        cfg.routing = RoutingConfig { strategy, auto_mode_enabled: true, max_retries: 3 };
         cfg.sticky = StickyConfig { enabled: false, ttl_seconds: 300 };
         cfg.providers.push(Provider {
             name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
@@ -1278,5 +1363,57 @@ mod tests {
         let payload = serde_json::json!({"messages":[{"role":"user","content":"hi"}]});
         let cands = auto_candidates(&cfg, &payload, &h);
         assert!(cands.is_empty(), "熔断通道应被跳过");
+    }
+
+    // ---- failover 候选链测试 ----
+
+    #[tokio::test]
+    async fn ordered_candidates_pin_first_and_chain() {
+        let mut cfg = GatewayConfig::default();
+        cfg.routing.max_retries = 3;
+        cfg.providers.push(Provider {
+            name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![
+                Channel { id: "chA".into(), name: "a".into(), path: None, key_name: None,
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
+                Channel { id: "chB".into(), name: "b".into(), path: None, key_name: None,
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
+            ],
+            proxy: String::new(),
+        });
+        let h = health_map();
+        // 无 pin：应返回两条候选（failover 链完整）
+        let cands = ordered_candidates(&cfg, "my-model", &h, None);
+        assert_eq!(cands.len(), 2, "应返回完整 failover 链");
+        // pin chB：应提到链首
+        let cands2 = ordered_candidates(&cfg, "my-model", &h, Some("chB"));
+        assert_eq!(cands2[0].channel.id, "chB", "pin 通道应优先");
+    }
+
+    #[tokio::test]
+    async fn ordered_candidates_skips_disabled_provider() {
+        let mut cfg = GatewayConfig::default();
+        cfg.providers.push(Provider {
+            name: "off".into(), base_url: "http://x/v1".into(), disabled: true,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![Channel { id: "chOff".into(), name: "off".into(), path: None, key_name: None,
+                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 }],
+            proxy: String::new(),
+        });
+        cfg.providers.push(Provider {
+            name: "on".into(), base_url: "http://y/v1".into(), disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![Channel { id: "chOn".into(), name: "on".into(), path: None, key_name: None,
+                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 }],
+            proxy: String::new(),
+        });
+        let h = health_map();
+        let cands = ordered_candidates(&cfg, "my-model", &h, None);
+        assert_eq!(cands.len(), 1, "disabled provider 应被跳过");
+        assert_eq!(cands[0].channel.id, "chOn");
     }
 }
