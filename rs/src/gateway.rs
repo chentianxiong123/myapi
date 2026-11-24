@@ -745,12 +745,13 @@ pub fn load_config(root: &std::path::Path) -> GatewayConfig {
 
 /// 选通道 → 构造上游请求 → 转发 → 回传。
 /// 最小版：非流式直接回 JSON；流式透传 SSE 字节流。
-pub async fn forward_chat(
+pub async fn forward_generic(
     root: &std::path::Path,
     health: &HealthMap,
     pins: &PinStore,
     auth_header: Option<&str>,
     payload: serde_json::Value,
+    upstream_path: &str,
 ) -> axum::response::Response {
     let config = load_config(root);
     let requested_model = payload.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -770,7 +771,7 @@ pub async fn forward_chat(
                 upstream_model: cand.upstream_model.clone(),
                 api_key: cand.api_key.clone(),
             };
-            match forward_one(&config, health, &sel, &requested_model, &payload).await {
+            match forward_one(&config, health, &sel, &requested_model, &payload, upstream_path).await {
                 Ok(resp) => return resp,
                 Err(e) => {
                     last_err = e;
@@ -799,7 +800,7 @@ pub async fn forward_chat(
     let max_retries = config.routing.max_retries.min(candidates.len());
     let mut last_err = String::new();
     for cand in candidates.iter().take(max_retries.max(1)) {
-        match forward_one(&config, health, cand, &requested_model, &payload).await {
+        match forward_one(&config, health, cand, &requested_model, &payload, upstream_path).await {
             Ok(resp) => {
                 // 成功：更新黏性 pin 到这条通道（供后续复用）
                 if let Some(k) = pin_key.as_deref() {
@@ -825,6 +826,7 @@ async fn forward_one(
     selected: &SelectedChannel,
     requested_model: &str,
     payload: &serde_json::Value,
+    upstream_path: &str,
 ) -> Result<axum::response::Response, String> {
     // 把请求里的模型名换成上游真实名
     let mut upstream_payload = payload.clone();
@@ -833,9 +835,9 @@ async fn forward_one(
     }
     let is_stream = payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    // 构造上游 URL（base_url + /chat/completions）
+    // 构造上游 URL（base_url + 可配置路径，如 /chat/completions 或 /embeddings）
     let base = selected.provider.base_url.trim_end_matches('/');
-    let url = format!("{}/chat/completions", base);
+    let url = format!("{}{}", base, upstream_path);
 
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(config.timeout.streaming_first_byte))
@@ -894,6 +896,34 @@ async fn forward_one(
             .map_err(|e| format!("回传失败: {}", e))
     }
 }
+
+/// chat 端点包装（forward_generic + /chat/completions）
+pub async fn forward_chat(
+    root: &std::path::Path,
+    health: &HealthMap,
+    pins: &PinStore,
+    auth_header: Option<&str>,
+    payload: serde_json::Value,
+) -> axum::response::Response {
+    forward_generic(root, health, pins, auth_header, payload, "/chat/completions").await
+}
+
+/// embeddings 端点（复用路由+failover，走 /embeddings，无流式）
+pub async fn forward_embeddings(
+    root: &std::path::Path,
+    health: &HealthMap,
+    pins: &PinStore,
+    auth_header: Option<&str>,
+    payload: serde_json::Value,
+) -> axum::response::Response {
+    // embeddings 不流式，强制去掉 stream 标记
+    let mut p = payload;
+    if let Some(obj) = p.as_object_mut() {
+        obj.remove("stream");
+    }
+    forward_generic(root, health, pins, auth_header, p, "/embeddings").await
+}
+
 
 fn error_response(code: u16, msg: &str) -> axum::response::Response {
     (

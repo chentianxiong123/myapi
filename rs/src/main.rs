@@ -158,6 +158,17 @@ async fn gateway_chat(
     gateway::forward_chat(&s.root, &s.health, &s.pins, auth, payload).await
 }
 
+/// POST /v1/embeddings：复用路由+failover，走 /embeddings（无流式）
+async fn gateway_embeddings(
+    State(s): State<S>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<Value>,
+) -> axum::response::Response {
+    let auth = headers.get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    gateway::forward_embeddings(&s.root, &s.health, &s.pins, auth, payload).await
+}
+
 #[tokio::main]
 async fn main() {
     if maybe_cli(&std::env::args().skip(1).collect::<Vec<_>>()).await { return; }
@@ -193,6 +204,7 @@ async fn main() {
         // ---- 网关面（/v1，OpenAI 兼容）：转发上游 ----
         .route("/v1/models", get(gateway_models))
         .route("/v1/chat/completions", post(gateway_chat))
+        .route("/v1/embeddings", post(gateway_embeddings))
         .fallback_service(ServeDir::new(root().join("web").join("static")))
         .with_state(state);
     let addr = format!("127.0.0.1:{}", api::gateway_cfg().panel_port);
