@@ -154,3 +154,82 @@ impl Adapter for CrushAdapter {
         self.io.write(&self.path, &new).map_err(|e| e.to_string())
     }
 }
+
+// ==================== 测试（render 纯逻辑：命令行文本 + loopback_url）====================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::ir::ModelIR;
+    use crate::adapters::{Adapter, AdapterInstance, Rendered};
+
+    fn adapter() -> CrushAdapter {
+        CrushAdapter::new(&AdapterInstance::default())
+    }
+    fn ir(base_url: &str, ids: &[&str]) -> ProviderIR {
+        ProviderIR {
+            provider_id: MYAPI_ID.into(),
+            base_url: base_url.into(),
+            api_key: "sk-crush".into(),
+            models: ids.iter().map(|id| ModelIR { id: id.to_string(), ..Default::default() }).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn render_has_begin_end_marks() {
+        let out = adapter().render(&ir("http://192.168.31.213:8317/v1", &["m1"]));
+        match out {
+            Rendered::Text(t) => {
+                assert!(t.contains(BEGIN_MARK));
+                assert!(t.contains(END_MARK));
+            }
+            _ => panic!("crush 应返 Text"),
+        }
+    }
+
+    #[test]
+    fn render_provider_add_line() {
+        let out = adapter().render(&ir("http://192.168.31.213:8317/v1", &["m1"]));
+        match out {
+            Rendered::Text(t) => {
+                assert!(t.contains(&format!("provider add {} --type {}", MYAPI_ID, MYAPI_TYPE)));
+                assert!(t.contains("--api-key \"sk-crush\""));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn render_loopback_converts_ip() {
+        // 远程 IP → 127.0.0.1
+        let out = adapter().render(&ir("http://192.168.31.213:8317/v1", &["m1"]));
+        match out {
+            Rendered::Text(t) => {
+                assert!(t.contains("http://127.0.0.1:8317/v1"), "IP 应转 loopback: {t}");
+                assert!(!t.contains("192.168.31.213"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn render_model_lines_and_large_small() {
+        let out = adapter().render(&ir("http://x:8317/v1", &["m1", "m2", "m3"]));
+        match out {
+            Rendered::Text(t) => {
+                assert!(t.contains("model add myapi/m1"));
+                assert!(t.contains("model add myapi/m3"));
+                assert!(t.contains("model large myapi/m1"), "首模型=large");
+                assert!(t.contains("model small myapi/m3"), "末模型=small");
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn loopback_url_direct() {
+        assert_eq!(CrushAdapter::loopback_url("http://1.2.3.4:8317/v1"), "http://127.0.0.1:8317/v1");
+        assert_eq!(CrushAdapter::loopback_url("https://1.2.3.4:8317/v1"), "http://127.0.0.1:8317/v1");
+        assert_eq!(CrushAdapter::loopback_url("http://127.0.0.1:8317/v1"), "http://127.0.0.1:8317/v1");
+    }
+}
