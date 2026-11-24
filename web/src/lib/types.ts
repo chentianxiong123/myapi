@@ -7,13 +7,30 @@ export interface Provider {
   base_url: string
   disabled: boolean
   headers: Record<string, string>
-  keys: Array<{ 'api-key': string }>
-  models: Array<{ name: string; alias?: string; protocol?: ModelProtocol; kind?: ModelKind }>
+  // 密钥池（命名密钥，学 LiteLLM 继承+覆盖）：通道引用名字，不直接填 key
+  // 约定：第一个 key 名为 '主'，通道不指定 key_name 时自动用它
+  keys: Array<{ name: string; 'api-key': string }>
+  // 通道（学 LiteLLM Deployment，三件套绑死：key×路径×映射）
+  // 供应商的子层：一个供应商 → 多条通道
+  channels: Channel[]
   // 渠道级别代理（每个 Provider 可单独走代理；空=直连/全局代理）
   proxy: string
   // 代理池（学 9router：引用 proxyPools 的一个池 + 选择策略；空=不用池）
   proxy_pool_id: string
   proxy_strategy: 'round-robin' | 'random' | 'none'
+}
+
+// 通道（命名待定，暂用通道/Channel）：供应商的一条具体接入方式
+// = 一个 key（引用密钥池）× 一条网络路径 × 一组模型名映射 三件套
+// 参考：LiteLLM Deployment（api_key + api_base + model 全绑死在一个 deployment）
+export interface Channel {
+  id: string
+  name: string                  // 通道名（如 带key-ipv4 / 无key-ipv6 / VIP）
+  path?: string                 // 网络路径（IPv4/IPv6 描述；空=直连/继承供应商代理）
+  key_name?: string             // 引用密钥池的名字（空=用第一个「主」密钥）
+  // 该通道覆盖的模型映射：上游真实名 → 可选对外别名
+  models: Array<{ name: string; alias?: string; protocol?: ModelProtocol; kind?: ModelKind }>
+  weight: number                // 路由权重（权重高调用多，默认 1）
 }
 
 // 模型类型（学 9router /v1/models 分类：chat/webSearch/webFetch/embedding）
@@ -36,11 +53,13 @@ export const MODEL_PROTOCOLS: Array<{ id: ModelProtocol; label: string; path: st
 ]
 
 // 对外暴露的模型（按 alias 分组）
+// 运行态聚合视图：一个 alias 由多条通道供（跨供应商），按权重路由
+// 模型页只读展示：健康度/熔断/路由分流/通道来源
 export interface ExposedModel {
   id?: string
   alias: string
   kind?: ModelKind
-  // 模型级路由规则（调用变体）：允许不带 key、不同代理、独立额度
+  // 路由到的通道引用（provider_name + channel_name 定位到具体通道）
   routes: ModelRoute[]
 }
 
@@ -259,13 +278,10 @@ export const PROXY_STRATEGIES: Array<{ id: 'round-robin' | 'random' | 'none'; la
 // 同一模型可多个 route：不同 key（可空=不带 key）/不同代理（IPv4/IPv6）/独立额度
 export interface ModelRoute {
   id: string
-  name: string            // 变体名（如 带key-ipv4 / 无key-ipv6）
-  provider_name: string   // 渠道（上游）
-  real_name: string       // 上游真实模型名
-  key: string             // 密钥（空 = 不带 key 请求）
-  proxy: string           // 代理 URL（IPv4/IPv6；空=直连）
+  provider_name: string   // 供应商
+  channel_name: string    // 通道名（定位到 Provider.channels 里的具体通道）
+  real_name: string       // 上游真实模型名（= 通道里某条映射的 name）
   weight: number          // 路由权重（权重高调用多）
-  quota: number           // 独立额度（已用 tokens，独立算额度）
 }
 
 // MCP 接口（搜索/识图作为 MCP 工具暴露给 agent，学 9router mcp_tools）

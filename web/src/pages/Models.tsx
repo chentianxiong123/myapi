@@ -1,222 +1,213 @@
 import { useEffect, useState } from 'react'
-import { Layers, Plus, Trash2, Save, Pencil, Check, X, Key, Globe, Hash } from 'lucide-react'
-import { toast } from '@/components/Toast'
-import type { ExposedModel, ModelRoute } from '@/lib/types'
+import { Activity, AlertTriangle, Clock, Gauge, Layers, PauseCircle, ShieldCheck } from 'lucide-react'
+import type { ExposedModel, ModelRoute, ModelKind } from '@/lib/types'
 
-// 模型级路由规则（学 LiteLLM deployment + 9router combo）
-// 同一模型多 route：不同 key（可空=不带 key）/不同代理（IPv4/IPv6）/独立额度
-const DEFAULT_MODELS: ExposedModel[] = [
+// 模型健康度台（只读，被动统计真实请求，学 LiteLLM cooldown：非主动探测）
+// 一个模型（alias）由多条通道供（跨供应商），按权重路由
+// 健康度/熔断/路由分流/通道来源 全部来自真实请求的被动统计
+
+// 被动统计的通道健康（后端未实现，先 mock；字段学 LiteLLM cooldown_handlers）
+interface ChannelHealth {
+  requests: number        // 窗口内请求数
+  success_rate: number    // 成功率 %
+  avg_ttft_ms: number     // 平均首字
+  error_count: number     // 错误数
+  cooldown_until?: number // 熔断截止时间戳（有=熔断中）
+  cooldown_reason?: string
+}
+
+// 一个模型下某条路由的运行态（= 通道引用 + 被动健康）
+interface ModelRouteHealth extends ModelRoute {
+  health: ChannelHealth
+}
+
+// 带健康度的模型（= ExposedModel，但 routes 带 health）
+interface ModelWithHealth extends Omit<ExposedModel, 'routes'> {
+  routes: ModelRouteHealth[]
+}
+
+const DEFAULT_MODELS: ModelWithHealth[] = [
   {
     id: 'm-1', alias: 'deepseek-v4-flash', kind: 'chat',
     routes: [
-      { id: 'r-1', name: '带key-ipv4', provider_name: 'SenseNova', real_name: 'deepseek-v4-flash', key: 'sk-sensenova', proxy: 'http://127.0.0.1:7890', weight: 8, quota: 45231 },
-      { id: 'r-2', name: '带key-ipv6', provider_name: 'SenseNova', real_name: 'deepseek-v4.1-flash', key: 'sk-sensenova', proxy: 'socks5://[::1]:1080', weight: 2, quota: 11230 },
+      { id: 'r-1', provider_name: 'SenseNova', channel_name: '带key-ipv4', real_name: 'deepseek-v4-flash', weight: 8, health: { requests: 812, success_rate: 99.1, avg_ttft_ms: 180, error_count: 7 } },
+      { id: 'r-2', provider_name: 'SenseNova', channel_name: '带key-ipv6', real_name: 'deepseek-v4.1-flash', weight: 2, health: { requests: 198, success_rate: 96.5, avg_ttft_ms: 240, error_count: 7, cooldown_until: Date.now() + 120000, cooldown_reason: '失败率 100%（近 1 分钟 ≥ 5 次）' } },
     ],
   },
   {
     id: 'm-2', alias: 'tavily/search', kind: 'webSearch',
     routes: [
-      { id: 'r-3', name: '带key-ipv4', provider_name: 'tavily', real_name: 'tavily/search', key: 'sk-tavily', proxy: 'http://127.0.0.1:7890', weight: 6, quota: 8300 },
-      { id: 'r-4', name: '无key-ipv6', provider_name: 'tavily', real_name: 'tavily/search', key: '', proxy: 'socks5://[::1]:1080', weight: 4, quota: 1200 },
+      { id: 'r-3', provider_name: 'tavily', channel_name: '带key-ipv4', real_name: 'tavily/search', weight: 6, health: { requests: 640, success_rate: 98.8, avg_ttft_ms: 320, error_count: 8 } },
+      { id: 'r-4', provider_name: 'tavily', channel_name: '无key-ipv6', real_name: 'tavily/search', weight: 4, health: { requests: 410, success_rate: 92.1, avg_ttft_ms: 510, error_count: 33 } },
     ],
   },
   {
     id: 'm-3', alias: 'text-embedding-3-small', kind: 'embedding',
     routes: [
-      { id: 'r-5', name: '带key', provider_name: 'openai', real_name: 'text-embedding-3-small', key: 'sk-openai', proxy: '', weight: 10, quota: 9800 },
+      { id: 'r-5', provider_name: 'openai', channel_name: '主通道', real_name: 'text-embedding-3-small', weight: 10, health: { requests: 980, success_rate: 100, avg_ttft_ms: 90, error_count: 0 } },
     ],
   },
   {
     id: 'm-4', alias: 'agnes-3.0-flash', kind: 'chat',
     routes: [
-      { id: 'r-6', name: '带key', provider_name: 'agnes', real_name: 'agnes-3.0-flash', key: 'sk-agnes', proxy: '', weight: 5, quota: 21000 },
-      { id: 'r-7', name: '带key-alt', provider_name: 'pie-xian', real_name: 'agnes-2.5-flash', key: 'sk-pie', proxy: '', weight: 5, quota: 15000 },
+      { id: 'r-6', provider_name: 'agnes', channel_name: '主通道', real_name: 'agnes-3.0-flash', weight: 5, health: { requests: 500, success_rate: 97.0, avg_ttft_ms: 200, error_count: 15 } },
+      { id: 'r-7', provider_name: 'pie-xian', channel_name: '主通道', real_name: 'agnes-2.5-flash', weight: 5, health: { requests: 500, success_rate: 0, avg_ttft_ms: 0, error_count: 500, cooldown_until: Date.now() + 300000, cooldown_reason: '失败率 100%（持续）' } },
     ],
   },
 ]
 
-function newRoute(): ModelRoute {
-  return { id: `r-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, name: '', provider_name: '', real_name: '', key: '', proxy: '', weight: 1, quota: 0 }
+// 模型整体健康：由各通道加权聚合
+function modelHealth(m: ModelWithHealth): { status: 'healthy' | 'degraded' | 'error'; successRate: number; avgTtft: number; requests: number } {
+  const routes = m.routes as ModelRouteHealth[]
+  const totalReq = routes.reduce((s, r) => s + r.health.requests, 0)
+  if (totalReq === 0) return { status: 'healthy', successRate: 100, avgTtft: 0, requests: 0 }
+  const weighted = routes.reduce((s, r) => s + r.health.success_rate * r.health.requests, 0) / totalReq
+  const ttft = routes.reduce((s, r) => s + r.health.avg_ttft_ms * r.health.requests, 0) / totalReq
+  const status = weighted >= 99 ? 'healthy' : weighted >= 90 ? 'degraded' : 'error'
+  return { status, successRate: weighted, avgTtft: ttft, requests: totalReq }
+}
+
+// 路由实际命中比（按权重归一化）
+function hitRatio(m: ModelWithHealth): Array<{ route: ModelRouteHealth; pct: number }> {
+  const routes = m.routes as ModelRouteHealth[]
+  const totalW = routes.reduce((s, r) => s + r.weight, 0)
+  return routes.map(r => ({ route: r, pct: totalW > 0 ? Math.round((r.weight / totalW) * 100) : 0 }))
+}
+
+const KIND_LABEL: Record<ModelKind, string> = {
+  chat: '对话', webSearch: '搜索', webFetch: '抓取', embedding: '嵌入', vision: '识图',
 }
 
 export default function Models() {
-  const [models, setModels] = useState<ExposedModel[]>([])
+  const [models, setModels] = useState<ModelWithHealth[]>([])
   const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState(false)
-  const [editingId, setEditingId] = useState<string | null>(null)
-  const [draft, setDraft] = useState<ExposedModel | null>(null)
 
   useEffect(() => { loadModels() }, [])
 
   async function loadModels() {
     try {
+      // 后端未实现，回退 mock（被动统计示例）
       const res = await fetch('/v1/models')
       const data = await res.json()
-      setModels(data.data || [])
+      setModels(data.data?.length ? data.data : DEFAULT_MODELS)
     } catch {
       setModels(DEFAULT_MODELS)
     } finally { setLoading(false) }
   }
 
-  function addModel() {
-    const m: ExposedModel = { id: `m-${Date.now()}`, alias: '', kind: 'chat', routes: [] }
-    setModels([...models, m])
-    setEditingId(m.id ?? null); setDraft(m)
-  }
-  function startEdit(m: ExposedModel) {
-    setEditingId(m.id ?? null)
-    setDraft(JSON.parse(JSON.stringify(m)))
-  }
-  function saveEdit() {
-    if (!draft) return
-    if (!draft.alias.trim()) { toast('请填对外模型名（alias）'); return }
-    const exists = models.some(m => m.id === draft.id)
-    setModels(exists ? models.map(m => m.id === draft.id ? draft : m) : [...models, draft])
-    setEditingId(null); setDraft(null)
-    toast('模型映射已保存')
-  }
-  function cancelEdit() { setEditingId(null); setDraft(null) }
-  function removeModel(m: ExposedModel) {
-    if (!confirm(`删除模型「${m.alias}」？`)) return
-    setModels(models.filter(x => x.id !== m.id))
-  }
-
-  // route 操作
-  function addRoute() { if (draft) setDraft({ ...draft, routes: [...draft.routes, newRoute()] }) }
-  function updateRoute(ri: number, field: keyof ModelRoute, value: any) {
-    if (!draft) return
-    const rs = [...draft.routes]
-    rs[ri] = { ...rs[ri], [field]: value }
-    setDraft({ ...draft, routes: rs })
-  }
-  function removeRoute(ri: number) {
-    if (!draft) return
-    setDraft({ ...draft, routes: draft.routes.filter((_, i) => i !== ri) })
-  }
-
-  async function saveAll() {
-    setBusy(true)
-    try {
-      await fetch('/api/models', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ models }) })
-      toast('模型映射已保存')
-    } catch {
-      toast('后端未实现，仅本地保存')
-    } finally { setBusy(false) }
-  }
-
   if (loading) return <div className="animate-pulse text-gray-500">加载中…</div>
+
+  const summary = {
+    total: models.length,
+    healthy: models.filter(m => modelHealth(m).status === 'healthy').length,
+    degraded: models.filter(m => modelHealth(m).status === 'degraded').length,
+    error: models.filter(m => modelHealth(m).status === 'error').length,
+  }
 
   return (
     <div className="space-y-4">
+      {/* 头部（只读，无编辑按钮） */}
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
-          <h2 className="text-lg font-semibold">模型映射（{models.length}）</h2>
+          <h2 className="text-lg font-semibold">模型健康度（{models.length}）</h2>
           <p className="text-sm text-gray-500">
-            模型级路由：一个模型多 route（不同 key/代理/独立额度，可不带 key 请求）
+            被动统计真实请求 · 健康度 / 熔断 / 路由分流 / 通道来源（配置在供应商页）
           </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <button onClick={saveAll} disabled={busy} className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50">
-            <Save className="h-4 w-4" />保存
-          </button>
-          <button onClick={addModel} className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700">
-            <Plus className="h-4 w-4" />添加模型
-          </button>
         </div>
       </div>
 
+      {/* 总览卡（学 StatsHero） */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {[
+          { label: '模型总数', value: summary.total, sub: '对外暴露', icon: Layers, color: 'text-blue-600' },
+          { label: '健康', value: summary.healthy, sub: '≥99% 成功率', icon: ShieldCheck, color: 'text-green-600' },
+          { label: '降级', value: summary.degraded, sub: '90~99%', icon: AlertTriangle, color: 'text-amber-600' },
+          { label: '异常', value: summary.error, sub: '<90% / 熔断', icon: PauseCircle, color: 'text-red-600' },
+        ].map(c => (
+          <div key={c.label} className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
+            <div className="flex items-center gap-2 text-xs text-gray-400"><c.icon className={`h-4 w-4 ${c.color}`} />{c.label}</div>
+            <div className="mt-1 text-2xl font-semibold tabular-nums">{c.value}</div>
+            <div className="text-xs text-gray-400">{c.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* 模型卡片（只读） */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {models.map((m) => {
-          const editing = editingId === m.id
+          const agg = modelHealth(m)
+          const statusColor = agg.status === 'healthy' ? 'bg-green-500' : agg.status === 'degraded' ? 'bg-amber-500' : 'bg-red-500'
+          const statusText = agg.status === 'healthy' ? '健康' : agg.status === 'degraded' ? '降级' : '异常'
           return (
             <div key={m.id} className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
-              {editing && draft ? (
-                /* 编辑模式：模型 + routes */
-                <div>
-                  <div className="mb-3 flex items-center gap-2">
-                    <Layers className="h-4 w-4 text-blue-600" />
-                    <input value={draft.alias} onChange={e => setDraft({ ...draft, alias: e.target.value })}
-                      placeholder="对外模型名（alias）"
-                      className="flex-1 rounded border border-gray-300 px-2 py-1 font-mono text-sm dark:border-gray-600 dark:bg-gray-700" />
-                  </div>
-                  <div className="mb-2 text-xs text-gray-400">路由规则（调用变体）：key 可空=不带 key，代理可空=直连，独立额度</div>
-                  <div className="space-y-2">
-                    {draft.routes.map((r, ri) => (
-                      <div key={r.id} className="rounded-lg border border-dashed border-gray-300 p-2 dark:border-gray-600">
-                        <div className="flex items-center gap-1.5">
-                          <input value={r.name} onChange={e => updateRoute(ri, 'name', e.target.value)} placeholder="变体名（带key-ipv4）"
-                            className="w-32 rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" />
-                          <input value={r.provider_name} onChange={e => updateRoute(ri, 'provider_name', e.target.value)} placeholder="渠道"
-                            className="w-24 rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" />
-                          <input value={r.real_name} onChange={e => updateRoute(ri, 'real_name', e.target.value)} placeholder="上游真实模型"
-                            className="flex-1 rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" />
-                          <input type="number" value={r.weight} onChange={e => updateRoute(ri, 'weight', parseInt(e.target.value) || 0)} placeholder="权重"
-                            className="w-14 rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" />
-                          <button onClick={() => removeRoute(ri)} className="text-red-500 hover:text-red-700"><Trash2 className="h-3 w-3" /></button>
-                        </div>
-                        <div className="mt-1.5 flex items-center gap-1.5">
-                          <div className="flex flex-1 items-center gap-1">
-                            <Key className="h-3 w-3 text-gray-400" />
-                            <input value={r.key} onChange={e => updateRoute(ri, 'key', e.target.value)} placeholder="key（空=不带 key 请求）"
-                              className="flex-1 rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" />
-                          </div>
-                          <div className="flex flex-1 items-center gap-1">
-                            <Globe className="h-3 w-3 text-gray-400" />
-                            <input value={r.proxy} onChange={e => updateRoute(ri, 'proxy', e.target.value)} placeholder="代理（空=直连）"
-                              className="flex-1 rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700" />
-                          </div>
-                        </div>
+              {/* 模型头：alias + 类型 + 整体健康 */}
+              <div className="mb-3 flex items-center gap-2">
+                <Layers className="h-4 w-4 text-blue-600" />
+                <span className="font-mono font-semibold">{m.alias}</span>
+                <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500 dark:bg-gray-700">{KIND_LABEL[m.kind || 'chat']}</span>
+                <span className="ml-auto flex items-center gap-1 text-xs">
+                  <span className={`h-2 w-2 rounded-full ${statusColor}`} />
+                  <span className="text-gray-500">{statusText}</span>
+                </span>
+              </div>
+
+              {/* 聚合指标 */}
+              <div className="mb-3 grid grid-cols-3 gap-2 text-center">
+                <div className="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/50">
+                  <div className="text-xs text-gray-400">成功率</div>
+                  <div className="font-mono text-sm font-semibold">{agg.successRate.toFixed(1)}%</div>
+                </div>
+                <div className="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/50">
+                  <div className="flex items-center justify-center gap-0.5 text-xs text-gray-400"><Clock className="h-3 w-3" />首字</div>
+                  <div className="font-mono text-sm font-semibold">{Math.round(agg.avgTtft)}ms</div>
+                </div>
+                <div className="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/50">
+                  <div className="flex items-center justify-center gap-0.5 text-xs text-gray-400"><Activity className="h-3 w-3" />请求数</div>
+                  <div className="font-mono text-sm font-semibold">{agg.requests.toLocaleString()}</div>
+                </div>
+              </div>
+
+              {/* 通道来源 + 路由分流 + 各通道健康 */}
+              <div className="space-y-2">
+                {hitRatio(m).map(({ route, pct }) => {
+                  const h = route.health
+                  const cooling = !!h.cooldown_until && h.cooldown_until > Date.now()
+                  return (
+                    <div key={route.id} className={`rounded-lg border p-2 ${cooling ? 'border-red-200 bg-red-50/50 dark:border-red-900/40 dark:bg-red-900/10' : 'border-gray-200 dark:border-gray-700'}`}>
+                      {/* 通道行：供应商/通道名 + 上游真实名 + 权重命中比 */}
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="font-medium text-gray-700 dark:text-gray-300">{route.provider_name}</span>
+                        <span className="text-gray-400">·</span>
+                        <span className="font-mono text-gray-500">{route.channel_name}</span>
+                        <span className="ml-auto flex items-center gap-1">
+                          {cooling && <PauseCircle className="h-3.5 w-3.5 text-red-500" />}
+                          <Gauge className="h-3 w-3 text-gray-400" />
+                          <span className="font-mono text-gray-500">{pct}%</span>
+                        </span>
                       </div>
-                    ))}
-                  </div>
-                  <div className="mt-3 flex gap-2">
-                    <button onClick={addRoute} className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700"><Plus className="h-3 w-3" />添加路由</button>
-                    <div className="flex-1" />
-                    <button onClick={cancelEdit} className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700"><X className="h-3 w-3" /></button>
-                    <button onClick={saveEdit} className="rounded bg-blue-600 px-3 py-1 text-xs text-white hover:bg-blue-700"><Check className="h-3 w-3" /></button>
-                  </div>
-                </div>
-              ) : (
-                /* 展示模式 */
-                <div>
-                  <div className="mb-3 flex items-center gap-2">
-                    <Layers className="h-4 w-4 text-blue-600" />
-                    <span className="font-mono font-semibold">{m.alias}</span>
-                    <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500 dark:bg-gray-700">{m.kind || 'chat'}</span>
-                    <span className="ml-auto rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-600 dark:bg-blue-900/20">{m.routes.length} route</span>
-                  </div>
-                  <div className="space-y-2">
-                    {m.routes.map((r) => {
-                      const total = m.routes.reduce((s, x) => s + x.weight, 0)
-                      const pct = total > 0 ? Math.round((r.weight / total) * 100) : 0
-                      return (
-                        <div key={r.id}>
-                          <div className="flex items-center gap-2 text-sm">
-                            <span className="w-20 truncate text-gray-500" title={r.name}>{r.name}</span>
-                            <span className="w-20 text-gray-400">{r.provider_name}</span>
-                            <span className="flex-1 truncate font-mono text-xs text-gray-400">{r.real_name}</span>
-                            <span className={`flex items-center gap-0.5 text-[10px] ${r.key ? 'text-blue-500' : 'text-amber-500'}`}>
-                              <Key className="h-3 w-3" />{r.key ? '带key' : '无key'}
-                            </span>
-                            <span className={`flex items-center gap-0.5 text-[10px] ${r.proxy ? 'text-teal-500' : 'text-gray-400'}`}>
-                              <Globe className="h-3 w-3" />{r.proxy ? '代理' : '直连'}
-                            </span>
-                            <span className="flex items-center gap-0.5 text-[10px] text-gray-400"><Hash className="h-3 w-3" />{r.quota.toLocaleString()}</span>
-                            <span className="font-mono text-xs text-gray-400">{pct}%</span>
-                          </div>
-                          <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-gray-100 dark:bg-gray-700">
-                            <div className="h-full rounded-full bg-blue-500" style={{ width: `${pct}%` }} />
-                          </div>
+                      <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-gray-400">
+                        <span className="font-mono">{route.real_name}</span>
+                        <span>·</span>
+                        <span>成功率 {h.success_rate.toFixed(1)}%</span>
+                        <span>·</span>
+                        <span>首字 {h.avg_ttft_ms}ms</span>
+                        <span>·</span>
+                        <span>{h.requests} 次 · {h.error_count} 错</span>
+                      </div>
+                      {/* 命中比进度条 */}
+                      <div className="mt-1 h-1 overflow-hidden rounded-full bg-gray-100 dark:bg-gray-700">
+                        <div className={`h-full ${cooling ? 'bg-red-400' : 'bg-blue-500'}`} style={{ width: `${pct}%` }} />
+                      </div>
+                      {/* 熔断原因 */}
+                      {cooling && h.cooldown_reason && (
+                        <div className="mt-1 text-[11px] text-red-600 dark:text-red-400">
+                          熔断中 · 剩 {Math.ceil(((h.cooldown_until ?? 0) - Date.now()) / 1000)}s · {h.cooldown_reason}
                         </div>
-                      )
-                    })}
-                  </div>
-                  <div className="mt-3 flex justify-end gap-1">
-                    <button onClick={() => startEdit(m)} className="text-gray-400 hover:text-blue-600" title="编辑"><Pencil className="h-3.5 w-3.5" /></button>
-                    <button onClick={() => removeModel(m)} className="text-gray-400 hover:text-red-600" title="删除"><Trash2 className="h-3.5 w-3.5" /></button>
-                  </div>
-                </div>
-              )}
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
             </div>
           )
         })}

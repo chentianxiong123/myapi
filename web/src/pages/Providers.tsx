@@ -1,15 +1,14 @@
 import { useEffect, useState } from 'react'
-import { Plus, Trash2, ChevronDown, ChevronRight, Key, Layers, Globe, Zap, RefreshCw } from 'lucide-react'
+import { Plus, Trash2, ChevronDown, ChevronRight, Key, Layers, Globe, Zap, RefreshCw, Route } from 'lucide-react'
 import { toast } from '@/components/Toast'
 import StatusBar from '@/components/StatusBar'
 import { postJSON } from '@/lib/api'
-import type { Provider, ModelProtocol, ProxyPool } from '@/lib/types'
+import type { Provider, ModelProtocol, ProxyPool, Channel } from '@/lib/types'
 import { MODEL_PROTOCOLS, PROXY_STRATEGIES, MODEL_KINDS } from '@/lib/types'
 
 export default function Providers() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
-  const [activeProtocol, setActiveProtocol] = useState<Record<number, ModelProtocol>>({})
   const [busy, setBusy] = useState(false)
   const [testingKeys, setTestingKeys] = useState<Set<string>>(new Set())
   const [proxyPools, setProxyPools] = useState<ProxyPool[]>([])
@@ -40,22 +39,8 @@ export default function Providers() {
       const data = await res.json()
       setProviders(data.providers || [])
     } catch {
-      // 后端还没写，用示例数据（学 myapi 的结构，模型级协议）
+      // 后端还没写，用示例数据（密钥池 + 通道，学 LiteLLM Deployment）
       setProviders([
-        {
-          name: 'agnes',
-          base_url: 'https://apihub.agnes-ai.com/v1',
-          disabled: false,
-          headers: { 'User-Agent': 'opencode/1.18.30' },
-          proxy: '',
-          proxy_pool_id: '',
-          proxy_strategy: 'none',
-          keys: [{ 'api-key': 'sk-xxx' }, { 'api-key': 'sk-yyy' }, { 'api-key': 'sk-zzz' }],
-          models: [
-            { name: 'agnes-2.5-flash', protocol: 'openai_chat' },
-            { name: 'agnes-3.0-flash', protocol: 'openai_chat' },
-          ],
-        },
         {
           name: 'SenseNova',
           base_url: 'https://token.sensenova.cn/v1',
@@ -64,35 +49,65 @@ export default function Providers() {
           proxy: '',
           proxy_pool_id: '',
           proxy_strategy: 'none',
-          keys: [{ 'api-key': 'sk-xxx' }, { 'api-key': 'sk-yyy' }, { 'api-key': 'sk-zzz' }],
-          models: [
-            { name: 'deepseek-v4-flash', alias: 'deepseek-v4-flash', protocol: 'openai_chat' },
-            { name: 'sensenova-6.8-flash-lite', alias: '', protocol: 'openai_chat' },
-            { name: 'deepseek-flash', alias: 'deepseek-v4-flash', protocol: 'openai_chat' },
-            { name: 'deepseek-v4.1-flash', alias: 'deepseek-v4-flash', protocol: 'openai_responses' },
-            { name: 'sensenova-6.8-flash', protocol: 'openai_responses' },
+          keys: [
+            { name: '主', 'api-key': 'sk-sensenova' },
+            { name: '备用', 'api-key': 'sk-sensenova-backup' },
+          ],
+          channels: [
+            {
+              id: 'c-1', name: '带key-ipv4', path: 'IPv4 直连', key_name: '主', weight: 8,
+              models: [
+                { name: 'deepseek-v4-flash', alias: 'deepseek-v4-flash', protocol: 'openai_chat' },
+                { name: 'sensenova-6.8-flash-lite', protocol: 'openai_chat', kind: 'chat' },
+              ],
+            },
+            {
+              id: 'c-2', name: '带key-ipv6', path: 'IPv6', key_name: '备用', weight: 2,
+              models: [
+                { name: 'deepseek-v4.1-flash', alias: 'deepseek-v4-flash', protocol: 'openai_responses' },
+              ],
+            },
+          ],
+        },
+        {
+          name: 'tavily',
+          base_url: 'https://api.tavily.com',
+          disabled: false,
+          headers: {},
+          proxy: '',
+          proxy_pool_id: '',
+          proxy_strategy: 'none',
+          keys: [
+            { name: '主', 'api-key': 'sk-tavily' },
+          ],
+          channels: [
+            {
+              id: 'c-3', name: '带key-ipv4', path: 'IPv4', key_name: '主', weight: 6,
+              models: [{ name: 'tavily/search', alias: 'tavily/search', protocol: 'openai_chat', kind: 'webSearch' }],
+            },
+            {
+              id: 'c-4', name: '无key-ipv6', path: 'IPv6', key_name: '', weight: 4,
+              models: [{ name: 'tavily/search', alias: 'tavily/search', protocol: 'openai_chat', kind: 'webSearch' }],
+            },
           ],
         },
         {
           name: 'pie-xian',
           base_url: 'https://api.pie-xian.com/v1',
           disabled: false,
-          headers: { 'User-Agent': 'opencode/1.18.30' },
+          headers: {},
           proxy: '',
           proxy_pool_id: '',
           proxy_strategy: 'none',
-          keys: [{ 'api-key': 'sk-xxx' }],
-          models: [
-            { name: 'agnes-2.5-flash', alias: 'agnes-3.0-flash', protocol: 'anthropic' },
-            { name: 'agnes-3.0-flash', protocol: 'anthropic' },
-            { name: 'minimax-m3.1-flash', protocol: 'openai_chat' },
-            { name: 'nemotron-3.5-super-vl', protocol: 'openai_chat' },
-            { name: 'step-5-preview', protocol: 'openai_responses' },
-            { name: 'grok-4.7', protocol: 'openai_responses' },
-            { name: 'ernie-5.5-flash-preview', protocol: 'openai_chat' },
-            { name: 'gemini-3.1-flash-lite', alias: 'gemini-3.5-flash-lite', protocol: 'gemini' },
-            { name: 'gemini-3.5-flash-lite', protocol: 'gemini' },
-            { name: 'hy4-flash-free', alias: 'hy4', protocol: 'ollama' },
+          keys: [{ name: '主', 'api-key': 'sk-pie' }],
+          channels: [
+            {
+              id: 'c-5', name: '主通道', key_name: '主', weight: 1,
+              models: [
+                { name: 'gemini-3.1-flash-lite', alias: 'gemini-3.5-flash-lite', protocol: 'gemini' },
+                { name: 'hy4-flash-free', alias: 'hy4', protocol: 'ollama' },
+              ],
+            },
           ],
         },
       ])
@@ -108,7 +123,10 @@ export default function Providers() {
   }
 
   function addProvider() {
-    setProviders([...providers, { name: '', base_url: '', disabled: false, headers: { 'User-Agent': 'opencode/1.18.30' }, keys: [{ 'api-key': '' }], models: [], proxy: '', proxy_pool_id: '', proxy_strategy: 'none' }])
+    setProviders([...providers, {
+      name: '', base_url: '', disabled: false, headers: { 'User-Agent': 'opencode/1.18.30' },
+      keys: [{ name: '主', 'api-key': '' }], channels: [], proxy: '', proxy_pool_id: '', proxy_strategy: 'none',
+    }])
   }
 
   function removeProvider(idx: number) {
@@ -121,45 +139,64 @@ export default function Providers() {
     setProviders(newProviders)
   }
 
+  // ---- 密钥池 ----
   function addKey(idx: number) {
-    const newProviders = [...providers]
-    newProviders[idx].keys.push({ 'api-key': '' })
-    setProviders(newProviders)
+    const ps = [...providers]
+    const used = new Set(ps[idx].keys.map(k => k.name))
+    let name = '密钥'; let n = 1
+    while (used.has(name)) name = `密钥${++n}`
+    ps[idx].keys.push({ name, 'api-key': '' })
+    setProviders(ps)
   }
-
   function removeKey(pidx: number, kidx: number) {
-    const newProviders = [...providers]
-    newProviders[pidx].keys.splice(kidx, 1)
-    setProviders(newProviders)
+    const ps = [...providers]
+    ps[pidx].keys.splice(kidx, 1)
+    setProviders(ps)
+  }
+  function updateKey(pidx: number, kidx: number, field: 'name' | 'api-key', value: string) {
+    const ps = [...providers]
+    ps[pidx].keys[kidx] = { ...ps[pidx].keys[kidx], [field]: value }
+    setProviders(ps)
   }
 
-  function updateKey(pidx: number, kidx: number, value: string) {
-    const newProviders = [...providers]
-    newProviders[pidx].keys[kidx]['api-key'] = value
-    setProviders(newProviders)
+  // ---- 通道 ----
+  function addChannel(idx: number) {
+    const ps = [...providers]
+    const ch: Channel = { id: `c-${Date.now()}`, name: '', key_name: ps[idx].keys[0]?.name || '', weight: 1, models: [] }
+    ps[idx].channels.push(ch)
+    setProviders(ps)
+  }
+  function removeChannel(pidx: number, cidx: number) {
+    const ps = [...providers]
+    ps[pidx].channels.splice(cidx, 1)
+    setProviders(ps)
+  }
+  function updateChannel(pidx: number, cidx: number, field: keyof Channel, value: any) {
+    const ps = [...providers]
+    ps[pidx].channels[cidx] = { ...ps[pidx].channels[cidx], [field]: value }
+    setProviders(ps)
   }
 
-  function addModel(idx: number, protocol: ModelProtocol) {
-    const newProviders = [...providers]
-    newProviders[idx].models.push({ name: '', alias: '', protocol })
-    setProviders(newProviders)
+  // ---- 通道内的模型映射 ----
+  function addChannelModel(pidx: number, cidx: number, protocol: ModelProtocol) {
+    const ps = [...providers]
+    ps[pidx].channels[cidx].models.push({ name: '', alias: '', protocol })
+    setProviders(ps)
   }
-
-  function removeModel(pidx: number, midx: number) {
-    const newProviders = [...providers]
-    newProviders[pidx].models.splice(midx, 1)
-    setProviders(newProviders)
+  function removeChannelModel(pidx: number, cidx: number, midx: number) {
+    const ps = [...providers]
+    ps[pidx].channels[cidx].models.splice(midx, 1)
+    setProviders(ps)
   }
-
-  function updateModel(pidx: number, midx: number, field: 'name' | 'alias' | 'protocol' | 'kind', value: string) {
-    const newProviders = [...providers]
-    const m = { ...newProviders[pidx].models[midx] } as any
+  function updateChannelModel(pidx: number, cidx: number, midx: number, field: 'name' | 'alias' | 'protocol' | 'kind', value: string) {
+    const ps = [...providers]
+    const m = { ...ps[pidx].channels[cidx].models[midx] } as any
     m[field] = value
-    newProviders[pidx].models[midx] = m
-    setProviders(newProviders)
+    ps[pidx].channels[cidx].models[midx] = m
+    setProviders(ps)
   }
 
-  // 测试上游密钥连通性（以密钥为粒度，学 new-api 测试通道）
+  // 测试密钥连通性（以密钥池里某条 key 为粒度）
   async function testKey(pidx: number, kidx: number) {
     const p = providers[pidx]
     const key = p.keys[kidx]?.['api-key']
@@ -167,11 +204,8 @@ export default function Providers() {
     if (!key) { toast('请先填密钥'); return }
     setTestingKeys(s => new Set(s).add(id))
     try {
-      // 探测上游 /models（学 new-api test channel：用 key 调 base_url 的 /models）
       const base = p.base_url.replace(/\/$/, '')
-      const res = await fetch(`${base}/models`, {
-        headers: { Authorization: `Bearer ${key}` },
-      })
+      const res = await fetch(`${base}/models`, { headers: { Authorization: `Bearer ${key}` } })
       setTestResults(m => new Map(m).set(id, res.ok ? 'ok' : 'fail'))
       toast(res.ok ? `${p.name} 密钥可用` : `${p.name} 密钥不可用（${res.status}）`)
     } catch {
@@ -194,9 +228,9 @@ export default function Providers() {
     }
   }
 
-  // 每个供应商的协议 tab 统计
-  function protocolCount(p: Provider, proto: ModelProtocol) {
-    return p.models.filter(m => (m.protocol || 'openai_chat') === proto).length
+  // 统计：该供应商所有通道的模型总数 / 通道数
+  function channelModelCount(p: Provider) {
+    return p.channels.reduce((s, c) => s + c.models.length, 0)
   }
 
   return (
@@ -205,10 +239,10 @@ export default function Providers() {
         <div>
           <h2 className="text-lg font-semibold">Providers</h2>
           <p className="text-sm text-gray-500">
-            上游供应商 · 一个供应商可绑定不同协议的模型（模型级协议）
+            上游供应商 · 密钥池 + 通道（一条通道 = 密钥×路径×模型映射，学 LiteLLM Deployment）
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button onClick={saveConfig} disabled={busy} className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50">
             <Key className="h-4 w-4" />保存
           </button>
@@ -220,7 +254,6 @@ export default function Providers() {
 
       {providers.map((p, idx) => {
         const open = expanded.has(idx)
-        const activeProto = activeProtocol[idx] || 'openai_chat'
         return (
           <div key={idx} className="rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
             {/* 供应商头部 */}
@@ -241,32 +274,38 @@ export default function Providers() {
                 className="min-w-0 flex-1 rounded border border-gray-300 px-2 py-1 text-sm dark:border-gray-600 dark:bg-gray-700"
               />
               <span className="shrink-0 rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500 dark:bg-gray-700">
-                {p.keys.length} keys · {p.models.length} models
+                {p.keys.length} 密钥 · {p.channels.length} 通道 · {channelModelCount(p)} 模型
               </span>
               <button onClick={() => removeProvider(idx)} className="shrink-0 text-red-500 hover:text-red-700">
                 <Trash2 className="h-4 w-4" />
               </button>
             </div>
 
-            {/* 展开内容 */}
             {open && (
               <div className="border-t border-gray-200 p-4 dark:border-gray-700">
-                {/* Keys */}
+                {/* ① 密钥池 */}
                 <div className="mb-4">
                   <div className="mb-2 flex items-center gap-2">
                     <Key className="h-4 w-4 text-gray-400" />
-                    <span className="text-sm font-medium">API Keys</span>
-                    <button onClick={() => addKey(idx)} className="text-xs text-blue-600 hover:text-blue-700">+ 添加</button>
+                    <span className="text-sm font-medium">密钥池</span>
+                    <span className="text-xs text-gray-400">通道引用这里的名字（第一个默认为「主」）</span>
+                    <button onClick={() => addKey(idx)} className="ml-auto text-xs text-blue-600 hover:text-blue-700">+ 添加密钥</button>
                   </div>
                   <div className="space-y-1">
                     {p.keys.map((k, kidx) => (
-                      <div key={kidx} className="flex gap-2">
+                      <div key={kidx} className="flex flex-wrap gap-2">
+                        <input
+                          value={k.name}
+                          onChange={e => updateKey(idx, kidx, 'name', e.target.value)}
+                          placeholder="名字（主/VIP...）"
+                          className="w-24 rounded border border-gray-300 px-2 py-1 text-xs dark:border-gray-600 dark:bg-gray-700"
+                        />
                         <input
                           value={k['api-key']}
-                          onChange={e => updateKey(idx, kidx, e.target.value)}
+                          onChange={e => updateKey(idx, kidx, 'api-key', e.target.value)}
                           type="password"
                           placeholder="sk-..."
-                          className="flex-1 rounded border border-gray-300 px-2 py-1 text-sm font-mono dark:border-gray-600 dark:bg-gray-700"
+                          className="min-w-0 flex-1 rounded border border-gray-300 px-2 py-1 text-sm font-mono dark:border-gray-600 dark:bg-gray-700"
                         />
                         <button
                           onClick={() => testKey(idx, kidx)}
@@ -285,12 +324,12 @@ export default function Providers() {
                   </div>
                 </div>
 
-                {/* 渠道级别代理 + 代理池（学 9router：Provider 引用池 + 策略）*/}
+                {/* ② 渠道代理 + 代理池 */}
                 <div className="mb-4">
                   <div className="mb-2 flex items-center gap-2">
                     <Globe className="h-4 w-4 text-gray-400" />
                     <span className="text-sm font-medium">渠道代理</span>
-                    <span className="text-xs text-gray-400">直连 / 单代理 / 代理池（学 9router）</span>
+                    <span className="text-xs text-gray-400">直连 / 单代理 / 代理池（通道可再覆盖路径）</span>
                   </div>
                   <div className="space-y-2">
                     <div className="flex gap-2">
@@ -329,111 +368,132 @@ export default function Providers() {
                   </div>
                 </div>
 
-                {/* 协议 tab（模型级协议分组，学 sub2api 模型分流） */}
-                <div className="mb-3">
-                  <div className="mb-2 flex items-center gap-2">
-                    <Globe className="h-4 w-4 text-gray-400" />
-                    <span className="text-sm font-medium">协议（按模型分流）</span>
-                  </div>
-                  <div className="flex flex-wrap gap-1 rounded-lg bg-gray-100 p-1 dark:bg-gray-700">
-                    {MODEL_PROTOCOLS.map(proto => {
-                      const count = protocolCount(p, proto.id)
-                      return (
-                        <button
-                          key={proto.id}
-                          onClick={() => setActiveProtocol({ ...activeProtocol, [idx]: proto.id })}
-                          className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs ${
-                            activeProto === proto.id
-                              ? 'bg-white font-semibold text-blue-600 shadow dark:bg-gray-800'
-                              : 'text-gray-500 hover:text-gray-900 dark:hover:text-gray-100'
-                          }`}
-                        >
-                          {proto.label}
-                          <span className={`rounded px-1 text-[9px] ${count > 0 ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/30' : 'bg-gray-200 text-gray-400 dark:bg-gray-600'}`}>
-                            {count}
-                          </span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-
-                {/* 当前协议的模型列表 */}
+                {/* ③ 通道列表 */}
                 <div>
-                  <div className="mb-2 flex items-center justify-between">
-                    <span className="flex items-center gap-2 text-sm font-medium">
-                      <Layers className="h-4 w-4 text-gray-400" />
-                      {MODEL_PROTOCOLS.find(x => x.id === activeProto)?.label} 模型
-                      <span className="font-mono text-xs text-gray-400">{MODEL_PROTOCOLS.find(x => x.id === activeProto)?.path}</span>
-                    </span>
-                    <button onClick={() => addModel(idx, activeProto)} className="text-xs text-blue-600 hover:text-blue-700">+ 添加</button>
+                  <div className="mb-2 flex items-center gap-2">
+                    <Route className="h-4 w-4 text-gray-400" />
+                    <span className="text-sm font-medium">通道</span>
+                    <span className="text-xs text-gray-400">一条通道 = 密钥×路径×模型映射（模型按权重分流到通道）</span>
+                    <button onClick={() => addChannel(idx)} className="ml-auto flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700"><Plus className="h-3 w-3" />添加通道</button>
                   </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full min-w-[600px] text-left text-sm">
-                    <thead>
-                      <tr className="border-b border-gray-200 dark:border-gray-700">
-                        <th className="pb-2 font-medium text-gray-500">Name（上游真实名）</th>
-                        <th className="pb-2 font-medium text-gray-500">Alias（对外暴露，空=用name）</th>
-                        <th className="pb-2 font-medium text-gray-500">协议</th>
-                        <th className="pb-2 font-medium text-gray-500">类型</th>
-                        <th className="pb-2 w-10"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {p.models
-                        .filter(m => (m.protocol || 'openai_chat') === activeProto)
-                        .map((m, mi) => {
-                          const realIdx = p.models.findIndex(x => x === m)
-                          return (
-                            <tr key={realIdx}>
-                              <td className="py-1 pr-2">
-                                <input
-                                  value={m.name}
-                                  onChange={e => updateModel(idx, realIdx, 'name', e.target.value)}
-                                  placeholder="real-model-name"
-                                  className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700"
-                                />
-                              </td>
-                              <td className="py-1 pr-2">
-                                <input
-                                  value={m.alias || ''}
-                                  onChange={e => updateModel(idx, realIdx, 'alias', e.target.value)}
-                                  placeholder="（空 = 用 name）"
-                                  className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700"
-                                />
-                              </td>
-                              <td className="py-1 pr-2">
-                                <select
-                                  value={m.protocol || 'openai_chat'}
-                                  onChange={e => updateModel(idx, realIdx, 'protocol', e.target.value)}
-                                  className="w-full rounded border border-gray-300 px-2 py-1 text-xs dark:border-gray-600 dark:bg-gray-700"
-                                >
-                                  {MODEL_PROTOCOLS.map(proto => <option key={proto.id} value={proto.id}>{proto.label}</option>)}
-                                </select>
-                              </td>
-                              <td className="py-1 pr-2">
-                                <select
-                                  value={m.kind || 'chat'}
-                                  onChange={e => updateModel(idx, realIdx, 'kind', e.target.value)}
-                                  className="w-full rounded border border-gray-300 px-2 py-1 text-xs dark:border-gray-600 dark:bg-gray-700"
-                                >
-                                  {MODEL_KINDS.map(kind => <option key={kind.id} value={kind.id}>{kind.label}</option>)}
-                                </select>
-                              </td>
-                              <td className="py-1">
-                                <button onClick={() => removeModel(idx, realIdx)} className="text-red-500 hover:text-red-700">
-                                  <Trash2 className="h-3 w-3" />
-                                </button>
-                              </td>
-                            </tr>
-                          )
-                        })}
-                    </tbody>
-                    </table>
-                  </div>
-                  {protocolCount(p, activeProto) === 0 && (
-                    <p className="py-3 text-center text-xs text-gray-400">该协议下还没有模型，点「+ 添加」</p>
+
+                  {p.channels.length === 0 && (
+                    <p className="py-3 text-center text-xs text-gray-400">还没有通道，点「添加通道」</p>
                   )}
+
+                  <div className="space-y-3">
+                    {p.channels.map((ch, cidx) => (
+                      <div key={ch.id} className="rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+                        {/* 通道头：名称/路径/密钥引用/权重 */}
+                        <div className="flex flex-wrap items-center gap-2">
+                          <input
+                            value={ch.name}
+                            onChange={e => updateChannel(idx, cidx, 'name', e.target.value)}
+                            placeholder="通道名（带key-ipv4）"
+                            className="w-36 rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700"
+                          />
+                          <input
+                            value={ch.path || ''}
+                            onChange={e => updateChannel(idx, cidx, 'path', e.target.value)}
+                            placeholder="路径（IPv4/IPv6，空=继承）"
+                            className="w-36 rounded border border-gray-300 px-2 py-1 text-xs dark:border-gray-600 dark:bg-gray-700"
+                          />
+                          <select
+                            value={ch.key_name || ''}
+                            onChange={e => updateChannel(idx, cidx, 'key_name', e.target.value)}
+                            title="引用密钥池（空=用主密钥）"
+                            className="w-28 rounded border border-gray-300 px-2 py-1 text-xs dark:border-gray-600 dark:bg-gray-700"
+                          >
+                            <option value="">主密钥（默认）</option>
+                            {p.keys.map(k => <option key={k.name} value={k.name}>{k.name}</option>)}
+                          </select>
+                          <div className="flex items-center gap-1">
+                            <span className="text-xs text-gray-400">权重</span>
+                            <input
+                              type="number"
+                              value={ch.weight}
+                              onChange={e => updateChannel(idx, cidx, 'weight', parseInt(e.target.value) || 0)}
+                              className="w-16 rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700"
+                            />
+                          </div>
+                          <button onClick={() => removeChannel(idx, cidx)} className="ml-auto text-red-500 hover:text-red-700">
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+
+                        {/* 通道内模型映射 */}
+                        <div className="mt-2">
+                          <div className="mb-1 flex items-center justify-between">
+                            <span className="flex items-center gap-1 text-xs font-medium text-gray-500">
+                              <Layers className="h-3 w-3" />模型映射（{ch.models.length}）
+                            </span>
+                            <button onClick={() => addChannelModel(idx, cidx, 'openai_chat')} className="text-xs text-blue-600 hover:text-blue-700">+ 添加</button>
+                          </div>
+                          <div className="overflow-x-auto">
+                            <table className="w-full min-w-[560px] text-left text-xs">
+                              <thead>
+                                <tr className="border-b border-gray-200 dark:border-gray-700">
+                                  <th className="pb-1 font-medium text-gray-500">Name（上游真实名）</th>
+                                  <th className="pb-1 font-medium text-gray-500">Alias（对外，空=用name）</th>
+                                  <th className="pb-1 font-medium text-gray-500">协议</th>
+                                  <th className="pb-1 font-medium text-gray-500">类型</th>
+                                  <th className="pb-1 w-8"></th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {ch.models.map((m, midx) => (
+                                  <tr key={midx}>
+                                    <td className="py-1 pr-2">
+                                      <input
+                                        value={m.name}
+                                        onChange={e => updateChannelModel(idx, cidx, midx, 'name', e.target.value)}
+                                        placeholder="real-model-name"
+                                        className="w-full rounded border border-gray-300 px-2 py-1 font-mono dark:border-gray-600 dark:bg-gray-700"
+                                      />
+                                    </td>
+                                    <td className="py-1 pr-2">
+                                      <input
+                                        value={m.alias || ''}
+                                        onChange={e => updateChannelModel(idx, cidx, midx, 'alias', e.target.value)}
+                                        placeholder="（空 = 用 name）"
+                                        className="w-full rounded border border-gray-300 px-2 py-1 font-mono dark:border-gray-600 dark:bg-gray-700"
+                                      />
+                                    </td>
+                                    <td className="py-1 pr-2">
+                                      <select
+                                        value={m.protocol || 'openai_chat'}
+                                        onChange={e => updateChannelModel(idx, cidx, midx, 'protocol', e.target.value)}
+                                        className="w-full rounded border border-gray-300 px-2 py-1 dark:border-gray-600 dark:bg-gray-700"
+                                      >
+                                        {MODEL_PROTOCOLS.map(proto => <option key={proto.id} value={proto.id}>{proto.label}</option>)}
+                                      </select>
+                                    </td>
+                                    <td className="py-1 pr-2">
+                                      <select
+                                        value={m.kind || 'chat'}
+                                        onChange={e => updateChannelModel(idx, cidx, midx, 'kind', e.target.value)}
+                                        className="w-full rounded border border-gray-300 px-2 py-1 dark:border-gray-600 dark:bg-gray-700"
+                                      >
+                                        {MODEL_KINDS.map(kind => <option key={kind.id} value={kind.id}>{kind.label}</option>)}
+                                      </select>
+                                    </td>
+                                    <td className="py-1">
+                                      <button onClick={() => removeChannelModel(idx, cidx, midx)} className="text-red-500 hover:text-red-700">
+                                        <Trash2 className="h-3 w-3" />
+                                      </button>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                          {ch.models.length === 0 && (
+                            <p className="py-2 text-center text-xs text-gray-400">该通道还没有模型映射，点「+ 添加」</p>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
             )}

@@ -2,32 +2,58 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import Models from '@/pages/Models'
 
-describe('Models（模型级路由）', () => {
+describe('Models（模型健康度台，只读）', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
   })
 
-  it('渲染模型映射标题', async () => {
-    // mock fetch（后端未启动，回退 mock）
+  it('渲染健康度标题', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('backend down')))
     render(<Models />)
-    expect(await screen.findByText(/模型映射/)).toBeInTheDocument()
+    expect(await screen.findByText(/模型健康度/)).toBeInTheDocument()
   })
 
-  it('展示模型级路由信息（key/代理/独立额度）', async () => {
+  it('展示模型 alias（通道来源）', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('backend down')))
     render(<Models />)
-    // 等 mock 数据加载（tavily/search + text-embedding-3-small）
     const tavily = await screen.findAllByText('tavily/search', {}, { timeout: 3000 })
     expect(tavily.length).toBeGreaterThan(0)
     expect(screen.getAllByText('text-embedding-3-small').length).toBeGreaterThan(0)
   })
 
-  it('展示 route 的 带key/无key 徽标', async () => {
+  it('展示被动健康指标（成功率/首字/请求数）', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('backend down')))
     render(<Models />)
     await screen.findAllByText('tavily/search', {}, { timeout: 3000 })
-    expect(screen.getAllByText(/带key/).length).toBeGreaterThan(0)
-    expect(screen.getAllByText(/无key/).length).toBeGreaterThan(0)
+    // 聚合指标标签
+    expect(screen.getAllByText(/成功率/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/首字/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/请求数/).length).toBeGreaterThan(0)
+  })
+
+  it('展示路由分流（权重命中比 %）', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('backend down')))
+    render(<Models />)
+    await screen.findAllByText('tavily/search', {}, { timeout: 3000 })
+    // deepseek 8:2 → 80%/20%；tavily 6:4 → 60%/40%
+    expect(screen.getAllByText('80%').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('60%').length).toBeGreaterThan(0)
+  })
+
+  it('展示熔断状态（熔断中徽标 + 原因）', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('backend down')))
+    render(<Models />)
+    await screen.findAllByText('tavily/search', {}, { timeout: 3000 })
+    // deepseek 通道② 和 agnes 通道② 在 mock 里熔断中
+    expect(screen.getAllByText(/熔断中/).length).toBeGreaterThan(0)
+  })
+
+  it('无编辑按钮（模型页纯只读）', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('backend down')))
+    render(<Models />)
+    await screen.findAllByText('tavily/search', {}, { timeout: 3000 })
+    // 不应有 添加/保存/编辑 按钮（配置全在供应商页）
+    expect(screen.queryByRole('button', { name: /添加模型/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^保存$/ })).not.toBeInTheDocument()
   })
 })
