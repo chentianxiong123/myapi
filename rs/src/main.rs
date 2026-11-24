@@ -79,6 +79,50 @@ gateway_section_handler!(get_providers, post_providers, "providers");
 gateway_section_handler!(get_routing, post_routing, "routing");
 gateway_section_handler!(get_proxypools, post_proxypools, "proxy_pools");
 
+/// ---- MCP 配置（存 gateway.yaml mcp 段：{tools, servers}）----
+async fn get_mcp() -> axum::Json<Value> {
+    let v = read_gateway_section("mcp");
+    if v.is_null() {
+        axum::Json(serde_json::json!({"tools": [], "servers": []}))
+    } else {
+        axum::Json(v)
+    }
+}
+async fn put_mcp(Json(payload): Json<Value>) -> axum::response::Response {
+    // payload = {tools, servers}，整段存 mcp
+    match write_gateway_section("mcp", payload) {
+        Ok(_) => axum::Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => axum::Json(serde_json::json!({"ok": false, "error": e.to_string()})).into_response(),
+    }
+}
+
+/// ---- 部署实例（存 gateway.yaml deploy 段：{instances, entry, sync}）----
+async fn get_deploy_instances() -> axum::Json<Value> {
+    let v = read_gateway_section("deploy");
+    if v.is_null() {
+        axum::Json(serde_json::json!({"instances": [], "entry": {}, "sync": {}}))
+    } else {
+        axum::Json(v)
+    }
+}
+async fn put_deploy_instances(Json(payload): Json<Value>) -> axum::response::Response {
+    match write_gateway_section("deploy", payload) {
+        Ok(_) => axum::Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => axum::Json(serde_json::json!({"ok": false, "error": e.to_string()})).into_response(),
+    }
+}
+
+/// ---- 同步：GET /api/sync/config（读 myapi-config.yaml，同 get_config）----
+async fn get_sync_config(State(s): State<S>) -> axum::Json<Value> {
+    let path = s.root.join("config").join("myapi-config.yaml");
+    axum::Json(serde_json::json!({"ok": true, "config": api::read_yaml_json(&path)}))
+}
+
+/// ---- 同步：POST /api/sync/diff（多节点 providers 对比，调 api::node_diff）----
+async fn post_sync_diff(Json(payload): Json<Value>) -> axum::Json<Value> {
+    axum::Json(api::node_diff(&payload).await)
+}
+
 // ---- GET handlers ----
 async fn get_index(State(_s): State<S>) -> axum::response::Response {
     let p = root().join("web").join("static").join("index.html");
@@ -266,6 +310,10 @@ async fn main() {
         .route("/api/providers", get(get_providers).post(post_providers))
         .route("/api/routing", get(get_routing).post(post_routing))
         .route("/api/proxypools", get(get_proxypools).post(post_proxypools))
+        .route("/api/mcp", get(get_mcp).put(put_mcp))
+        .route("/api/deploy/instances", get(get_deploy_instances).put(put_deploy_instances))
+        .route("/api/sync/config", get(get_sync_config))
+        .route("/api/sync/diff", post(post_sync_diff))
         .route("/api/adapters", get(|| async { axum::Json(serde_json::json!({"ok": true, "names": api::get_adapters_info().get("names").cloned().unwrap_or_default(), "hosts": api::get_adapters_info().get("hosts").cloned().unwrap_or_default(), "adapter_instances": api::get_adapters_info().get("adapter_instances").cloned().unwrap_or_default(), "targets": api::get_adapters_info().get("targets").cloned().unwrap_or_default(), "strategies": api::get_adapters_info().get("strategies").cloned().unwrap_or_default()})) }))
         .route("/api/models", get(|| async { axum::Json(api::get_models().await) }))
         .route("/api/nodes", get(|| async { axum::Json(api::get_nodes().await) }))
