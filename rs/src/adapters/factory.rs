@@ -44,3 +44,58 @@ pub fn build_filtered(cfg: &SyncConfig, agent: &str, only_hosts: &[String]) -> V
         _ => Vec::new(),
     }
 }
+
+// ==================== 测试（build 分发 + build_filtered 按 host 过滤）====================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// 造一个 SyncConfig：opencode 有 2 个实例（本机/h1），pi 有 1 个（h2）
+    /// AdapterInstance/SyncConfig 无 Default，手填全字段
+    fn inst(name: &str, host: &str) -> AdapterInstance {
+        AdapterInstance {
+            name: name.into(), host: host.into(), path: String::new(),
+            platform: None, enabled_models: None, config_path: None,
+        }
+    }
+    fn test_cfg() -> SyncConfig {
+        let mut instances: HashMap<String, Vec<AdapterInstance>> = HashMap::new();
+        instances.insert("opencode".into(), vec![inst("local", ""), inst("remote", "h1")]);
+        instances.insert("pi".into(), vec![inst("pi1", "h2")]);
+        SyncConfig {
+            myapi: Default::default(), targets: vec![], strategy: "merge".into(),
+            hosts: HashMap::new(), adapter_instances: instances, path: String::new(),
+        }
+    }
+
+    #[test]
+    fn build_expands_all_instances_for_agent() {
+        let cfg = test_cfg();
+        let insts = build(&cfg, "opencode");
+        assert_eq!(insts.len(), 2, "opencode 应展开 2 个实例");
+    }
+
+    #[test]
+    fn build_unknown_agent_returns_empty() {
+        let cfg = test_cfg();
+        let insts = build(&cfg, "nonexistent");
+        assert!(insts.is_empty());
+    }
+
+    #[test]
+    fn build_filtered_by_host() {
+        let cfg = test_cfg();
+        // 只选 host=h1 的（remote），本机（host=""）被过滤掉
+        let insts = build_filtered(&cfg, "opencode", &["h1".to_string()]);
+        assert_eq!(insts.len(), 1);
+        assert_eq!(insts[0].0, "remote");
+    }
+
+    #[test]
+    fn build_filtered_empty_keeps_all() {
+        let cfg = test_cfg();
+        let insts = build_filtered(&cfg, "opencode", &[]);
+        assert_eq!(insts.len(), 2, "空 only_hosts = 不过滤");
+    }
+}

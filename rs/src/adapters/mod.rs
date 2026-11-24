@@ -77,3 +77,47 @@ pub fn base_diff(current: &Option<ProviderIR>, target: &ProviderIR, name: &str) 
 
 /// 统一品牌/网关标识（下游 provider 名/notes/cc-switch 匹配）。改名只改 base.rs。
 pub const DEFAULT_PROVIDER_ID: &str = base::DEFAULT_PROVIDER_ID;
+
+// ==================== 测试（available_names + Rendered::to_text）====================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn available_names_has_10_adapters() {
+        let names = available_names();
+        assert_eq!(names.len(), 10);
+        assert!(names.contains(&"opencode".to_string()));
+        assert!(names.contains(&"pi".to_string()));
+        assert!(names.contains(&"omp".to_string()));
+    }
+
+    #[test]
+    fn rendered_json_to_text() {
+        let r = Rendered::Json(json!({"a": 1}));
+        let t = r.to_text();
+        assert!(t.contains("\"a\""));
+        assert!(t.contains("1"));
+    }
+
+    #[test]
+    fn rendered_text_passthrough() {
+        let r = Rendered::Text("hello world".into());
+        assert_eq!(r.to_text(), "hello world");
+    }
+
+    #[test]
+    fn rendered_yaml_to_text() {
+        let y: serde_yaml::Value = serde_yaml::from_str("key: value").unwrap();
+        let r = Rendered::Yaml(y);
+        let t = r.to_text();
+        assert!(t.contains("key"));
+        assert!(t.contains("value"));
+    }
+
+    #[test]
+    fn default_provider_id_is_myapi() {
+        assert_eq!(DEFAULT_PROVIDER_ID, "myapi");
+    }
+}
