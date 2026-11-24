@@ -178,6 +178,14 @@ async fn gateway_logs(State(s): State<S>) -> axum::Json<Value> {
     }
 }
 
+/// GET /v1/stats：按通道聚合统计（前端模型页/仪表盘真实数据源）
+async fn gateway_stats(State(s): State<S>) -> axum::Json<Value> {
+    match gateway_logs::query_stats(&s.root) {
+        Ok(v) => axum::Json(v),
+        Err(e) => axum::Json(serde_json::json!({"error": {"message": e, "type": "api_error"}})),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     if maybe_cli(&std::env::args().skip(1).collect::<Vec<_>>()).await { return; }
@@ -219,6 +227,7 @@ async fn main() {
         .route("/v1/chat/completions", post(gateway_chat))
         .route("/v1/embeddings", post(gateway_embeddings))
         .route("/v1/logs", get(gateway_logs))
+        .route("/v1/stats", get(gateway_stats))
         .fallback_service(ServeDir::new(root().join("web").join("static")))
         .with_state(state);
     let addr = format!("127.0.0.1:{}", api::gateway_cfg().panel_port);

@@ -128,3 +128,46 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
+
+/// 按通道聚合统计（/v1/stats 用，前端模型页/仪表盘真实数据源）
+/// 返回每通道：请求数/错误数/错误率/平均 TTFT/平均耗时/token 合计
+pub fn query_stats(root: &std::path::Path) -> Result<Value, String> {
+    let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT channel,
+                COUNT(*) AS total,
+                SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS errors,
+                AVG(ttft_ms) AS avg_ttft,
+                AVG(latency_ms) AS avg_latency,
+                SUM(COALESCE(input_tokens,0)) AS in_tok,
+                SUM(COALESCE(output_tokens,0)) AS out_tok
+         FROM request_logs
+         GROUP BY channel
+         ORDER BY total DESC"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| {
+        let total: i64 = row.get(1)?;
+        let errors: i64 = row.get(2)?;
+        let avg_ttft: f64 = row.get(3).unwrap_or(0.0);
+        let avg_latency: f64 = row.get(4).unwrap_or(0.0);
+        // 状态推导：错误率>10% → error；有熔断意味但这里简化按错误率
+        let err_rate = if total > 0 { errors as f64 / total as f64 } else { 0.0 };
+        let status = if err_rate > 0.1 { "error" } else { "healthy" };
+        Ok(json!({
+            "channel": row.get::<_, String>(0)?,
+            "total_requests": total,
+            "errors": errors,
+            "error_rate": (err_rate * 10000.0).round() / 100.0, // 百分比两位小数
+            "avg_ttft_ms": (avg_ttft * 10.0).round() / 10.0,
+            "avg_latency_ms": (avg_latency * 10.0).round() / 10.0,
+            "status": status,
+            "total_input_tokens": row.get::<_, i64>(5)?,
+            "total_output_tokens": row.get::<_, i64>(6)?,
+        }))
+    }).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(json!({ "object": "list", "data": out }))
+}
