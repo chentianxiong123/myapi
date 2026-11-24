@@ -2,6 +2,7 @@
 mod api;
 mod cli;
 mod adapters;
+mod gateway;
 pub mod core {
     pub mod ir;
     pub mod config;
@@ -13,10 +14,15 @@ pub mod core {
 use axum::{extract::State, response::IntoResponse, routing::{get, post}, Json, Router};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tower_http::services::ServeDir;
 
 #[derive(Clone)]
-struct S(PathBuf);
+struct S {
+    root: PathBuf,
+    /// 网关运行时健康度（被动统计，学 LiteLLM cooldown）
+    health: gateway::HealthMap,
+}
 
 fn root() -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")) }
 
@@ -29,7 +35,7 @@ async fn get_index(State(_s): State<S>) -> axum::response::Response {
         .body(axum::body::Body::from(body)).unwrap()
 }
 async fn get_config(State(s): State<S>) -> axum::response::Response {
-    let path = s.0.join("config").join("myapi-config.yaml");
+    let path = s.root.join("config").join("myapi-config.yaml");
     match std::fs::read_to_string(&path) {
         Ok(_t) => axum::Json(serde_json::json!({"ok": true, "config": api::read_yaml_json(&path)})).into_response(),
         Err(e) => axum::Json(serde_json::json!({"ok": false, "error": e.to_string()})).into_response(),
@@ -37,7 +43,7 @@ async fn get_config(State(s): State<S>) -> axum::response::Response {
 }
 async fn post_config(State(s): State<S>, Json(payload): Json<Value>) -> axum::response::Response {
     let cfg = payload.get("config").cloned().unwrap_or_default();
-    let path = s.0.join("config").join("myapi-config.yaml");
+    let path = s.root.join("config").join("myapi-config.yaml");
     match api::write_yaml_json(&path, &cfg) {
         Ok(_) => axum::Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => axum::Json(serde_json::json!({"ok": false, "error": e.to_string()})).into_response(),
@@ -131,10 +137,23 @@ async fn maybe_cli(args: &[String]) -> bool {
     true
 }
 
+// ==================== 网关面（/v1 OpenAI 兼容）====================
+
+/// GET /v1/models：列出所有通道对外模型
+async fn gateway_models(State(s): State<S>) -> axum::Json<Value> {
+    let cfg = gateway::load_config(&s.root);
+    axum::Json(serde_json::json!({"object": "list", "data": gateway::list_models(&cfg)}))
+}
+
+/// POST /v1/chat/completions：选通道 → 转发上游 → 回传
+async fn gateway_chat(State(s): State<S>, Json(payload): Json<Value>) -> axum::response::Response {
+    gateway::forward_chat(&s.root, &s.health, payload).await
+}
+
 #[tokio::main]
 async fn main() {
     if maybe_cli(&std::env::args().skip(1).collect::<Vec<_>>()).await { return; }
-    let state = S(root());
+    let state = S { root: root(), health: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())) };
     let app = Router::new()
         .route("/api/config", get(get_config).post(post_config))
         .route("/api/adapters", get(|| async { axum::Json(serde_json::json!({"ok": true, "names": api::get_adapters_info().get("names").cloned().unwrap_or_default(), "hosts": api::get_adapters_info().get("hosts").cloned().unwrap_or_default(), "adapter_instances": api::get_adapters_info().get("adapter_instances").cloned().unwrap_or_default(), "targets": api::get_adapters_info().get("targets").cloned().unwrap_or_default(), "strategies": api::get_adapters_info().get("strategies").cloned().unwrap_or_default()})) }))
@@ -159,6 +178,9 @@ async fn main() {
         .route("/api/nodes/log-toggle", post(post_nodes_log_toggle))
         .route("/api/run", post(post_run))
         .route("/api/scripts", post(post_scripts))
+        // ---- 网关面（/v1，OpenAI 兼容）：转发上游 ----
+        .route("/v1/models", get(gateway_models))
+        .route("/v1/chat/completions", post(gateway_chat))
         .fallback_service(ServeDir::new(root().join("web").join("static")))
         .with_state(state);
     let addr = format!("127.0.0.1:{}", api::gateway_cfg().panel_port);
