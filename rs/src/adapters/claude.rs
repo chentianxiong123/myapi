@@ -110,3 +110,77 @@ impl Adapter for ClaudeAdapter {
 /// 避免 unused 警告（base_diff 由其他 adapter 使用）
 #[allow(dead_code)]
 fn _keep() { let _ = base_diff; }
+
+// ==================== 测试（render 纯逻辑：base_url 去 /v1 / env 变量）====================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::ir::ModelIR;
+    use crate::adapters::{Adapter, AdapterInstance, Rendered};
+
+    fn adapter() -> ClaudeAdapter {
+        ClaudeAdapter::new(&AdapterInstance::default())
+    }
+    fn ir(base_url: &str, model: &str) -> ProviderIR {
+        ProviderIR {
+            provider_id: "myapi".into(),
+            base_url: base_url.into(),
+            api_key: "sk-ant".into(),
+            models: vec![ModelIR { id: model.into(), ..Default::default() }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn render_returns_json_array_with_provider() {
+        let out = adapter().render(&ir("http://x/v1", "claude-3"));
+        match out {
+            Rendered::Json(v) => {
+                let arr = v.as_array().unwrap();
+                assert_eq!(arr.len(), 1);
+                assert_eq!(arr[0].get("name").and_then(|x| x.as_str()), Some("claude-3"));
+            }
+            _ => panic!("应返 Json"),
+        }
+    }
+
+    #[test]
+    fn render_strips_v1_from_base_url() {
+        // claude 用 ANTHROPIC_BASE_URL，要去掉 /v1 后缀
+        let out = adapter().render(&ir("http://host:8080/v1", "claude-3"));
+        match out {
+            Rendered::Json(v) => {
+                let url = v.as_array().unwrap()[0]
+                    .pointer("/settings_config/env/ANTHROPIC_BASE_URL").and_then(|x| x.as_str()).unwrap();
+                assert_eq!(url, "http://host:8080", "应去掉 /v1: {url}");
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn render_env_has_auth_token_and_model() {
+        let out = adapter().render(&ir("http://x/v1", "claude-3"));
+        match out {
+            Rendered::Json(v) => {
+                let env = v.as_array().unwrap()[0].pointer("/settings_config/env").unwrap();
+                assert_eq!(env.get("ANTHROPIC_AUTH_TOKEN").and_then(|x| x.as_str()), Some("sk-ant"));
+                assert_eq!(env.get("ANTHROPIC_MODEL").and_then(|x| x.as_str()), Some("claude-3"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn render_no_v1_keeps_base_url() {
+        let out = adapter().render(&ir("http://host:8080", "claude-3"));
+        match out {
+            Rendered::Json(v) => {
+                let url = v.as_array().unwrap()[0]
+                    .pointer("/settings_config/env/ANTHROPIC_BASE_URL").and_then(|x| x.as_str()).unwrap();
+                assert_eq!(url, "http://host:8080");
+            }
+            _ => panic!(),
+        }
+    }
+}

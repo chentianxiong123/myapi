@@ -116,3 +116,65 @@ impl Adapter for CodexAdapter {
 
 #[allow(dead_code)]
 fn _keep() { let _ = base_diff; }
+
+// ==================== 测试（render 纯逻辑：空模型/有模型）====================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::ir::ModelIR;
+    use crate::adapters::{Adapter, AdapterInstance, Rendered};
+
+    fn adapter() -> CodexAdapter {
+        CodexAdapter::new(&AdapterInstance::default())
+    }
+    fn ir_with_models(ids: &[&str]) -> ProviderIR {
+        ProviderIR {
+            provider_id: "myapi".into(),
+            base_url: "http://x/v1".into(),
+            api_key: "sk-test".into(),
+            models: ids.iter().map(|id| ModelIR { id: id.to_string(), ..Default::default() }).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn render_empty_models_returns_empty_text() {
+        let out = adapter().render(&ir_with_models(&[]));
+        match out {
+            Rendered::Text(s) => assert!(s.is_empty()),
+            _ => panic!("空模型应返 Text"),
+        }
+    }
+
+    #[test]
+    fn render_with_models_returns_json_array() {
+        let out = adapter().render(&ir_with_models(&["gpt-x", "gpt-y"]));
+        match out {
+            Rendered::Json(v) => {
+                let arr = v.as_array().unwrap();
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0].get("name").and_then(|x| x.as_str()), Some("gpt-x"));
+                assert_eq!(arr[0].get("notes").and_then(|x| x.as_str()), Some("myapi"));
+                // settings_config.auth.OPENAI_API_KEY 带上 key
+                let key = arr[0].pointer("/settings_config/auth/OPENAI_API_KEY").and_then(|x| x.as_str());
+                assert_eq!(key, Some("sk-test"));
+            }
+            _ => panic!("有模型应返 Json"),
+        }
+    }
+
+    #[test]
+    fn render_base_url_strips_trailing_slash() {
+        let mut ir = ir_with_models(&["gpt-x"]);
+        ir.base_url = "http://x/v1/".into();
+        let out = adapter().render(&ir);
+        match out {
+            Rendered::Json(v) => {
+                let cfg = v.as_array().unwrap()[0]
+                    .pointer("/settings_config/config").and_then(|x| x.as_str()).unwrap();
+                assert!(cfg.contains("http://x/v1"), "base_url 去尾斜杠: {cfg}");
+            }
+            _ => panic!(),
+        }
+    }
+}
