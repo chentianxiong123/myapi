@@ -76,15 +76,52 @@ pub struct GatewayConfig {
     pub listen: u16,
     #[serde(default)]
     pub providers: Vec<Provider>,
+    /// 熔断器参数（学 cc-switch 三态 + LiteLLM 失败率）
+    #[serde(default)]
+    pub circuit_breaker: CircuitBreakerConfig,
 }
 
 fn def_listen() -> u16 { 8380 }
 
+/// 熔断器配置（学 cc-switch 三态机 + LiteLLM 失败率判定）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CircuitBreakerConfig {
+    /// 连续失败多少次开熔断（建议 3-10）
+    #[serde(default = "def_failure_threshold")]
+    pub failure_threshold: u32,
+    /// 错误率阈值 %（LiteLLM: 失败率>此值且请求数≥min → 熔断）
+    #[serde(default = "def_error_rate")]
+    pub error_rate_threshold: u64,
+    /// 错误率有意义的最小请求数
+    #[serde(default = "def_min_requests")]
+    pub min_requests: u64,
+    /// 恢复等待秒数（open→half_open，建议 30-120）
+    #[serde(default = "def_recovery_timeout")]
+    pub recovery_timeout_seconds: u64,
+    /// 恢复成功阈值（half_open 下连续成功几次→closed）
+    #[serde(default = "def_recovery_success")]
+    pub recovery_success_threshold: u32,
+}
+fn def_failure_threshold() -> u32 { 5 }
+fn def_error_rate() -> u64 { 50 }
+fn def_min_requests() -> u64 { 5 }
+fn def_recovery_timeout() -> u64 { 30 }
+fn def_recovery_success() -> u32 { 3 }
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            failure_threshold: def_failure_threshold(),
+            error_rate_threshold: def_error_rate(),
+            min_requests: def_min_requests(),
+            recovery_timeout_seconds: def_recovery_timeout(),
+            recovery_success_threshold: def_recovery_success(),
+        }
+    }
+}
+
 // ==================== 健康度（被动统计，学 LiteLLM cooldown，先留接口）====================
 
-/// 通道健康度（滑动窗口统计）
-/// state/Open/HalfOpen 是三态熔断预留字段，管道通了才启用，暂标 allow(dead_code)
-#[allow(dead_code)]
+/// 通道健康度（被动统计 + 三态熔断，学 cc-switch 状态机 + LiteLLM 失败率）
 #[derive(Debug, Clone, Default)]
 pub struct ChannelHealth {
     pub total_requests: u64,
@@ -95,10 +132,11 @@ pub struct ChannelHealth {
     pub state: CircuitState,
     /// 最近 TTFT（毫秒），延迟感知用
     pub last_ttft_ms: u64,
+    /// 最近一次失败的时间戳（秒），open→half_open 恢复超时用
+    pub last_failure_at: u64,
 }
 
-/// 熔断三态（closed/open/half_open，学 cc-switch），暂未启用故 allow(dead_code)
-#[allow(dead_code)]
+/// 熔断三态（closed/open/half_open，学 cc-switch）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CircuitState {
     #[default]
@@ -110,26 +148,91 @@ pub enum CircuitState {
 /// 健康度表：channel_id → health（全局共享，Arc<RwLock>）
 pub type HealthMap = Arc<RwLock<HashMap<String, ChannelHealth>>>;
 
-/// 健康度快照（转发后更新，当前先记录，熔断判定后加）
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 三态熔断状态机（学 cc-switch closed→open→half_open→closed）
+/// 判定融合 LiteLLM：连续失败达阈值 OR 错误率>阈值（请求数≥min）→ open
+/// 唯一可用通道不熔断（LiteLLM single_deployment 保护，避免一熔全瘫）
 pub async fn record_outcome(
     health: &HealthMap,
     channel_id: &str,
     ok: bool,
     ttft_ms: u64,
+    cb: &CircuitBreakerConfig,
+    is_single_healthy: bool,
 ) {
     let mut map = health.write().await;
     let h = map.entry(channel_id.to_string()).or_default();
     h.total_requests += 1;
     h.last_ttft_ms = ttft_ms;
+
+    // 超时探测转移：open 超过恢复超时 → half_open（允许试探），与 is_available 一致
+    if h.state == CircuitState::Open {
+        let elapsed = now_secs().saturating_sub(h.last_failure_at);
+        if elapsed >= cb.recovery_timeout_seconds {
+            h.state = CircuitState::HalfOpen;
+            h.consecutive_successes = 0;
+        }
+    }
+
     if ok {
         h.consecutive_successes += 1;
         h.consecutive_failures = 0;
+        match h.state {
+            CircuitState::Closed => {}
+            CircuitState::HalfOpen => {
+                // half_open 下连续成功达阈值 → closed（恢复）
+                if h.consecutive_successes >= cb.recovery_success_threshold {
+                    h.state = CircuitState::Closed;
+                    h.consecutive_successes = 0;
+                }
+            }
+            CircuitState::Open => {}
+        }
     } else {
         h.failed_requests += 1;
         h.consecutive_failures += 1;
         h.consecutive_successes = 0;
+        h.last_failure_at = now_secs();
+        match h.state {
+            CircuitState::Closed => {
+                // 连续失败达阈值 OR 错误率超阈值（且非唯一通道）→ open
+                let error_rate = h.failed_requests as f64 / h.total_requests as f64 * 100.0;
+                let rate_cools = h.total_requests >= cb.min_requests
+                    && error_rate > cb.error_rate_threshold as f64
+                    && !is_single_healthy;
+                let consecutive_cools = h.consecutive_failures >= cb.failure_threshold;
+                if (consecutive_cools || rate_cools) && !is_single_healthy {
+                    h.state = CircuitState::Open;
+                }
+            }
+            CircuitState::HalfOpen => {
+                // half_open 下失败 → 重新 open
+                h.state = CircuitState::Open;
+                h.last_failure_at = now_secs();
+            }
+            CircuitState::Open => {
+                h.last_failure_at = now_secs();
+            }
+        }
     }
-    // TODO: 熔断判定（失败率 > 阈值 → Open，超时 → HalfOpen，连续成功 → Closed）
+}
+
+/// 通道当前是否可用（open 状态且未到恢复超时 → 不可用）
+pub fn is_available(h: &ChannelHealth, cb: &CircuitBreakerConfig) -> bool {
+    match h.state {
+        CircuitState::Closed => true,
+        CircuitState::Open | CircuitState::HalfOpen => {
+            // open 超过恢复超时 → 允许试探（half_open）
+            let elapsed = now_secs().saturating_sub(h.last_failure_at);
+            elapsed >= cb.recovery_timeout_seconds
+        }
+    }
 }
 
 // ==================== 通道选择（按模型名，最小版：第一个能服务该模型的健康通道）====================
@@ -152,29 +255,44 @@ pub fn select_channel(
     requested_model: &str,
     health: &HealthMap,
 ) -> Option<SelectedChannel> {
-    // 同步快照健康度（避免持锁跨 await；这里 select 是同步的，try_read 足够）
     let health_snapshot = health.try_read().ok();
+    let cb = &config.circuit_breaker;
+    // 先收集所有能服务该模型的候选通道（含健康度）
+    let mut candidates: Vec<(&Provider, &Channel, &ChannelModel)> = Vec::new();
     for provider in &config.providers {
         if provider.disabled { continue; }
         for channel in &provider.channels {
             for m in &channel.models {
                 let external = m.alias.as_deref().unwrap_or(&m.name);
                 if external == requested_model || m.name == requested_model {
-                    // 解析密钥：key_name 引用，空=第一个
-                    let api_key = resolve_key(provider, channel)
-                        .unwrap_or_default();
-                    let _ = &health_snapshot;
-                    return Some(SelectedChannel {
-                        provider: provider.clone(),
-                        channel: channel.clone(),
-                        upstream_model: m.name.clone(),
-                        api_key,
-                    });
+                    candidates.push((provider, channel, m));
                 }
             }
         }
     }
-    None
+    if candidates.is_empty() { return None; }
+
+    // 优先选可用通道（非熔断）；若全熔断则 KeepAll 兼底（第一个），避免一熔全瘫
+    // 用 for 循环而非闭包 find，避免捕获 RwLockReadGuard（borrow 冲突）
+    let hs = health_snapshot.as_deref();
+    let mut chosen_idx: Option<usize> = None;
+    for (i, cand) in candidates.iter().enumerate() {
+        let available = hs
+            .and_then(|map| map.get(&cand.1.id))
+            .map(|h| is_available(h, cb))
+            .unwrap_or(true); // 无记录=可用
+        if available { chosen_idx = Some(i); break; }
+    }
+    // 全熔断 → 兼底取第一个（LiteLLM when_all_unhealthy: keep-all）
+    let idx = chosen_idx.unwrap_or(0);
+    let (provider, channel, m) = candidates[idx];
+    let api_key = resolve_key(provider, channel).unwrap_or_default();
+    Some(SelectedChannel {
+        provider: (*provider).clone(),
+        channel: (*channel).clone(),
+        upstream_model: m.name.clone(),
+        api_key,
+    })
 }
 
 /// 解析通道实际用的 key：key_name 指定 → 池里找同名；否则用第一个（主）
@@ -250,17 +368,28 @@ pub async fn forward_chat(
     }
 
     let start = std::time::Instant::now();
+    let cb = &config.circuit_breaker;
+    // 单部署保护：该模型只有一条通道时，熔断降级（LiteLLM single_deployment）
+    let total_channels: usize = config.providers.iter()
+        .filter(|p| !p.disabled)
+        .flat_map(|p| p.channels.iter())
+        .filter(|c| c.models.iter().any(|m| {
+            let ext = m.alias.as_deref().unwrap_or(&m.name);
+            ext == requested_model || m.name == requested_model
+        }))
+        .count();
+    let is_single = total_channels <= 1;
     let resp = match req.json(&upstream_payload).send().await {
         Ok(r) => r,
         Err(e) => {
-            record_outcome(health, &selected.channel.id, false, 0).await;
+            record_outcome(health, &selected.channel.id, false, 0, cb, is_single).await;
             return error_response(502, &format!("上游请求失败: {}", e));
         }
     };
     let ttft = start.elapsed().as_millis() as u64;
     let status = resp.status();
     let ok = status.is_success();
-    record_outcome(health, &selected.channel.id, ok, ttft).await;
+    record_outcome(health, &selected.channel.id, ok, ttft, cb, is_single).await;
 
     // 5. 回传（流式透传字节流 / 非流式回 JSON）
     let upstream_headers = resp.headers().clone();
@@ -301,4 +430,155 @@ pub fn list_models(config: &GatewayConfig) -> Vec<serde_json::Value> {
         }
     }
     out
+}
+
+// ==================== 单元测试（熔断状态机，全 mock 不调上游）====================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn cb() -> CircuitBreakerConfig {
+        CircuitBreakerConfig {
+            failure_threshold: 5,
+            error_rate_threshold: 50,
+            min_requests: 5,
+            recovery_timeout_seconds: 30,
+            recovery_success_threshold: 3,
+        }
+    }
+
+    fn health_map() -> HealthMap {
+        Arc::new(RwLock::new(HashMap::new()))
+    }
+
+    #[tokio::test]
+    async fn closed_on_success() {
+        let h = health_map();
+        let c = cb();
+        record_outcome(&h, "ch1", true, 100, &c, false).await;
+        record_outcome(&h, "ch1", true, 100, &c, false).await;
+        let m = h.read().await;
+        let hc = m.get("ch1").unwrap();
+        assert_eq!(hc.state, CircuitState::Closed);
+        assert_eq!(hc.total_requests, 2);
+        assert_eq!(hc.consecutive_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn opens_on_consecutive_failures() {
+        let h = health_map();
+        let c = cb();
+        // 连续失败 5 次（failure_threshold）→ open
+        for _ in 0..5 {
+            record_outcome(&h, "ch1", false, 0, &c, false).await;
+        }
+        let m = h.read().await;
+        let hc = m.get("ch1").unwrap();
+        assert_eq!(hc.state, CircuitState::Open, "连续失败达阈值应 open");
+    }
+
+    #[tokio::test]
+    async fn opens_on_error_rate() {
+        let h = health_map();
+        let c = cb();
+        // 5 次里 4 失败（80% > 50%，请求数≥5）→ open
+        record_outcome(&h, "ch1", true, 0, &c, false).await;
+        for _ in 0..4 {
+            record_outcome(&h, "ch1", false, 0, &c, false).await;
+        }
+        let m = h.read().await;
+        let hc = m.get("ch1").unwrap();
+        assert_eq!(hc.state, CircuitState::Open, "错误率超阈值应 open");
+    }
+
+    #[tokio::test]
+    async fn single_deployment_never_opens() {
+        let h = health_map();
+        let c = cb();
+        // 唯一通道连续失败 10 次，也不 open（单部署保护）
+        for _ in 0..10 {
+            record_outcome(&h, "ch1", false, 0, &c, true).await;
+        }
+        let m = h.read().await;
+        let hc = m.get("ch1").unwrap();
+        assert_eq!(hc.state, CircuitState::Closed, "唯一通道不熔断（避免全瘫）");
+    }
+
+    #[tokio::test]
+    async fn halfopen_then_recover() {
+        let h = health_map();
+        let c = cb();
+        // 先打(open: 连续失败5)
+        for _ in 0..5 {
+            record_outcome(&h, "ch1", false, 0, &c, false).await;
+        }
+        // 模拟时间流逝（把 last_failure_at 拨回 31 秒前）
+        {
+            let mut m = h.write().await;
+            m.get_mut("ch1").unwrap().last_failure_at = now_secs() - 31;
+        }
+        // is_available 应为 true（open 超时→可试探）
+        {
+            let m = h.read().await;
+            assert!(is_available(m.get("ch1").unwrap(), &c), "恢复超时后应可试探");
+        }
+        // half_open 下连续成功 3 次 → closed
+        for _ in 0..3 {
+            record_outcome(&h, "ch1", true, 0, &c, false).await;
+        }
+        let m = h.read().await;
+        assert_eq!(m.get("ch1").unwrap().state, CircuitState::Closed, "half_open 恢复后 closed");
+    }
+
+    #[tokio::test]
+    async fn halfopen_fail_reopens() {
+        let h = health_map();
+        let c = cb();
+        // 打开
+        for _ in 0..5 {
+            record_outcome(&h, "ch1", false, 0, &c, false).await;
+        }
+        // 时间流逝
+        {
+            let mut m = h.write().await;
+            m.get_mut("ch1").unwrap().last_failure_at = now_secs() - 31;
+        }
+        // 试探成功 2 次（不到 3）
+        record_outcome(&h, "ch1", true, 0, &c, false).await;
+        record_outcome(&h, "ch1", true, 0, &c, false).await;
+        // 第 3 次失败 → 重新 open
+        record_outcome(&h, "ch1", false, 0, &c, false).await;
+        let m = h.read().await;
+        assert_eq!(m.get("ch1").unwrap().state, CircuitState::Open, "half_open 失败应重新 open");
+    }
+
+    #[tokio::test]
+    async fn select_channel_skips_open() {
+        let mut cfg = GatewayConfig::default();
+        cfg.circuit_breaker = cb();
+        cfg.providers.push(Provider {
+            name: "p1".into(),
+            base_url: "http://x/v1".into(),
+            disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![Channel {
+                id: "ch1".into(),
+                name: "c1".into(),
+                path: None,
+                key_name: None,
+                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()) }],
+                weight: 1,
+            }],
+            proxy: String::new(),
+        });
+        let h = health_map();
+        // ch1 打开 + 未超恢复超时 → select_channel 应回退到它（KeepAll，全熔断兼底）
+        for _ in 0..5 {
+            record_outcome(&h, "ch1", false, 0, &cb(), false).await;
+        }
+        let sel = select_channel(&cfg, "my-model", &h);
+        assert!(sel.is_some(), "全熔断时 KeepAll 仍应返回通道");
+    }
 }
