@@ -725,4 +725,61 @@ mod tests {
         assert!(resp.status() == StatusCode::INTERNAL_SERVER_ERROR || resp.status() == StatusCode::BAD_GATEWAY || resp.status() == StatusCode::SERVICE_UNAVAILABLE);
     }
 
+
+    #[tokio::test]
+    async fn forward_maps_alias_to_upstream_real_name() {
+        // 网关核心：对外别名 my-alias → 上游真实名 real-model
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x", "choices": []})))
+            .expect(1)
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        // 通道模型 name=real-model，对外别名 my-alias
+        let channels = json!([{
+            "id": "ch1", "name": "ch1", "key_name": "主",
+            "models": [{"name": "real-model", "alias": "my-alias"}],
+        }]);
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), channels);
+
+        let state = S::new(dir.path().to_path_buf());
+        // 请求用对外别名
+        let payload = json!({"model": "my-alias", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 上游收到的是真实名 real-model（不是别名）
+        let reqs = upstream.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["model"], "real-model", "别名应翻译回上游真实名");
+    }
+
+    #[tokio::test]
+    async fn forward_streams_sse_passthrough() {
+        // 上游回 text/event-stream → 网关流式透传（content-type 保留 SSE）
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200)
+                .set_body_string("data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}]}\n\ndata: [DONE]\n\n")
+                .insert_header("content-type", "text/event-stream"))
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "up-model", "stream": true, "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        // body 是流（能 collect 出 SSE 数据）—— 核心断言：上游 SSE body 透传到客户端
+        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let s = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(s.contains("data:"), "应透传 SSE data 行，实际: {s}");
+        assert!(s.contains("[DONE]"));
+        assert!(s.contains("he"), "SSE delta content 透传");
+    }
+
 }
