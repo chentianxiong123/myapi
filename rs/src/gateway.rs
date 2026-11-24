@@ -948,6 +948,24 @@ async fn forward_one(
     let ok = status.is_success();
     record_outcome(health, &selected.channel.id, ok, ttft, cb, false).await;
 
+    // 上游 5xx → 返 Err 触发 failover（换下一通道重试）；4xx 客户端错误仍透传（换通道也没用）
+    // 学 LiteLLM：服务端错误可重试到其他 deployment，客户端错误（鉴权/参数）不可
+    if status.is_server_error() {
+        // 先记日志（failover 早返回跳过了后面的日志分支）
+        crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
+            model: requested_model.into(),
+            provider: selected.provider.name.clone(),
+            channel: selected.channel.name.clone(),
+            status: status.as_u16(),
+            latency_ms: start.elapsed().as_millis() as u64,
+            ttft_ms: ttft,
+            input_tokens: None,
+            output_tokens: None,
+            error: Some(format!("HTTP {}", status.as_u16())),
+        }).await;
+        return Err(format!("上游服务端错误 {}", status.as_u16()));
+    }
+
     // 回传（真流式：SSE 逐 chunk 透传；非流式回整包）
     let upstream_headers = resp.headers().clone();
     let is_sse = upstream_headers.get("content-type")

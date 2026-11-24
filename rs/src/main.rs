@@ -671,7 +671,8 @@ mod tests {
         let state = S::new(dir.path().to_path_buf());
         let payload = json!({"model": "up-model", "messages": [{"role": "user", "content": "hi"}]});
         let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // 单通道：上游 500 → 5xx 触发 failover 但无下一通道 → 502（网关语义：所有通道失败）
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 
         // 上游被调过一次
         assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
@@ -780,6 +781,79 @@ mod tests {
         assert!(s.contains("data:"), "应透传 SSE data 行，实际: {s}");
         assert!(s.contains("[DONE]"));
         assert!(s.contains("he"), "SSE delta content 透传");
+    }
+
+
+    #[tokio::test]
+    async fn upstream_5xx_fails_over_to_next_channel() {
+        // 上游 5xx → forward_one 返 Err → failover 到下一通道（真 HTTP 验证 failover 链）
+        // ch1 恒 500，ch2 200 → 4 次请求整体都 200（failover 生效）
+        let upstream = MockServer::start().await;
+        // ch1 上游模型 up-fail 恒 500；ch2 up-ok 200
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "up-fail"})))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&upstream).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "up-ok"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "ok", "choices": []})))
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        // gateway.yaml：快熔断阈值（连续 2 次失败就 open）+ 2 通道
+        let cfg = json!({
+            "listen": 0,
+            "circuit_breaker": {
+                "failure_threshold": 2,
+                "error_rate_threshold": 50,
+                "min_requests": 1,
+                "recovery_timeout_seconds": 60,
+                "recovery_success_threshold": 1,
+            },
+            "providers": [{
+                "name": "mock-provider",
+                "base_url": format!("{}/v1", upstream.uri()),
+                "disabled": false,
+                "headers": {},
+                "keys": [{"name": "主", "api-key": "sk-test"}],
+                "channels": [
+                    {"id": "ch1", "name": "fail", "key_name": "主", "weight": 1,
+                     "models": [{"name": "up-fail", "alias": "my-model"}]},
+                    {"id": "ch2", "name": "ok", "key_name": "主", "weight": 1,
+                     "models": [{"name": "up-ok", "alias": "my-model"}]},
+                ],
+            }],
+        });
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+
+        let state = S::new(dir.path().to_path_buf());
+        // 用对外别名 my-model（两通道都服务），failover 会切到成功的通道
+        let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
+
+        // 连发 4 次：ch1 每次先失败（500），failover 到 ch2 成功 → 整体 200
+        // 但 ch1 连续失败 2 次 → 熔断 open → 后续请求不再打 ch1
+        for _ in 0..4 {
+            let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload.clone()).await;
+            assert_eq!(resp.status(), StatusCode::OK, "failover 到 ch2 应成功");
+        }
+
+        // 验证 failover：ch1 恒 500，但每次都 failover 到 ch2 成功 → 整体 200
+        // ch1 确实被试过（≥1 次），且整体成功（failover 生效）
+        let reqs = upstream.received_requests().await.unwrap();
+        let fail_hits = reqs.iter().filter(|r| {
+            let b: Value = serde_json::from_slice(&r.body).unwrap_or(json!({}));
+            b["model"] == "up-fail"
+        }).count();
+        let ok_hits = reqs.iter().filter(|r| {
+            let b: Value = serde_json::from_slice(&r.body).unwrap_or(json!({}));
+            b["model"] == "up-ok"
+        }).count();
+        assert!(fail_hits >= 1, "ch1 至少被试过 1 次（然后 500）");
+        assert!(ok_hits >= 1, "failover 到 ch2 成功至少 1 次");
+        assert_eq!(ok_hits, 4, "4 次请求都 failover 到 ch2 成功");
     }
 
 }
