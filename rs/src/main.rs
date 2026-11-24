@@ -127,6 +127,51 @@ async fn put_deploy_instances(State(s): State<S>, Json(payload): Json<Value>) ->
     }
 }
 
+/// GET /api/deploy/nginx-conf：生成 Nginx 高可用配置（学 new-api 多机部署）
+async fn get_nginx_conf(State(s): State<S>) -> axum::response::Response {
+    let deploy = read_gateway_section(&s.root, "deploy");
+    let conf = gateway::generate_nginx_conf(&deploy);
+    axum::Json(serde_json::json!({"ok": true, "conf": conf})).into_response()
+}
+
+/// POST /api/deploy/sync-db：SQLite 主→备同步（scp gateway-logs.db）
+/// 入参 {sourcePath, targetHost, targetPath} → shell scp。学前端 SqliteSync 配置。
+async fn sync_db_handler(Json(body): Json<serde_json::Value>) -> axum::response::Response {
+    let source = body.get("sourcePath").and_then(|v| v.as_str()).unwrap_or("");
+    let target_host = body.get("targetHost").and_then(|v| v.as_str()).unwrap_or("");
+    let target_path = body.get("targetPath").and_then(|v| v.as_str()).unwrap_or("");
+    if source.is_empty() || target_host.is_empty() || target_path.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"ok": false, "error": "缺少 sourcePath/targetHost/targetPath"}))).into_response();
+    }
+    // scp 主库 → 备节点（需主节点对本备节点配了 SSH 免密）
+    let output = tokio::process::Command::new("scp")
+        .arg("-o").arg("StrictHostKeyChecking=no")
+        .arg("-o").arg("ConnectTimeout=10")
+        .arg(source)
+        .arg(format!("{}:{}", target_host, target_path))
+        .output()
+        .await;
+    match output {
+        Ok(o) if o.status.success() => {
+            axum::Json(serde_json::json!({"ok": true, "lastSync": chrono_now_iso(), "msg": "已同步到备用节点"})).into_response()
+        }
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr).to_string();
+            axum::Json(serde_json::json!({"ok": false, "error": format!("scp 失败: {}", err)})).into_response()
+        }
+        Err(e) => axum::Json(serde_json::json!({"ok": false, "error": format!("scp 启动失败: {}", e)})).into_response(),
+    }
+}
+
+fn chrono_now_iso() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let days = secs / 86400;
+    let rem = secs % 86400;
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    format!("{:02}:{:02}:{:02}Z", h, m, s)
+}
+
 /// ---- 同步：GET /api/sync/config（读 myapi-config.yaml，同 get_config）----
 async fn get_sync_config(State(s): State<S>) -> axum::Json<Value> {
     let path = s.root.join("config").join("myapi-config.yaml");
@@ -401,6 +446,8 @@ pub fn build_router(state: S) -> Router {
         .route("/api/proxypools", get(get_proxypools).post(post_proxypools))
         .route("/api/mcp", get(get_mcp).put(put_mcp))
         .route("/api/deploy/instances", get(get_deploy_instances).put(put_deploy_instances))
+        .route("/api/deploy/nginx-conf", get(get_nginx_conf))
+        .route("/api/deploy/sync-db", post(sync_db_handler))
         .route("/api/sync/config", get(get_sync_config))
         .route("/api/sync/diff", post(post_sync_diff))
         .route("/api/apply", post(post_apply))
@@ -1574,6 +1621,45 @@ mod tests {
         assert_eq!(st, 200); // 端点本身 200，测试结果在 body
         assert_eq!(j["ok"], false, "上游 401 应报通道异常");
         assert!(j["error"].as_str().is_some(), "应有错误信息");
+    }
+
+
+    // ==================== 多机 HA 真测：生成 Nginx 配置 ====================
+
+    #[test]
+    fn generate_nginx_conf_masters_and_backups() {
+        // HA：master 在前不带 backup 标记，backup 带 backup；SSE proxy_buffering off
+        let deploy = json!({
+            "entry": {"listen": 8380, "readTimeout": 120, "nextUpstream": "error timeout http_502 http_503 http_504"},
+            "instances": [
+                {"id": "i-1", "name": "gw-phone", "role": "master", "address": "192.168.31.213:8317", "heartbeatMs": 5000},
+                {"id": "i-2", "name": "gw-win11", "role": "backup", "address": "192.168.31.12:8317", "heartbeatMs": 5000},
+            ],
+        });
+        let conf = gateway::generate_nginx_conf(&deploy);
+        // 固定入口
+        assert!(conf.contains("listen 8380;"), "应有固定入口 listen 8380");
+        // upstream 块
+        assert!(conf.contains("upstream myapi"), "应有 upstream myapi");
+        // master 不带 backup 标记
+        assert!(conf.contains("server 192.168.31.213:8317 max_fails"), "master 应在前且不带 backup");
+        // backup 带 backup 标记
+        assert!(conf.contains("server 192.168.31.12:8317 backup"), "backup 应带 backup 标记");
+        // SSE 流式：关缓冲
+        assert!(conf.contains("proxy_buffering off"), "SSE 必须 proxy_buffering off");
+        // 故障切换
+        assert!(conf.contains("proxy_next_upstream error timeout http_502"), "应有 proxy_next_upstream 故障切换");
+        // 健康检查端点
+        assert!(conf.contains("location = /health"), "应有健康检查端点");
+    }
+
+    #[test]
+    fn generate_nginx_conf_empty_instances() {
+        // 无实例 → 不崩，生成占位注释
+        let deploy = json!({"entry": {"listen": 8380}, "instances": []});
+        let conf = gateway::generate_nginx_conf(&deploy);
+        assert!(conf.contains("listen 8380;"));
+        assert!(conf.contains("无实例"), "无实例应有占位提示");
     }
 
 }

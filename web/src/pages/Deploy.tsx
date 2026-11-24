@@ -35,6 +35,8 @@ export default function Deploy() {
       const res = await fetch('/api/deploy/instances')
       const data = await res.json()
       setInstances(data.instances || [])
+      if (data.entry && Object.keys(data.entry).length) setEntry({ ...DEFAULT_ENTRY, ...data.entry })
+      if (data.sync && Object.keys(data.sync).length) setSync({ ...DEFAULT_SYNC, ...data.sync })
     } catch {
       setInstances(DEFAULT_INSTANCES)
     } finally { setLoading(false) }
@@ -60,18 +62,50 @@ export default function Deploy() {
   async function syncNow() {
     setBusy(true)
     try {
-      await new Promise(r => setTimeout(r, 800))
-      setSync({ ...sync, lastSync: new Date().toISOString() })
-      toast('SQLite 已同步到备用节点')
+      const res = await fetch('/api/deploy/sync-db', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourcePath: sync.sourcePath, targetHost: sync.targetHost, targetPath: sync.targetPath }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        setSync({ ...sync, lastSync: data.lastSync || new Date().toISOString() })
+        toast('SQLite 已同步到备用节点')
+      } else {
+        toast(data.error || '同步失败')
+      }
+    } catch (e: any) {
+      toast(e?.message || '同步失败')
     } finally { setBusy(false) }
   }
 
-  async function failover() {
+  const [nginxConf, setNginxConf] = useState('')
+  async function genNginxConf() {
     setBusy(true)
     try {
-      await new Promise(r => setTimeout(r, 600))
-      toast('故障切换：已切到备用节点（Nginx upstream 自动）')
+      // 先保存当前配置，再生成
+      await fetch('/api/deploy/instances', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instances, entry, sync }) })
+      const res = await fetch('/api/deploy/nginx-conf')
+      const data = await res.json()
+      if (data.ok) {
+        setNginxConf(data.conf)
+        toast('Nginx 配置已生成，可复制/下载')
+      } else {
+        toast('生成失败')
+      }
+    } catch (e: any) {
+      toast(e?.message || '生成失败')
     } finally { setBusy(false) }
+  }
+  function copyNginxConf() {
+    navigator.clipboard.writeText(nginxConf)
+    toast('Nginx 配置已复制')
+  }
+  function downloadNginxConf() {
+    const blob = new Blob([nginxConf], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url; a.download = 'myapi-ha.conf'; a.click()
+    URL.revokeObjectURL(url)
   }
 
   async function saveAll() {
@@ -99,8 +133,8 @@ export default function Deploy() {
           <p className="text-sm text-gray-500">主备高可用 · 客户端固定入口 + Nginx 多 upstream 故障切换 + SQLite 同步</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button onClick={failover} className="flex items-center gap-1.5 rounded-lg border border-amber-300 px-3 py-1.5 text-sm text-amber-600 hover:bg-amber-50 dark:border-amber-600 dark:hover:bg-amber-900/20">
-            <Zap className="h-4 w-4" />故障切换
+          <button onClick={genNginxConf} disabled={busy} className="flex items-center gap-1.5 rounded-lg border border-amber-300 px-3 py-1.5 text-sm text-amber-600 hover:bg-amber-50 dark:border-amber-600 dark:hover:bg-amber-900/20 disabled:opacity-50">
+            <Zap className="h-4 w-4" />生成 Nginx 配置
           </button>
           <button onClick={addInstance} className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700">
             <Plus className="h-4 w-4" />添加实例
@@ -216,6 +250,21 @@ export default function Deploy() {
           </div>
         </div>
       </div>
+
+      {/* 生成的 Nginx 配置 */}
+      {nginxConf && (
+        <div className="rounded-xl border border-amber-200 bg-white p-5 dark:border-amber-700 dark:bg-gray-800">
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="flex items-center gap-2 text-sm font-semibold"><Zap className="h-4 w-4 text-amber-500" />生成的 Nginx 配置（放到常驻机，不要装手机）</h3>
+            <div className="flex gap-2">
+              <button onClick={copyNginxConf} className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700">复制</button>
+              <button onClick={downloadNginxConf} className="rounded bg-blue-600 px-2 py-1 text-xs text-white hover:bg-blue-700">下载</button>
+            </div>
+          </div>
+          <pre className="max-h-72 overflow-auto rounded bg-gray-900 p-3 font-mono text-xs text-gray-100">{nginxConf}</pre>
+          <p className="mt-2 text-xs text-gray-400">部署到 Nginx 常驻机后 reload：nginx -s reload。客户端认 :{entry.listen}，主挂自动切备。</p>
+        </div>
+      )}
 
       {/* 实例列表 */}
       <div className="rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
