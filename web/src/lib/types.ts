@@ -305,3 +305,79 @@ export interface McpServerConfig {
   url: string              // http/sse 端点
   enabled: boolean
 }
+
+// ==================== 路由策略（学 LiteLLM strategy + cc-switch 三态熔断器）====================
+
+// 路由策略（同模型多通道怎么选）
+export type RoutingStrategy = 'latency-based' | 'weight' | 'simple-shuffle' | 'least-busy'
+
+// 黏性路由粒度（省 token：路由到一致通道→上游 prompt cache 命中）
+export type StickyGranularity = 'session' | 'api-key' | 'continuity'
+
+// 熔断器三态（学 cc-switch CircuitState）
+export type CircuitState = 'closed' | 'open' | 'half_open'
+
+// 全挂兜底策略
+export type WhenAllUnhealthy = 'keep-all' | 'fail'
+
+// 路由策略配置（后端读取，前端可配）
+export interface RoutingConfig {
+  strategy: RoutingStrategy
+  latency_window_seconds: number       // TTFT 滑动窗口
+  sticky: {
+    enabled: boolean
+    granularity: StickyGranularity
+    ttl_seconds: number                // 会话亲和 TTL
+  }
+  circuit_breaker: {
+    failure_threshold: number          // 连续失败阈值（建议 3-10）
+    error_rate_threshold: number       // 错误率阈值 %
+    min_requests: number               // 错误率有意义的最小请求数
+    recovery_timeout_seconds: number   // open→half_open 恢复等待（建议 30-120）
+    recovery_success_threshold: number // half_open→closed 恢复成功阈值
+  }
+  timeout: {
+    streaming_first_byte: number       // 流式首字超时（秒）
+    streaming_idle: number             // 流式空闲超时（秒）
+    non_streaming: number              // 非流式超时（秒）
+  }
+  when_all_unhealthy: WhenAllUnhealthy
+  auto_mode: {
+    enabled: boolean                   // 全自动 Auto 路由（未来）
+    capability_match: boolean          // capability 匹配（vision/pdf 优先）
+  }
+}
+
+export const ROUTING_STRATEGIES: Array<{ id: RoutingStrategy; label: string }> = [
+  { id: 'latency-based', label: '延迟感知（TTFT 最低优先）' },
+  { id: 'weight', label: '权重（按通道权重随机）' },
+  { id: 'simple-shuffle', label: '随机（简单洗牌）' },
+  { id: 'least-busy', label: '最闲（并发最低）' },
+]
+
+export const STICKY_GRANULARITIES: Array<{ id: StickyGranularity; label: string }> = [
+  { id: 'session', label: '会话亲和（session_id）' },
+  { id: 'api-key', label: 'API-key 亲和（key hash）' },
+  { id: 'continuity', label: '连续性（previous_response_id）' },
+]
+
+export const WHEN_ALL_UNHEALTHY_OPTIONS: Array<{ id: WhenAllUnhealthy; label: string }> = [
+  { id: 'keep-all', label: '降级继续（keep-all，全挂也用）' },
+  { id: 'fail', label: '直接失败（fail）' },
+]
+
+export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
+  strategy: 'latency-based',
+  latency_window_seconds: 60,
+  sticky: { enabled: true, granularity: 'session', ttl_seconds: 300 },
+  circuit_breaker: {
+    failure_threshold: 5,
+    error_rate_threshold: 50,
+    min_requests: 5,
+    recovery_timeout_seconds: 30,
+    recovery_success_threshold: 3,
+  },
+  timeout: { streaming_first_byte: 30, streaming_idle: 60, non_streaming: 120 },
+  when_all_unhealthy: 'keep-all',
+  auto_mode: { enabled: false, capability_match: true },
+}

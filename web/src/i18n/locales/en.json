@@ -3,6 +3,7 @@
     "dashboard": "Dashboard",
     "models": "Models",
     "providers": "Providers",
+    "routing": "Routing",
     "logs": "Logs",
     "sync": "Sync",
     "config": "Config",

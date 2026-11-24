@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   LayoutDashboard, List, ScrollText, Settings, Server,
-  Play, Sun, Moon, Languages, ChevronsLeft, ChevronsRight, Layers, Network, KeyRound, MessageSquare, Globe, Plug,
+  Play, Sun, Moon, Languages, ChevronsLeft, ChevronsRight, Layers, Network, KeyRound, MessageSquare, Globe, Plug, Shuffle,
   Menu, X,
 } from 'lucide-react'
 import { useTheme } from '@/contexts/ThemeContext'
@@ -12,6 +12,7 @@ const navItems = [
   { id: 'tokens', label: 'nav.tokens', icon: KeyRound },
   { id: 'models', label: 'nav.models', icon: List },
   { id: 'providers', label: 'nav.providers', icon: Server },
+  { id: 'routing', label: 'nav.routing', icon: Shuffle },
   { id: 'proxypools', label: 'nav.proxypools', icon: Globe },
   { id: 'mcp', label: 'nav.mcp', icon: Plug },
   { id: 'logs', label: 'nav.logs', icon: ScrollText },
