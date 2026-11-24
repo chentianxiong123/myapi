@@ -379,5 +379,5 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
   },
   timeout: { streaming_first_byte: 30, streaming_idle: 60, non_streaming: 120 },
   when_all_unhealthy: 'keep-all',
-  auto_mode: { enabled: false, capability_match: true },
+  auto_mode: { enabled: true, capability_match: true },
 }
