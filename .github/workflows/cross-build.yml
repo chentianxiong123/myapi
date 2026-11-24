@@ -8,14 +8,7 @@
 name: cross-build
 
 on:
-  push:
-    # 只在 Rust 源码改动时触发交叉编译（scripts 含 render_gateway.py 等前端相关，不触发；自身 workflow 改动也不触发）
-    paths:
-      - 'rs/**'
-  pull_request:
-    paths:
-      - 'rs/**'
-  workflow_dispatch:
+  workflow_dispatch: # 永远手动触发，绝不自动跑（参考 mymusic：push/tag 都不触发，杜绝 artifact 堆积）
 
 permissions:
   contents: read

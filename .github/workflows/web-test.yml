@@ -7,12 +7,7 @@
 name: web-test
 
 on:
-  push:
-    branches: [main]
-    paths: ['web/**', '.github/workflows/web-test.yml']
-  pull_request:
-    paths: ['web/**', '.github/workflows/web-test.yml']
-  workflow_dispatch:
+  workflow_dispatch: # 永远手动触发，绝不自动跑（参考 mymusic：push/tag 都不触发，杜绝 artifact 堆积）
 
 permissions:
   contents: read
