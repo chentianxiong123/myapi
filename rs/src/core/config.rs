@@ -243,3 +243,68 @@ pub fn build_provider_ir(cfg: &SyncConfig, cpa_models: Vec<ModelIR>) -> Provider
         meta,
     }
 }
+
+// ==================== 测试（SyncConfig 反序列化 + instance_for + 默认值）====================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_yaml::Value as Y;
+
+    #[test]
+    fn sync_config_deserialize_full() {
+        let yaml = r#"
+myapi:
+  base_url: "http://cpa:8000"
+  api_key: "sk-cpa"
+targets: [opencode, pi]
+strategy: merge
+adapter_instances:
+  opencode:
+    - name: local
+      host: ""
+    - name: remote
+      host: "h1"
+  pi:
+    - name: pi1
+      host: "h2"
+"#;
+        let cfg: SyncConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.targets.len(), 2);
+        assert_eq!(cfg.strategy, "merge");
+        assert_eq!(cfg.instance_for("opencode").len(), 2);
+        assert_eq!(cfg.instance_for("pi").len(), 1);
+        assert_eq!(cfg.instance_for("nonexistent").len(), 0);
+        assert_eq!(cfg.myapi.base_url, "http://cpa:8000");
+    }
+
+    #[test]
+    fn sync_config_defaults_on_partial() {
+        // 只给 targets，其余走 serde default
+        let yaml = "targets: [opencode]";
+        let cfg: SyncConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.targets, vec!["opencode".to_string()]);
+        assert_eq!(cfg.strategy, "merge", "strategy 默认 merge");
+        assert!(cfg.adapter_instances.is_empty());
+        assert!(cfg.hosts.is_empty());
+    }
+
+    #[test]
+    fn adapter_instance_optional_fields() {
+        let yaml = r#"
+adapter_instances:
+  omp:
+    - name: o1
+      host: h1
+      enabled_models: ["myapi/*", "exa"]
+      config_path: "/path/config.yml"
+"#;
+        let cfg: SyncConfig = serde_yaml::from_str(yaml).unwrap();
+        let insts = cfg.instance_for("omp");
+        assert_eq!(insts.len(), 1);
+        let im = insts[0].enabled_models.as_ref().unwrap();
+        assert_eq!(im.len(), 2);
+        assert_eq!(im[0], "myapi/*");
+        assert_eq!(insts[0].config_path.as_deref(), Some("/path/config.yml"));
+        assert_eq!(insts[0].platform, None);
+    }
+}
