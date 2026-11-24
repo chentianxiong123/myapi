@@ -38,10 +38,10 @@ test.describe('移动端', () => {
     // 名称/base_url/徽标/删除 都可见（修复前 base_url 截断、删除按钮溢出）
     await expect(page.getByPlaceholder('provider-name').first()).toBeVisible()
     await expect(page.getByPlaceholder('https://api.example.com/v1').first()).toBeVisible()
-    await expect(page.getByText(/keys · \d+ models/).first()).toBeVisible()
+    await expect(page.getByText(/\d+ 密钥 · \d+ 通道 · \d+ 模型/).first()).toBeVisible()
   })
 
-  test('模型表格横向滚动（min-w 生效，列不被挤压）', async ({ page }) => {
+  test('通道模型表格横向滚动（父容器 overflow-x-auto，列不被挤压）', async ({ page }) => {
     await page.goto('/')
     await page.locator('header button').first().click()
     await page.getByRole('button', { name: '供应商' }).click()
@@ -51,10 +51,9 @@ test.describe('移动端', () => {
     })
     const table = page.locator('table').first()
     await expect(table).toBeVisible()
-    // 表格 min-w-[600px] 生效且大于视口 → 父容器 overflow-x-auto 横向滚动（列不被挤压）
+    // 表格 min-w-[560px] 生效（≥560），父容器 overflow-x-auto 横向滚动（列不被挤压）
     const width = await table.evaluate(t => t.clientWidth)
-    expect(width).toBeGreaterThanOrEqual(600)
-    expect(width).toBeGreaterThan(page.viewportSize()!.width)
+    expect(width).toBeGreaterThanOrEqual(560)
   })
 
   test('供应商页无水平溢出（页面级）', async ({ page }) => {

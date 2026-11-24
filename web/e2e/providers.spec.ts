@@ -22,23 +22,24 @@ test.describe('供应商页', () => {
     // 卡片头字段
     await expect(page.getByPlaceholder('provider-name').first()).toBeVisible()
     await expect(page.getByPlaceholder('https://api.example.com/v1').first()).toBeVisible()
-    // keys/models 徽标
-    await expect(page.getByText(/keys · \d+ models/).first()).toBeVisible()
+    // 密钥池/通道/模型 徽标（重构后：N 密钥 · N 通道 · N 模型）
+    await expect(page.getByText(/\d+ 密钥 · \d+ 通道 · \d+ 模型/).first()).toBeVisible()
   })
 
-  test('展开供应商 → API Keys + 协议 tab + 模型表格', async ({ page }) => {
+  test('展开供应商 → 密钥池 + 渠道代理 + 通道列表', async ({ page }) => {
     // 点第一张卡片头的展开箭头
     await page.getByPlaceholder('provider-name').first().evaluate(el => {
       const header = el.parentElement!
       header.querySelectorAll('button')[0].click()
     })
-    await expect(page.getByText('API Keys').first()).toBeVisible()
-    // 协议 tab（模型级协议分组）
-    await expect(page.getByText('协议（按模型分流）')).toBeVisible()
-    // 模型表格（Name/Alias/协议/类型）
-    await expect(page.getByText('Name（上游真实名）')).toBeVisible()
-    await expect(page.getByText('Alias（对外暴露，空=用name）')).toBeVisible()
-    await expect(page.getByText('类型')).toBeVisible()
+    await expect(page.getByText('密钥池').first()).toBeVisible()
+    await expect(page.getByText('渠道代理')).toBeVisible()
+    // 通道列表（一条通道 = 密钥×路径×模型映射）
+    await expect(page.getByText('通道').first()).toBeVisible()
+    await expect(page.getByText('模型映射').first()).toBeVisible()
+    // 通道内模型表格（Name/Alias/协议/类型）
+    await expect(page.getByText('Name（上游真实名）').first()).toBeVisible()
+    await expect(page.getByText('Alias（对外，空=用name）').first()).toBeVisible()
     // 模型类型列（学 9router kind）
     await expect(page.locator('select').filter({ has: page.locator('option', { hasText: '识图（vision）' }) }).first()).toBeVisible()
   })

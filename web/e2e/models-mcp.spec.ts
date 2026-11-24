@@ -11,23 +11,27 @@ test.describe('模型映射页', () => {
     await navTo(page, '模型')
   })
 
-  test('标题 + 添加模型按钮', async ({ page }) => {
-    await expect(page.getByText(/模型映射/)).toBeVisible()
-    await expect(page.getByRole('button', { name: /添加模型/ })).toBeVisible()
+  test('健康度标题（只读）', async ({ page }) => {
+    await expect(page.getByText(/模型健康度/)).toBeVisible()
+    // 模型页纯只读：无添加/保存按钮（配置全在供应商页）
+    await expect(page.getByRole('button', { name: /添加模型/ })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /^保存$/ })).toHaveCount(0)
   })
 
-  test('模型级路由展示（route + 带key/无key）', async ({ page }) => {
+  test('模型通道来源 + 被动健康（成功率/首字/命中比）', async ({ page }) => {
     // 等 mock 数据加载
     await expect(page.getByText('tavily/search').first()).toBeVisible()
     await expect(page.getByText('text-embedding-3-small').first()).toBeVisible()
-    // 带key / 无key 徽标（用户刁钻场景：无 key 请求）
-    await expect(page.getByText('带key').first()).toBeVisible()
-    await expect(page.getByText('无key').first()).toBeVisible()
+    // 被动健康指标标签（学 LiteLLM cooldown：非主动探测）
+    await expect(page.getByText('成功率').first()).toBeVisible()
+    await expect(page.getByText('首字').first()).toBeVisible()
+    await expect(page.getByText('请求数').first()).toBeVisible()
   })
 
-  test('模型类型筛选（全部/chat/search/embedding）', async ({ page }) => {
-    // 类型标签展示（webSearch 青色徽标）
-    await expect(page.getByText('webSearch').first()).toBeVisible()
+  test('模型类型标签（chat/search/embedding）', async ({ page }) => {
+    // 类型标签展示（中文：webSearch→搜索，embedding→嵌入）
+    await expect(page.getByText('搜索').first()).toBeVisible()
+    await expect(page.getByText('嵌入').first()).toBeVisible()
   })
 })
 
