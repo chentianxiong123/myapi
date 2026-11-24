@@ -88,6 +88,9 @@ pub struct GatewayConfig {
     /// 路由策略（延迟感知/权重/随机/最闲）
     #[serde(default)]
     pub routing: RoutingConfig,
+    /// 超时（流式首字/非流式，学 cc-switch）
+    #[serde(default)]
+    pub timeout: TimeoutConfig,
 }
 
 fn def_listen() -> u16 { 8380 }
@@ -335,10 +338,35 @@ pub enum RoutingStrategy {
 pub struct RoutingConfig {
     #[serde(default)]
     pub strategy: RoutingStrategy,
+    /// Auto 模式开关（model=auto 时才生效）
+    #[serde(default = "def_auto_enabled")]
+    pub auto_mode_enabled: bool,
 }
+fn def_auto_enabled() -> bool { true }
 impl Default for RoutingConfig {
     fn default() -> Self {
-        Self { strategy: RoutingStrategy::default() }
+        Self { strategy: RoutingStrategy::default(), auto_mode_enabled: def_auto_enabled() }
+    }
+}
+
+/// 超时配置（学 cc-switch 流式/非流式分开）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeoutConfig {
+    /// 流式首字超时秒（TTFT 上限）
+    #[serde(default = "def_stream_first_byte")]
+    pub streaming_first_byte: u64,
+    /// 非流式总超时秒
+    #[serde(default = "def_non_streaming")]
+    pub non_streaming: u64,
+}
+fn def_stream_first_byte() -> u64 { 30 }
+fn def_non_streaming() -> u64 { 120 }
+impl Default for TimeoutConfig {
+    fn default() -> Self {
+        Self {
+            streaming_first_byte: def_stream_first_byte(),
+            non_streaming: def_non_streaming(),
+        }
     }
 }
 
@@ -665,8 +693,8 @@ pub async fn forward_chat(
     let requested_model = payload.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let pin_key = session_key(&payload, auth_header);
 
-    // Auto 模式：model=auto → 聚合所有可用模型按 capability+延迟排序，逐个试，失败 fallback 下一个
-    if requested_model == "auto" {
+    // Auto 模式：model=auto 且开启 auto_mode → 聚合所有可用模型按 capability+延迟排序，逐个试，失败 fallback 下一个
+    if requested_model == "auto" && config.routing.auto_mode_enabled {
         let candidates = auto_candidates(&config, &payload, health);
         if candidates.is_empty() {
             return error_response(404, "auto: 无可用模型");
@@ -724,7 +752,11 @@ async fn forward_one(
     let base = selected.provider.base_url.trim_end_matches('/');
     let url = format!("{}/chat/completions", base);
 
-    let client = reqwest::Client::builder().build().map_err(|e| format!("client 构造失败: {}", e))?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(config.timeout.streaming_first_byte))
+        .timeout(std::time::Duration::from_secs(config.timeout.non_streaming))
+        .build()
+        .map_err(|e| format!("client 构造失败: {}", e))?;
     let mut req = client.post(&url)
         .header("Authorization", format!("Bearer {}", selected.api_key))
         .header("Content-Type", "application/json");
@@ -1091,7 +1123,7 @@ mod tests {
 
     fn two_chan_cfg(strategy: RoutingStrategy) -> GatewayConfig {
         let mut cfg = GatewayConfig::default();
-        cfg.routing = RoutingConfig { strategy };
+        cfg.routing = RoutingConfig { strategy, auto_mode_enabled: true };
         cfg.sticky = StickyConfig { enabled: false, ttl_seconds: 300 };
         cfg.providers.push(Provider {
             name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
