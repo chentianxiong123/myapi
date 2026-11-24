@@ -585,7 +585,7 @@ pub fn select_channel(
 }
 
 /// 解析通道实际用的 key：key_name 指定 → 池里找同名；否则用第一个（主）
-fn resolve_key(provider: &Provider, channel: &Channel) -> Option<String> {
+pub fn resolve_key(provider: &Provider, channel: &Channel) -> Option<String> {
     if let Some(kn) = &channel.key_name {
         provider.keys.iter()
             .find(|k| &k.name == kn)
@@ -1075,7 +1075,56 @@ pub fn list_models(config: &GatewayConfig) -> Vec<serde_json::Value> {
     out
 }
 
-// ==================== 单元测试（熔断状态机，全 mock 不调上游）====================
+/// 主动健康探测（学 LiteLLM /health 主动 ping deployment）：轻量 GET {base_url}/models
+/// 不花 token，只探通道上游可达性。返回每通道 live/dead + 延迟 + HTTP status。
+pub async fn probe_upstream(root: &std::path::Path) -> Vec<serde_json::Value> {
+    let config = load_config(root);
+    let client = match reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let mut out = Vec::new();
+    for p in &config.providers {
+        if p.disabled {
+            continue;
+        }
+        let base = p.base_url.trim_end_matches('/');
+        let url = format!("{}/models", base);
+        for c in &p.channels {
+            let api_key = resolve_key(p, c).unwrap_or_default();
+            let start = std::time::Instant::now();
+            let mut req = client.get(&url).header("Authorization", format!("Bearer {}", api_key));
+            for (k, v) in &p.headers {
+                req = req.header(k.as_str(), v.as_str());
+            }
+            let (live, status_code, err) = match req.send().await {
+                Ok(r) => {
+                    let sc = r.status().as_u16();
+                    // 401/403 说明上游活着（只是 key 问题）；2xx/429 都算可达
+                    let ok = sc < 500;
+                    (ok, sc, String::new())
+                }
+                Err(e) => (false, 0, e.to_string()),
+            };
+            let latency = start.elapsed().as_millis() as u64;
+            out.push(serde_json::json!({
+                "provider": p.name,
+                "channel": c.name,
+                "channel_id": c.id,
+                "live": live,
+                "status": if live { "healthy" } else { "unreachable" },
+                "status_code": status_code,
+                "latency_ms": latency,
+                "error": err,
+            }));
+        }
+    }
+    out
+}
 #[cfg(test)]
 mod tests {
     use super::*;

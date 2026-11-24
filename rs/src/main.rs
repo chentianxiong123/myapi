@@ -194,6 +194,12 @@ async fn health() -> axum::Json<Value> {
     axum::Json(serde_json::json!({"status": "ok"}))
 }
 
+/// GET /v1/health/upstream：主动探测上游通道可达性（学 LiteLLM /health ping deployment）
+async fn gateway_health_upstream(State(s): State<S>) -> axum::Json<Value> {
+    let data = gateway::probe_upstream(&s.root).await;
+    axum::Json(serde_json::json!({"object": "list", "data": data}))
+}
+
 #[tokio::main]
 async fn main() {
     if maybe_cli(&std::env::args().skip(1).collect::<Vec<_>>()).await { return; }
@@ -239,6 +245,7 @@ async fn main() {
         .route("/v1/logs", get(gateway_logs))
         .route("/v1/stats", get(gateway_stats))
         .route("/health", get(health))
+        .route("/v1/health/upstream", get(gateway_health_upstream))
         .fallback_service(ServeDir::new(root().join("web").join("static")))
         .layer(CorsLayer::permissive()) // 跨域：前端/浏览器调网关（个人网关内网用，permissive）
         .with_state(state);
