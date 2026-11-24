@@ -130,7 +130,7 @@ impl Adapter for OmpAdapter {
             let ck = YV::String(DEFAULT_PROVIDER_ID.into());
             if !pm.contains_key(&ck) { pm.insert(YV::String(DEFAULT_PROVIDER_ID.into()), YV::Mapping(Default::default())); }
             let c = pm.get_mut(&ck).unwrap().as_mapping_mut().unwrap();
-            c.insert(YV::String("name": DEFAULT_PROVIDER_ID.into()));
+            c.insert(YV::String("name".into()), YV::String(DEFAULT_PROVIDER_ID.into()));
             c.insert(YV::String("baseUrl".into()), YV::String(ir.base_url.clone()));
             c.insert(YV::String("api".into()), YV::String(if ir.api.is_empty() { "openai-completions".into() } else { ir.api.clone() }));
             c.insert(YV::String("apiKey".into()), YV::String(ir.api_key.clone()));
