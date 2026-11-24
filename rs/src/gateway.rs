@@ -47,6 +47,9 @@ pub struct ChannelModel {
     /// 对外别名（空=用 name）
     #[serde(default)]
     pub alias: Option<String>,
+    /// 硬能力（vision/pdf/audio，学 9router HARD_CAPS）；Auto 模式按请求需求匹配
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 /// 供应商：上游一个厂商（含密钥池 + 多条通道）
@@ -188,6 +191,76 @@ fn rand_range(max: u32) -> u32 {
     x ^= x >> 7;
     x ^= x << 17;
     (x % max as u64) as u32
+}
+
+// ==================== Auto 全自动路由（学 9router combo：capability 匹配 + fallback 链）====================
+
+/// Auto 候选项：某通道的某模型 + 上游真实名 + key
+#[derive(Debug, Clone)]
+pub struct AutoCandidate {
+    pub provider: Provider,
+    pub channel: Channel,
+    pub upstream_model: String,
+    pub api_key: String,
+    pub score: f64, // 排序分（延迟，越低越优先）
+}
+
+/// 检测请求需要的硬能力（vision：messages 里带 image_url；pdf：file）
+fn detect_required_caps(payload: &serde_json::Value) -> Vec<String> {
+    let mut caps = Vec::new();
+    if let Some(msgs) = payload.get("messages").and_then(|v| v.as_array()) {
+        for msg in msgs {
+            if let Some(content) = msg.get("content").and_then(|v| v.as_array()) {
+                for part in content {
+                    match part.get("type").and_then(|v| v.as_str()) {
+                        Some("image_url") => caps.push("vision".into()),
+                        Some("file") => caps.push("pdf".into()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    caps
+}
+
+/// Auto 模式：聚合所有可用通道的模型，硬能力匹配（缺 vision 不接带图请求），
+/// 按延迟升序排成 fallback 链（跳过熔断通道）。
+pub fn auto_candidates(
+    config: &GatewayConfig,
+    payload: &serde_json::Value,
+    health: &HealthMap,
+) -> Vec<AutoCandidate> {
+    let required = detect_required_caps(payload);
+    let hs = health.try_read().ok();
+    let cb = &config.circuit_breaker;
+    let mut out: Vec<AutoCandidate> = Vec::new();
+
+    for provider in &config.providers {
+        if provider.disabled { continue; }
+        for channel in &provider.channels {
+            for m in &channel.models {
+                // 硬能力匹配：请求需要的能力模型必须都有
+                let has_all = required.iter().all(|c| m.capabilities.iter().any(|mc| mc == c));
+                if !has_all { continue; }
+
+                let h_opt = hs.as_ref().and_then(|map| map.get(&channel.id));
+                let available = h_opt.map(|h| is_available(h, cb)).unwrap_or(true);
+                if !available { continue; }
+
+                let score = h_opt.map(avg_ttft_with_buffer).unwrap_or(NEUTRAL_LATENCY_SCORE);
+                out.push(AutoCandidate {
+                    provider: provider.clone(),
+                    channel: channel.clone(),
+                    upstream_model: m.name.clone(),
+                    api_key: resolve_key(provider, channel).unwrap_or_default(),
+                    score,
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));
+    out
 }
 
 /// 熔断器配置（学 cc-switch 三态机 + LiteLLM 失败率判定）
@@ -590,9 +663,34 @@ pub async fn forward_chat(
 ) -> axum::response::Response {
     let config = load_config(root);
     let requested_model = payload.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
-
-    // 1. 黏性选通道（session/key pin → TTL 内复用同通道，省 token）
     let pin_key = session_key(&payload, auth_header);
+
+    // Auto 模式：model=auto → 聚合所有可用模型按 capability+延迟排序，逐个试，失败 fallback 下一个
+    if requested_model == "auto" {
+        let candidates = auto_candidates(&config, &payload, health);
+        if candidates.is_empty() {
+            return error_response(404, "auto: 无可用模型");
+        }
+        let mut last_err = String::new();
+        for cand in &candidates {
+            let sel = SelectedChannel {
+                provider: cand.provider.clone(),
+                channel: cand.channel.clone(),
+                upstream_model: cand.upstream_model.clone(),
+                api_key: cand.api_key.clone(),
+            };
+            match forward_one(&config, health, &sel, &requested_model, &payload).await {
+                Ok(resp) => return resp,
+                Err(e) => {
+                    last_err = e;
+                    continue; // fallback 下一个
+                }
+            }
+        }
+        return error_response(502, &format!("auto: 所有候选失败, 最后错误: {}", last_err));
+    }
+
+    // 非 Auto：黏性选通道 → 转发
     let selected = match select_channel_sticky(&config, &requested_model, health, pins, pin_key.as_deref()) {
         Some(s) => s,
         None => {
@@ -604,66 +702,60 @@ pub async fn forward_chat(
             ).into_response();
         }
     };
+    forward_one(&config, health, &selected, &requested_model, &payload).await.unwrap_or_else(|e| error_response(502, &e))
+}
 
-    // 2. 把请求里的模型名换成上游真实名
+/// 转发到单个通道（Auto 和普通路由共用）：失败返回 Err(msg)，成功返回响应
+async fn forward_one(
+    config: &GatewayConfig,
+    health: &HealthMap,
+    selected: &SelectedChannel,
+    requested_model: &str,
+    payload: &serde_json::Value,
+) -> Result<axum::response::Response, String> {
+    // 把请求里的模型名换成上游真实名
     let mut upstream_payload = payload.clone();
     if let Some(obj) = upstream_payload.as_object_mut() {
         obj.insert("model".into(), serde_json::Value::String(selected.upstream_model.clone()));
     }
     let is_stream = payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    // 3. 构造上游 URL（base_url + /chat/completions）
+    // 构造上游 URL（base_url + /chat/completions）
     let base = selected.provider.base_url.trim_end_matches('/');
     let url = format!("{}/chat/completions", base);
 
-    // 4. 构造 reqwest 客户端（TODO: 通道代理 path / provider.proxy）
-    let client = match reqwest::Client::builder().build() {
-        Ok(c) => c,
-        Err(e) => return error_response(500, &format!("client 构造失败: {}", e)),
-    };
-
+    let client = reqwest::Client::builder().build().map_err(|e| format!("client 构造失败: {}", e))?;
     let mut req = client.post(&url)
         .header("Authorization", format!("Bearer {}", selected.api_key))
         .header("Content-Type", "application/json");
-    // 供应商自定义 headers
     for (k, v) in &selected.provider.headers {
         req = req.header(k.as_str(), v.as_str());
     }
 
     let start = std::time::Instant::now();
     let cb = &config.circuit_breaker;
-    // 单部署保护：该模型只有一条通道时，熔断降级（LiteLLM single_deployment）
-    let total_channels: usize = config.providers.iter()
-        .filter(|p| !p.disabled)
-        .flat_map(|p| p.channels.iter())
-        .filter(|c| c.models.iter().any(|m| {
-            let ext = m.alias.as_deref().unwrap_or(&m.name);
-            ext == requested_model || m.name == requested_model
-        }))
-        .count();
-    let is_single = total_channels <= 1;
     let resp = match req.json(&upstream_payload).send().await {
         Ok(r) => r,
         Err(e) => {
-            record_outcome(health, &selected.channel.id, false, 0, cb, is_single).await;
-            return error_response(502, &format!("上游请求失败: {}", e));
+            record_outcome(health, &selected.channel.id, false, 0, cb, false).await;
+            return Err(format!("上游请求失败: {}", e));
         }
     };
     let ttft = start.elapsed().as_millis() as u64;
     let status = resp.status();
     let ok = status.is_success();
-    record_outcome(health, &selected.channel.id, ok, ttft, cb, is_single).await;
+    record_outcome(health, &selected.channel.id, ok, ttft, cb, false).await;
 
-    // 5. 回传（流式透传字节流 / 非流式回 JSON）
+    // 回传（流式透传字节流 / 非流式回 JSON）
     let upstream_headers = resp.headers().clone();
     let mut out = axum::response::Response::builder().status(status);
-    // 透传 content-type（SSE 必须保留 text/event-stream）
     if let Some(ct) = upstream_headers.get("content-type") {
         out = out.header("content-type", ct);
     }
     let body_bytes = resp.bytes().await.unwrap_or_default();
-    let _ = is_stream; // 流式透传已在 body 层面处理（上游回什么我们回什么）
-    out.body(axum::body::Body::from(body_bytes)).unwrap_or_else(|_| error_response(500, "回传失败"))
+    let _ = is_stream;
+    out.body(axum::body::Body::from(body_bytes))
+        .map_err(|e| format!("回传失败: {}", e))
 }
 
 fn error_response(code: u16, msg: &str) -> axum::response::Response {
@@ -831,7 +923,7 @@ mod tests {
                 name: "c1".into(),
                 path: None,
                 key_name: None,
-                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()) }],
+                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }],
                 weight: 1,
             }],
             proxy: String::new(),
@@ -856,9 +948,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()) }], weight: 1 },
+                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
                 Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()) }], weight: 1 },
+                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
             ],
             proxy: String::new(),
         });
@@ -883,9 +975,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()) }], weight: 1 },
+                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
                 Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()) }], weight: 1 },
+                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
             ],
             proxy: String::new(),
         });
@@ -913,7 +1005,7 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()) }], weight: 1 }],
+                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 }],
             proxy: String::new(),
         });
         let h = health_map();
@@ -933,7 +1025,7 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()) }], weight: 1 }],
+                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 }],
             proxy: String::new(),
         });
         let h = health_map();
@@ -963,9 +1055,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "slow".into(), name: "slow".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()) }], weight: 1 },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
                 Channel { id: "fast".into(), name: "fast".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()) }], weight: 1 },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
             ],
             proxy: String::new(),
         });
@@ -1007,9 +1099,9 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()) }], weight: 1 },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
                 Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()) }], weight: 1 },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1 },
             ],
             proxy: String::new(),
         });
@@ -1054,5 +1146,85 @@ mod tests {
             let id = select_channel(&cfg, "my-model", &h).unwrap().channel.id;
             assert!(id == "ch1" || id == "ch2");
         }
+    }
+
+    // ---- Auto 模式测试（capability 匹配 + fallback 链）----
+
+    #[tokio::test]
+    async fn auto_filters_by_capability() {
+        let mut cfg = GatewayConfig::default();
+        cfg.providers.push(Provider {
+            name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![Channel {
+                id: "ch-text".into(), name: "text".into(), path: None, key_name: None,
+                models: vec![ChannelModel { name: "text-only".into(), alias: None, capabilities: vec![] }],
+                weight: 1,
+            }],
+            proxy: String::new(),
+        });
+        let h = health_map();
+        // 带图请求需要 vision，text-only 没该能力 → 应过滤掉
+        let payload = serde_json::json!({"messages":[{"role":"user","content":[
+            {"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"x"}}]}]});
+        let cands = auto_candidates(&cfg, &payload, &h);
+        assert!(cands.is_empty(), "无 vision 能力应被过滤");
+    }
+
+    #[tokio::test]
+    async fn auto_matches_vision_and_sorts_by_latency() {
+        let mut cfg = GatewayConfig::default();
+        cfg.providers.push(Provider {
+            name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![
+                Channel { id: "ch-slow".into(), name: "slow".into(), path: None, key_name: None,
+                    models: vec![ChannelModel { name: "m-slow".into(), alias: None, capabilities: vec!["vision".into()] }],
+                    weight: 1 },
+                Channel { id: "ch-fast".into(), name: "fast".into(), path: None, key_name: None,
+                    models: vec![ChannelModel { name: "m-fast".into(), alias: None, capabilities: vec!["vision".into()] }],
+                    weight: 1 },
+            ],
+            proxy: String::new(),
+        });
+        let h = health_map();
+        // fast 200ms, slow 800ms
+        for _ in 0..5 {
+            record_outcome(&h, "ch-slow", true, 800, &cfg.circuit_breaker, false).await;
+            record_outcome(&h, "ch-fast", true, 200, &cfg.circuit_breaker, false).await;
+        }
+        // 带图请求 → 两个都有 vision，按延迟排 fast 优先
+        let payload = serde_json::json!({"messages":[{"role":"user","content":[
+            {"type":"image_url","image_url":{"url":"x"}}]}]});
+        let cands = auto_candidates(&cfg, &payload, &h);
+        assert_eq!(cands.len(), 2);
+        assert_eq!(cands[0].channel.id, "ch-fast", "延迟最低应排第一");
+    }
+
+    #[tokio::test]
+    async fn auto_skips_open_channel() {
+        let mut cfg = GatewayConfig::default();
+        cfg.providers.push(Provider {
+            name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![Channel {
+                id: "ch-open".into(), name: "open".into(), path: None, key_name: None,
+                models: vec![ChannelModel { name: "m".into(), alias: None, capabilities: vec![] }],
+                weight: 1,
+            }],
+            proxy: String::new(),
+        });
+        let h = health_map();
+        // ch-open 连续失败 5 次 → open（未超恢复时间）
+        for _ in 0..5 {
+            record_outcome(&h, "ch-open", false, 0, &cfg.circuit_breaker, false).await;
+        }
+        // auto 应跳过熔断通道
+        let payload = serde_json::json!({"messages":[{"role":"user","content":"hi"}]});
+        let cands = auto_candidates(&cfg, &payload, &h);
+        assert!(cands.is_empty(), "熔断通道应被跳过");
     }
 }
