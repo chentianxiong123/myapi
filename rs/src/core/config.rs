@@ -307,4 +307,53 @@ adapter_instances:
         assert_eq!(insts[0].config_path.as_deref(), Some("/path/config.yml"));
         assert_eq!(insts[0].platform, None);
     }
+
+    // ---- filter_models：include/exclude/通配 ----
+    fn m(id: &str) -> ModelIR {
+        ModelIR { id: id.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn filter_models_include_exact_and_suffix() {
+        let models = vec![m("gpt-4"), m("claude-3"), m("myapi/x")];
+        // include 精确 + 后缀匹配（无斜杠=ends_with）
+        let kept = filter_models(models, &["gpt-4".to_string(), "3".to_string()], &[]);
+        let ids: Vec<&str> = kept.iter().map(|x| x.id.as_str()).collect();
+        assert!(ids.contains(&"gpt-4"));
+        assert!(ids.contains(&"claude-3"), "后缀 3 匹配 claude-3");
+        assert!(!ids.contains(&"myapi/x"));
+    }
+
+    #[test]
+    fn filter_models_include_prefix_with_slash() {
+        let models = vec![m("myapi/x"), m("myapi/y"), m("other")];
+        // include 带斜杠=前缀匹配
+        let kept = filter_models(models, &["myapi/".to_string()], &[]);
+        let ids: Vec<&str> = kept.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"myapi/x") && ids.contains(&"myapi/y"));
+    }
+
+    #[test]
+    fn filter_models_exclude_wildcard() {
+        let models = vec![m("gpt-4"), m("gpt-3"), m("claude")];
+        let kept = filter_models(models, &[], &["gpt-*".to_string()]);
+        let ids: Vec<&str> = kept.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(ids, vec!["claude"], "exclude 通配 gpt-* 应剔除 gpt-4/3");
+    }
+
+    #[test]
+    fn filter_models_no_include_keeps_all_minus_exclude() {
+        let models = vec![m("a"), m("b"), m("c")];
+        let kept = filter_models(models, &[], &["b".to_string()]);
+        let ids: Vec<&str> = kept.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn wildcard_match_basic() {
+        assert!(wildcard_match("gpt-4", "gpt-*"));
+        assert!(!wildcard_match("claude", "gpt-*"));
+        assert!(wildcard_match("exact", "exact"));
+    }
 }
