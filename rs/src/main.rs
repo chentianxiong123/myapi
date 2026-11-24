@@ -32,6 +32,53 @@ struct S {
 
 fn root() -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")) }
 
+/// gateway.yaml 路径（网关配置，热加载：网关每请求重读）
+fn gateway_yaml() -> PathBuf { root().join("config").join("gateway.yaml") }
+
+/// 读 gateway.yaml 某一段（providers/routing/proxypools…），缺段返回空
+fn read_gateway_section(section: &str) -> Value {
+    let doc = api::read_yaml_json(&gateway_yaml());
+    doc.get(section).cloned().unwrap_or(Value::Null)
+}
+
+/// 写 gateway.yaml 某一段（保留其他段）
+fn write_gateway_section(section: &str, val: Value) -> std::io::Result<()> {
+    let mut doc = api::read_yaml_json(&gateway_yaml());
+    if !doc.is_object() {
+        doc = serde_json::json!({});
+    }
+    if let Some(obj) = doc.as_object_mut() {
+        obj.insert(section.to_string(), val);
+    }
+    api::write_yaml_json(&gateway_yaml(), &doc)
+}
+
+/// ---- 网关配置：供应商 / 路由 / 代理池（读写 gateway.yaml，网关热加载即时生效）----
+/// GET/POST 通用：段名 → handler。前端 Providers/Routing/ProxyPools 页真实数据源。
+macro_rules! gateway_section_handler {
+    ($get:ident, $post:ident, $section:literal) => {
+        async fn $get() -> axum::Json<Value> {
+            let v = read_gateway_section($section);
+            let arr = if v.is_null() { Value::Array(vec![]) } else { v };
+            axum::Json(serde_json::json!({ $section: arr }))
+        }
+        async fn $post(Json(payload): Json<Value>) -> axum::response::Response {
+            let val = payload.get($section).cloned().unwrap_or(Value::Null);
+            if val.is_null() {
+                return axum::Json(serde_json::json!({"ok": false, "error": format!("缺 {} 段", $section)})).into_response();
+            }
+            match write_gateway_section($section, val) {
+                Ok(_) => axum::Json(serde_json::json!({"ok": true})).into_response(),
+                Err(e) => axum::Json(serde_json::json!({"ok": false, "error": e.to_string()})).into_response(),
+            }
+        }
+    };
+}
+
+gateway_section_handler!(get_providers, post_providers, "providers");
+gateway_section_handler!(get_routing, post_routing, "routing");
+gateway_section_handler!(get_proxypools, post_proxypools, "proxy_pools");
+
 // ---- GET handlers ----
 async fn get_index(State(_s): State<S>) -> axum::response::Response {
     let p = root().join("web").join("static").join("index.html");
@@ -215,6 +262,10 @@ async fn main() {
     }
     let app = Router::new()
         .route("/api/config", get(get_config).post(post_config))
+        // ---- 网关配置：读写 gateway.yaml（热加载即时生效）----
+        .route("/api/providers", get(get_providers).post(post_providers))
+        .route("/api/routing", get(get_routing).post(post_routing))
+        .route("/api/proxypools", get(get_proxypools).post(post_proxypools))
         .route("/api/adapters", get(|| async { axum::Json(serde_json::json!({"ok": true, "names": api::get_adapters_info().get("names").cloned().unwrap_or_default(), "hosts": api::get_adapters_info().get("hosts").cloned().unwrap_or_default(), "adapter_instances": api::get_adapters_info().get("adapter_instances").cloned().unwrap_or_default(), "targets": api::get_adapters_info().get("targets").cloned().unwrap_or_default(), "strategies": api::get_adapters_info().get("strategies").cloned().unwrap_or_default()})) }))
         .route("/api/models", get(|| async { axum::Json(api::get_models().await) }))
         .route("/api/nodes", get(|| async { axum::Json(api::get_nodes().await) }))
