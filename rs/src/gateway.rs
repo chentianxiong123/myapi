@@ -778,16 +778,36 @@ async fn forward_one(
     let ok = status.is_success();
     record_outcome(health, &selected.channel.id, ok, ttft, cb, false).await;
 
-    // 回传（流式透传字节流 / 非流式回 JSON）
+    // 回传（真流式：SSE 逐 chunk 透传；非流式回整包）
     let upstream_headers = resp.headers().clone();
+    let is_sse = upstream_headers.get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("text/event-stream"))
+        .unwrap_or(false) || is_stream;
+
     let mut out = axum::response::Response::builder().status(status);
     if let Some(ct) = upstream_headers.get("content-type") {
         out = out.header("content-type", ct);
     }
-    let body_bytes = resp.bytes().await.unwrap_or_default();
-    let _ = is_stream;
-    out.body(axum::body::Body::from(body_bytes))
-        .map_err(|e| format!("回传失败: {}", e))
+    // 透传上游关键 header
+    for hk in ["x-request-id", "openai-organization", "ratelimit-remaining-requests"] {
+        if let Some(hv) = upstream_headers.get(hk) {
+            out = out.header(hk, hv);
+        }
+    }
+
+    if is_sse {
+        // 真流式：逐 chunk 转发字节流，客户端实时收到每个 SSE event
+        use axum::body::Body;
+        let stream = resp.bytes_stream();
+        let body = Body::from_stream(stream);
+        out.body(body).map_err(|e| format!("流式回传失败: {}", e))
+    } else {
+        // 非流式：整包
+        let body_bytes = resp.bytes().await.unwrap_or_default();
+        out.body(axum::body::Body::from(body_bytes))
+            .map_err(|e| format!("回传失败: {}", e))
+    }
 }
 
 fn error_response(code: u16, msg: &str) -> axum::response::Response {
