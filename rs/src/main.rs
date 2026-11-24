@@ -373,6 +373,22 @@ async fn fetch_upstream_models_handler(
     }
 }
 
+/// POST /api/channels/test：通道测试（学 new-api TestChannel）真发一个 chat 请求验证
+/// 入参 {provider, channel_id} → 用 gateway.yaml 的 test 配置（默认模型+测试对话）→ 返回 {ok, status, latency_ms, content/error}
+async fn test_channel_handler(
+    State(s): State<S>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let provider = body.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+    let channel_id = body.get("channel_id").and_then(|v| v.as_str()).unwrap_or("");
+    if provider.is_empty() || channel_id.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"ok": false, "error": "缺少 provider 或 channel_id"}))).into_response();
+    }
+    let result = gateway::test_channel(&s.root, provider, channel_id).await;
+    axum::Json(result).into_response()
+}
+
 /// 构建应用 Router（main 和集成测试共用；集成测试用 oneshot 真打端点）
 pub fn build_router(state: S) -> Router {
     Router::new()
@@ -380,6 +396,7 @@ pub fn build_router(state: S) -> Router {
         // ---- 网关配置：读写 gateway.yaml（热加载即时生效）----
         .route("/api/providers", get(get_providers).post(post_providers))
         .route("/api/providers/fetch-models", post(fetch_upstream_models_handler))
+        .route("/api/channels/test", post(test_channel_handler))
         .route("/api/routing", get(get_routing).post(post_routing))
         .route("/api/proxypools", get(get_proxypools).post(post_proxypools))
         .route("/api/mcp", get(get_mcp).put(put_mcp))
@@ -1487,6 +1504,76 @@ mod tests {
         let b = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
         let v: Value = serde_json::from_slice(&b).unwrap();
         assert_eq!(v["model"], "gpt-4o", "实际由备选模型 gpt-4o 服务");
+    }
+
+
+    // ==================== 通道测试真测：/api/channels/test 端到端 ====================
+
+    #[tokio::test]
+    async fn channel_test_endpoint_returns_ok_with_content() {
+        // 通道测试（学 new-api TestChannel）：真发 chat 请求，返回 ok+content
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "t", "choices": [{"message": {"role": "assistant", "content": "pong"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+            })))
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        let cfg = json!({
+            "listen": 0,
+            "test": {"default_model": "", "test_message": "ping", "max_tokens": 16},
+            "providers": [{
+                "name": "p", "base_url": format!("{}/v1", upstream.uri()),
+                "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk-up"}],
+                "channels": [{"id": "ch1", "name": "c", "key_name": "主",
+                              "models": [{"name": "gpt-test", "alias": ""}]}],
+            }],
+        });
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+
+        let app = build_router(S::new(dir.path().to_path_buf()));
+        let (st, j) = post(app, "/api/channels/test", json!({"provider": "p", "channel_id": "ch1"})).await;
+        assert_eq!(st, 200);
+        assert_eq!(j["ok"], true, "通道测试应成功: {j}");
+        assert_eq!(j["content"], "pong", "应解析出回复内容");
+        assert_eq!(j["model"], "gpt-test", "用通道第一个模型");
+        assert!(j["latency_ms"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn channel_test_endpoint_reports_upstream_error() {
+        // 通道测试：上游 401 → ok=false + error
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({"error": {"message": "bad key"}})))
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        let cfg = json!({
+            "listen": 0,
+            "test": {"default_model": "gpt-test", "test_message": "ping", "max_tokens": 16},
+            "providers": [{
+                "name": "p", "base_url": format!("{}/v1", upstream.uri()),
+                "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk-wrong"}],
+                "channels": [{"id": "ch1", "name": "c", "key_name": "主",
+                              "models": [{"name": "gpt-test", "alias": ""}]}],
+            }],
+        });
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+
+        let app = build_router(S::new(dir.path().to_path_buf()));
+        let (st, j) = post(app, "/api/channels/test", json!({"provider": "p", "channel_id": "ch1"})).await;
+        assert_eq!(st, 200); // 端点本身 200，测试结果在 body
+        assert_eq!(j["ok"], false, "上游 401 应报通道异常");
+        assert!(j["error"].as_str().is_some(), "应有错误信息");
     }
 
 }

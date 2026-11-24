@@ -211,6 +211,23 @@ export default function Providers() {
     }
   }
 
+  // 通道测试（学 new-api TestChannel）：真发一个 chat 请求验证通道，显示能否出 token
+  const [testingCh, setTestingCh] = useState<string | null>(null)
+  const [testResult, setTestResult] = useState<Record<string, any>>({})
+  async function testChannel(pidx: number, cidx: number) {
+    const ch = providers[pidx].channels[cidx]
+    const key = `${pidx}-${cidx}`
+    setTestingCh(key)
+    try {
+      const res = await postJSON<any>('/api/channels/test', { provider: providers[pidx].name, channel_id: ch.id })
+      setTestResult(prev => ({ ...prev, [key]: res }))
+    } catch (e: any) {
+      setTestResult(prev => ({ ...prev, [key]: { ok: false, error: e?.message || '测试失败' } }))
+    } finally {
+      setTestingCh(null)
+    }
+  }
+
   function addChannelModel(pidx: number, cidx: number, protocol: ModelProtocol) {
     const ps = [...providers]
     ps[pidx].channels[cidx].models.push({ name: '', alias: '', protocol })
@@ -449,10 +466,43 @@ export default function Providers() {
                               className="w-16 rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700"
                             />
                           </div>
-                          <button onClick={() => removeChannel(idx, cidx)} className="ml-auto text-red-500 hover:text-red-700">
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
+                          <div className="ml-auto flex items-center gap-2">
+                            <button
+                              onClick={() => testChannel(idx, cidx)}
+                              disabled={testingCh === `${idx}-${cidx}`}
+                              className="flex items-center gap-1 text-xs text-emerald-600 hover:text-emerald-700 disabled:opacity-50"
+                              title="真发一个测试请求验证通道"
+                            >
+                              <Zap className="h-3 w-3" />
+                              {testingCh === `${idx}-${cidx}` ? '测试中…' : '测试'}
+                            </button>
+                            <button onClick={() => removeChannel(idx, cidx)} className="text-red-500 hover:text-red-700">
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
                         </div>
+
+                        {/* 通道测试结果 */}
+                        {testResult[`${idx}-${cidx}`] && (() => {
+                          const r = testResult[`${idx}-${cidx}`]
+                          return (
+                            <div className={`mt-2 rounded border p-2 text-xs ${r.ok ? 'border-emerald-300 bg-emerald-50 dark:border-emerald-700 dark:bg-emerald-900/20' : 'border-red-300 bg-red-50 dark:border-red-700 dark:bg-red-900/20'}`}>
+                              <div className="flex items-center gap-2 font-medium">
+                                {r.ok ? (
+                                  <span className="text-emerald-600 dark:text-emerald-400">✓ 通道可用</span>
+                                ) : (
+                                  <span className="text-red-600 dark:text-red-400">✗ 通道异常</span>
+                                )}
+                                <span className="text-gray-400">HTTP {r.status} · {r.latency_ms}ms · 模型 {r.model}</span>
+                              </div>
+                              {r.ok && r.content ? (
+                                <p className="mt-1 truncate text-gray-600 dark:text-gray-300" title={r.content}>回复：{r.content}</p>
+                              ) : r.error ? (
+                                <p className="mt-1 text-red-500">{r.error}</p>
+                              ) : null}
+                            </div>
+                          )
+                        })()}
 
                         {/* 通道内模型映射 */}
                         <div className="mt-2">
