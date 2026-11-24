@@ -55,6 +55,22 @@ myapi 新版本：
   - 不依赖 CPA/new-api，完全自主
 ```
 
+### 迫切性：功耗 + 资源（实测 2026-11-24，meilan 手机）
+```
+动机：meilan 手机常驻功耗 0.7W → 1W（+40%），主因 = new-api + CPA 双进程叠加
+
+实测（meilan-phone1，2.7GB RAM 手机）：
+- new-api（PID 6006）        RSS ~95MB，VSZ 2.5GB，跑满一天+，偶发子进程冲到 113% CPU
+- cli-proxy-api（CPA，PID 4693）RSS ~72MB，CPU ~4%
+- 两个常驻进程叠加 → 基础功耗抬高，load average 高达 10.5（异常）
+
+myapi 价值（直接回应）：
+- 单个 Rust 进程替代 new-api + CPA → 一个轻量常驻服务
+- Rust + 零拷贝透传（无 GC、无 node runtime）→ RSS 目标 <10MB 级别
+- 网关 + 配置下发一体 → 不用为"路由"和"同步"跑两套
+→ 目标：把手机常驻功耗拉回 ~0.7W，释放内存 + 降负载
+```
+
 ---
 
 ## 核心功能
