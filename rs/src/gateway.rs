@@ -82,6 +82,9 @@ pub struct GatewayConfig {
     /// 黏性路由（省token，学 LiteLLM affinity）
     #[serde(default)]
     pub sticky: StickyConfig,
+    /// 路由策略（延迟感知/权重/随机/最闲）
+    #[serde(default)]
+    pub routing: RoutingConfig,
 }
 
 fn def_listen() -> u16 { 8380 }
@@ -101,6 +104,90 @@ fn avg_ttft_with_buffer(h: &ChannelHealth) -> f64 {
     let sum: f64 = h.ttft_window.iter().map(|&x| x as f64).sum();
     let avg = sum / h.ttft_window.len() as f64;
     avg * (1.0 + LATENCY_BUFFER_RATIO)
+}
+
+/// 按路由策略从可用候选里选一个（返回 candidates 的索引）。
+/// 先熔断过滤，全不可用则 KeepAll 兑底（index 0）。
+fn apply_strategy(
+    candidates: &[(&Provider, &Channel, &ChannelModel)],
+    hs: Option<&HashMap<String, ChannelHealth>>,
+    cb: &CircuitBreakerConfig,
+    strategy: &RoutingStrategy,
+) -> usize {
+    // 收集可用候选索引 + 健康度
+    let available: Vec<(usize, Option<&ChannelHealth>)> = candidates.iter().enumerate()
+        .map(|(i, (_, ch, _))| {
+            let h = hs.and_then(|m| m.get(&ch.id));
+            (i, h)
+        })
+        .filter(|(_, h)| h.map(|x| is_available(x, cb)).unwrap_or(true))
+        .collect();
+    if available.is_empty() {
+        return 0; // 全熔断 → KeepAll 兑底第一个
+    }
+    match strategy {
+        RoutingStrategy::LatencyBased => {
+            // 平均 TTFT 最低（buffer 防横跳）
+            available.iter()
+                .min_by(|a, b| {
+                    let sa = a.1.map(avg_ttft_with_buffer).unwrap_or(NEUTRAL_LATENCY_SCORE);
+                    let sb = b.1.map(avg_ttft_with_buffer).unwrap_or(NEUTRAL_LATENCY_SCORE);
+                    sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(i, _)| *i)
+                .unwrap_or(0)
+        }
+        RoutingStrategy::Weight => {
+            // 按权重加权随机（学 LiteLLM weights.rs）
+            let total: u32 = available.iter()
+                .map(|(i, _)| candidates[*i].1.weight)
+                .sum();
+            if total == 0 {
+                return available[0].0;
+            }
+            let mut pick = rand_range(total);
+            for (i, _) in &available {
+                let w = candidates[*i].1.weight;
+                if pick < w { return *i; }
+                pick -= w;
+            }
+            available[available.len() - 1].0
+        }
+        RoutingStrategy::SimpleShuffle => {
+            // 简单随机
+            let n = available.len();
+            available[rand_range(n as u32) as usize].0
+        }
+        RoutingStrategy::LeastBusy => {
+            // 最闲：总请求数最低（并发代理，暂用 total_requests）
+            available.iter()
+                .min_by(|a, b| {
+                    let ra = a.1.map(|h| h.total_requests).unwrap_or(0);
+                    let rb = b.1.map(|h| h.total_requests).unwrap_or(0);
+                    ra.cmp(&rb)
+                })
+                .map(|(i, _)| *i)
+                .unwrap_or(0)
+        }
+    }
+}
+
+/// 轻量随机数（避免引入 rand 依赖：系统时间纳秒 + 计数器混合）
+fn rand_range(max: u32) -> u32 {
+    if max <= 1 { return 0; }
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    // 简单 xorshift 混合
+    let mut x = nanos ^ n.wrapping_mul(0x9E3779B97F4A7C15);
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    (x % max as u64) as u32
 }
 
 /// 熔断器配置（学 cc-switch 三态机 + LiteLLM 失败率判定）
@@ -153,6 +240,32 @@ fn def_sticky_ttl() -> u64 { 300 }
 impl Default for StickyConfig {
     fn default() -> Self {
         Self { enabled: def_sticky_enabled(), ttl_seconds: def_sticky_ttl() }
+    }
+}
+
+/// 路由策略（可配置，学 LiteLLM routing_strategy）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RoutingStrategy {
+    /// 延迟感知（平均 TTFT 最低优先，默认）
+    #[default]
+    LatencyBased,
+    /// 权重（按 Channel.weight 加权随机）
+    Weight,
+    /// 随机（简单洗牌）
+    SimpleShuffle,
+    /// 最闲（并发最低，暂用总请求数代理）
+    LeastBusy,
+}
+
+/// 路由策略配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingConfig {
+    #[serde(default)]
+    pub strategy: RoutingStrategy,
+}
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self { strategy: RoutingStrategy::default() }
     }
 }
 
@@ -316,25 +429,9 @@ pub fn select_channel(
     }
     if candidates.is_empty() { return None; }
 
-    // 延迟感知选通道（学 LiteLLM lowest_latency）：可用通道里选平均 TTFT 最低的
-    // buffer 防横跳：分数 = avg_ttft * (1+buffer) 对比，延迟接近时不切
+    // 熔断过滤 + 按策略选通道（可配置：延迟感知/权重/随机/最闲）
     let hs = health_snapshot.as_deref();
-    let mut best_idx: Option<usize> = None;
-    let mut best_score: f64 = f64::MAX;
-    for (i, cand) in candidates.iter().enumerate() {
-        let h_opt = hs.and_then(|map| map.get(&cand.1.id));
-        // 熔断过滤：不可用则跳过
-        let available = h_opt.map(|h| is_available(h, cb)).unwrap_or(true);
-        if !available { continue; }
-        // 延迟分数：无记录=中性高分（给新通道机会但不优先）
-        let score = h_opt.map(avg_ttft_with_buffer).unwrap_or(NEUTRAL_LATENCY_SCORE);
-        if score < best_score {
-            best_score = score;
-            best_idx = Some(i);
-        }
-    }
-    // 全熔断 → 兼底取第一个（LiteLLM when_all_unhealthy: keep-all）
-    let idx = best_idx.unwrap_or(0);
+    let idx = apply_strategy(&candidates, hs, cb, &config.routing.strategy);
     let (provider, channel, m) = candidates[idx];
     let api_key = resolve_key(provider, channel).unwrap_or_default();
     Some(SelectedChannel {
@@ -896,5 +993,66 @@ mod tests {
         assert_eq!(hc.ttft_window.len(), LATENCY_WINDOW_SIZE, "窗口应封顶 10");
         // 最近 10 个是 i=10..19 → ttft 100..190
         assert_eq!(hc.ttft_window.first(), Some(&100), "窗口应是最 recent 的 10 个");
+    }
+
+    // ---- 可配置策略测试 ----
+
+    fn two_chan_cfg(strategy: RoutingStrategy) -> GatewayConfig {
+        let mut cfg = GatewayConfig::default();
+        cfg.routing = RoutingConfig { strategy };
+        cfg.sticky = StickyConfig { enabled: false, ttl_seconds: 300 };
+        cfg.providers.push(Provider {
+            name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![
+                Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()) }], weight: 1 },
+                Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()) }], weight: 1 },
+            ],
+            proxy: String::new(),
+        });
+        cfg
+    }
+
+    #[tokio::test]
+    async fn strategy_least_busy_picks_fewer_requests() {
+        let cfg = two_chan_cfg(RoutingStrategy::LeastBusy);
+        let h = health_map();
+        // ch1 已经接了 100 单，ch2 只有 1 单
+        for _ in 0..100 { record_outcome(&h, "ch1", true, 0, &cfg.circuit_breaker, false).await; }
+        record_outcome(&h, "ch2", true, 0, &cfg.circuit_breaker, false).await;
+        // 最闲策略应选 ch2
+        let sel = select_channel(&cfg, "my-model", &h);
+        assert_eq!(sel.unwrap().channel.id, "ch2", "最闲应选请求数最低的");
+    }
+
+    #[tokio::test]
+    async fn strategy_weight_skews_to_heavy() {
+        let mut cfg = two_chan_cfg(RoutingStrategy::Weight);
+        // ch1 权重 9，ch2 权重 1
+        cfg.providers[0].channels[0].weight = 9;
+        cfg.providers[0].channels[1].weight = 1;
+        let h = health_map();
+        // 跑 200 次，权重高的应明显多（统计断言，非精确）
+        let mut ch1_count = 0;
+        for _ in 0..200 {
+            if select_channel(&cfg, "my-model", &h).unwrap().channel.id == "ch1" {
+                ch1_count += 1;
+            }
+        }
+        assert!(ch1_count > 120, "权重 9:1，ch1 应显著多（实际 {ch1_count}/200）");
+    }
+
+    #[tokio::test]
+    async fn strategy_shuffle_always_valid() {
+        let cfg = two_chan_cfg(RoutingStrategy::SimpleShuffle);
+        let h = health_map();
+        // 随机策略每次都应返回合法通道（不 panic、是两个之一）
+        for _ in 0..50 {
+            let id = select_channel(&cfg, "my-model", &h).unwrap().channel.id;
+            assert!(id == "ch1" || id == "ch2");
+        }
     }
 }
