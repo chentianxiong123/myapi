@@ -986,21 +986,41 @@ async fn forward_one(
 
     if is_sse {
         // 真流式：逐 chunk 转发字节流，客户端实时收到每个 SSE event
+        // 同时用 SseUsageTap 扫描 data: 行抓 usage token，流结束后补记完整日志
         use axum::body::Body;
-        // 流式日志（token 解析需聚合 SSE，先记 TTFT/状态）
-        crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
-            model: requested_model.into(),
-            provider: selected.provider.name.clone(),
-            channel: selected.channel.name.clone(),
-            status: status.as_u16(),
-            latency_ms: start.elapsed().as_millis() as u64,
-            ttft_ms: ttft,
-            input_tokens: None,
-            output_tokens: None,
-            error: if ok { None } else { Some(format!("HTTP {}", status.as_u16())) },
-        }).await;
+        // 日志延到流结束：建 oneshot channel，tap 流完时把 usage 发给后台任务补记
+        let (usage_tx, usage_rx) = tokio::sync::oneshot::channel::<(Option<i64>, Option<i64>)>();
         let stream = resp.bytes_stream();
-        let body = Body::from_stream(stream);
+        let tap = SseUsageTap {
+            inner: Box::pin(stream),
+            buf: Vec::new(),
+            usage: (None, None),
+            usage_tx: Some(usage_tx),
+        };
+        // 后台任务：等流结束后拿 usage token，补一条带 token 的完整日志
+        let log_root = root.to_path_buf();
+        let log_model = requested_model.to_string();
+        let log_provider = selected.provider.name.clone();
+        let log_channel = selected.channel.name.clone();
+        let log_status = status.as_u16();
+        let log_latency = start.elapsed().as_millis() as u64;
+        let log_error = if ok { None } else { Some(format!("HTTP {}", status.as_u16())) };
+        tokio::spawn(async move {
+            // 等流结束（tap drop / 发送端关闭时 rx 得 None）
+            let (in_tok, out_tok) = usage_rx.await.unwrap_or((None, None));
+            crate::gateway_logs::log_request(log_root, crate::gateway_logs::LogEntry {
+                model: log_model,
+                provider: log_provider,
+                channel: log_channel,
+                status: log_status,
+                latency_ms: log_latency,
+                ttft_ms: ttft,
+                input_tokens: in_tok,
+                output_tokens: out_tok,
+                error: log_error,
+            }).await;
+        });
+        let body = Body::from_stream(tap);
         out.body(body).map_err(|e| format!("流式回传失败: {}", e))
     } else {
         // 非流式：整包 + 解析 usage token 入日志
@@ -1032,6 +1052,78 @@ fn parse_usage(body: &[u8]) -> (Option<i64>, Option<i64>) {
     let get = |k: &str| u.and_then(|x| x.get(k)).and_then(|x| x.as_i64());
     (get("input_tokens").or_else(|| get("prompt_tokens")),
      get("output_tokens").or_else(|| get("completion_tokens")))
+}
+
+/// SSE 流式 usage 捕获：包装字节流，逐 chunk 透传客户端的同时累积缓冲，
+/// 扫描 `data:` 行里的 usage token（OpenAI 最后 chunk / Anthropic message_delta）。
+/// 流结束后把 (input_tokens, output_tokens) 通过 oneshot channel 发给后台任务补记日志。
+struct SseUsageTap {
+    inner: std::pin::Pin<Box<dyn futures_core::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
+    buf: Vec<u8>,
+    usage: (Option<i64>, Option<i64>),
+    usage_tx: Option<tokio::sync::oneshot::Sender<(Option<i64>, Option<i64>)>>,
+}
+
+impl futures_core::Stream for SseUsageTap {
+    type Item = Result<bytes::Bytes, std::io::Error>;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        match this.inner.as_mut().poll_next(cx) {
+            std::task::Poll::Ready(Some(Ok(chunk))) => {
+                // 透传给客户端，同时累积缓冲扫 usage
+                this.buf.extend_from_slice(&chunk);
+                if let Some(u) = sse_scan_usage(&this.buf) {
+                    this.usage = u;
+                }
+                // 只保留未完成的最后一行（防 buf 无限涨）
+                if let Some(pos) = this.buf.iter().rposition(|&b| b == b'\n') {
+                    this.buf.drain(..=pos);
+                }
+                std::task::Poll::Ready(Some(Ok(chunk)))
+            }
+            std::task::Poll::Ready(Some(Err(e))) => {
+                std::task::Poll::Ready(Some(Err(std::io::Error::other(e.to_string()))))
+            }
+            std::task::Poll::Ready(None) => {
+                // 流结束：把抓到的 usage 通过 channel 发给后台任务补记
+                if let Some(tx) = this.usage_tx.take() {
+                    let _ = tx.send(this.usage);
+                }
+                std::task::Poll::Ready(None)
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+/// 扫描 SSE 缓冲里所有 `data:` 行，取最后一个带 usage 的 JSON 的 token
+fn sse_scan_usage(buf: &[u8]) -> Option<(Option<i64>, Option<i64>)> {
+    let s = std::str::from_utf8(buf).ok()?;
+    let mut usage = None;
+    for line in s.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("data:") {
+            let d = rest.trim();
+            if d.is_empty() || d == "[DONE]" {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(d) {
+                // usage 可能在顶层（OpenAI），或 message_delta 的 usage 字段（Anthropic）
+                if let Some(u) = v.get("usage").filter(|x| !x.is_null()) {
+                    let get = |k: &str| u.get(k).and_then(|x| x.as_i64());
+                    let in_tok = get("prompt_tokens").or_else(|| get("input_tokens"));
+                    let out_tok = get("completion_tokens").or_else(|| get("output_tokens"));
+                    if in_tok.is_some() || out_tok.is_some() {
+                        usage = Some((in_tok, out_tok));
+                    }
+                }
+            }
+        }
+    }
+    usage
 }
 
 /// chat 端点包装（forward_generic + /chat/completions）

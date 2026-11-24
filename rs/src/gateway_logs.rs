@@ -16,7 +16,16 @@ pub fn db_path(root: &std::path::Path) -> PathBuf {
 
 /// 建表（幂等，启动时调一次）
 pub fn init_table(root: &std::path::Path) -> Result<(), String> {
-    let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
+    ensure_ready(root)
+}
+
+/// 确保 config 目录 + 表存在（幂等）。所有 db 入口先调，防「目录/表不存在静默失败」。
+fn ensure_ready(root: &std::path::Path) -> Result<(), String> {
+    let p = db_path(root);
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let conn = Connection::open(&p).map_err(|e| e.to_string())?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS request_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,6 +63,7 @@ pub struct LogEntry {
 /// 记录一条（异步非阻塞，日志失败仅 eprintln 不影响转发）
 pub async fn log_request(root: std::path::PathBuf, entry: LogEntry) {
     let res = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        ensure_ready(&root)?;
         let conn = Connection::open(db_path(&root)).map_err(|e| e.to_string())?;
         let ts = chrono_now_secs_iso();
         conn.execute(
@@ -74,6 +84,7 @@ pub async fn log_request(root: std::path::PathBuf, entry: LogEntry) {
 
 /// 查询最近 N 条（/v1/logs 用）
 pub fn query_recent(root: &std::path::Path, limit: usize) -> Result<Value, String> {
+    ensure_ready(root)?;
     let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT ts, model, provider, channel, status, latency_ms, ttft_ms, input_tokens, output_tokens, error
@@ -132,6 +143,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// 按通道聚合统计（/v1/stats 用，前端模型页/仪表盘真实数据源）
 /// 返回每通道：请求数/错误数/错误率/平均 TTFT/平均耗时/token 合计
 pub fn query_stats(root: &std::path::Path) -> Result<Value, String> {
+    ensure_ready(root)?;
     let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT channel,
@@ -176,6 +188,7 @@ pub fn query_stats(root: &std::path::Path) -> Result<Value, String> {
 
 /// 总览：/stats/summary（总请求数/成功/错误率/token/延迟/速度）
 pub fn query_summary(root: &std::path::Path) -> Result<Value, String> {
+    ensure_ready(root)?;
     let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
     let v = conn.query_row(
         "SELECT COUNT(*),
@@ -218,6 +231,7 @@ pub fn query_summary(root: &std::path::Path) -> Result<Value, String> {
 
 /// 按供应商聚合：/stats/providers（对齐前端 ProviderStat）
 pub fn query_provider_stats(root: &std::path::Path) -> Result<Value, String> {
+    ensure_ready(root)?;
     let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT provider,
@@ -258,6 +272,7 @@ pub fn query_provider_stats(root: &std::path::Path) -> Result<Value, String> {
 
 /// 趋势（按小时，近 N 小时）：/stats/trend?hours=24（对齐前端 TrendPoint）
 pub fn query_trend(root: &std::path::Path, hours: u32) -> Result<Value, String> {
+    ensure_ready(root)?;
     let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT substr(ts,1,13) AS hour,
@@ -290,6 +305,7 @@ pub fn query_trend(root: &std::path::Path, hours: u32) -> Result<Value, String> 
 
 /// 日聚合（近 N 天）：/stats/daily?days=30（对齐前端 DailyPoint）
 pub fn query_daily(root: &std::path::Path, days: u32) -> Result<Value, String> {
+    ensure_ready(root)?;
     let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT substr(ts,1,10) AS day,

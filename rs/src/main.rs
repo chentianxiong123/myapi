@@ -759,12 +759,13 @@ mod tests {
 
     #[tokio::test]
     async fn forward_streams_sse_passthrough() {
-        // 上游回 text/event-stream → 网关流式透传（content-type 保留 SSE）
+        // 上游回 text/event-stream → 网关流式透传 + 从最后 chunk 抓 usage token 入库
         let upstream = MockServer::start().await;
+        // 最后一个 data chunk 带 usage（OpenAI 格式 stream_options.include_usage）
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
             .respond_with(ResponseTemplate::new(200)
-                .set_body_string("data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}]}\n\ndata: [DONE]\n\n")
+                .set_body_string("data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20}}\n\ndata: [DONE]\n\n")
                 .insert_header("content-type", "text/event-stream"))
             .mount(&upstream).await;
 
@@ -781,6 +782,17 @@ mod tests {
         assert!(s.contains("data:"), "应透传 SSE data 行，实际: {s}");
         assert!(s.contains("[DONE]"));
         assert!(s.contains("he"), "SSE delta content 透传");
+        assert!(s.contains("prompt_tokens"), "usage chunk 也透传给客户端");
+
+        // 核心：流式 token 抓取——日志里应记上 usage（input=10, output=20）
+        // token 在流结束后由后台任务补记，稍等一下
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let logs = gateway_logs::query_recent(&dir.path(), 5).unwrap();
+        let data = logs.get("data").and_then(|v| v.as_array()).unwrap();
+        assert!(!data.is_empty(), "流式请求应记日志");
+        let entry = &data[0];
+        assert_eq!(entry.get("input_tokens").and_then(|v| v.as_i64()), Some(10), "流式 usage input_tokens 应入库");
+        assert_eq!(entry.get("output_tokens").and_then(|v| v.as_i64()), Some(20), "流式 usage output_tokens 应入库");
     }
 
 
