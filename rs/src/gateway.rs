@@ -91,6 +91,9 @@ pub struct GatewayConfig {
     /// 超时（流式首字/非流式，学 cc-switch）
     #[serde(default)]
     pub timeout: TimeoutConfig,
+    /// 下游鉴权（agent 调网关校验 Bearer key）
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 fn def_listen() -> u16 { 8380 }
@@ -371,6 +374,37 @@ impl Default for TimeoutConfig {
             streaming_first_byte: def_stream_first_byte(),
             non_streaming: def_non_streaming(),
         }
+    }
+}
+
+/// 下游鉴权配置（agent 调网关时校验 Bearer key，防裸奍）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthConfig {
+    /// 允许的下游 key 列表（空=不鉴权，本机内网可用；配了=严格校验 Bearer）
+    #[serde(default)]
+    pub api_keys: Vec<String>,
+}
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self { api_keys: Vec::new() }
+    }
+}
+
+/// 校验下游 Bearer key（api_keys 空=不鉴权内网可用；配了=严格校验）
+pub fn validate_auth(auth: &AuthConfig, auth_header: Option<&str>) -> Result<(), String> {
+    if auth.api_keys.is_empty() {
+        return Ok(()); // 未配 key → 不鉴权（本机/内网）
+    }
+    let token = auth_header
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .unwrap_or("");
+    if token.is_empty() {
+        return Err("缺少 Authorization Bearer key".into());
+    }
+    if auth.api_keys.iter().any(|k| k == token) {
+        Ok(())
+    } else {
+        Err("无效的 API key".into())
     }
 }
 
@@ -754,6 +788,13 @@ pub async fn forward_generic(
     upstream_path: &str,
 ) -> axum::response::Response {
     let config = load_config(root);
+    // 下游鉴权：校验 Bearer key（api_keys 配了才校验，空=内网不鉴权）
+    if let Err(e) = validate_auth(&config.auth, auth_header) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": {"message": e, "type": "authentication_error"}})),
+        ).into_response();
+    }
     let requested_model = payload.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let pin_key = session_key(&payload, auth_header);
 
@@ -1482,5 +1523,26 @@ mod tests {
         let cands = ordered_candidates(&cfg, "my-model", &h, None);
         assert_eq!(cands.len(), 1, "disabled provider 应被跳过");
         assert_eq!(cands[0].channel.id, "chOn");
+    }
+
+    // ---- 下游鉴权测试 ----
+
+    #[test]
+    fn auth_no_keys_allows_all() {
+        // api_keys 空 → 不鉴权（内网可用），任意 header 都放行
+        let auth = AuthConfig { api_keys: vec![] };
+        assert!(validate_auth(&auth, None).is_ok());
+        assert!(validate_auth(&auth, Some("Bearer anything")).is_ok());
+    }
+
+    #[test]
+    fn auth_configured_requires_valid_key() {
+        let auth = AuthConfig { api_keys: vec!["sk-secret".into()] };
+        // 无 header → 401
+        assert!(validate_auth(&auth, None).is_err());
+        // 错 key → 401
+        assert!(validate_auth(&auth, Some("Bearer wrong")).is_err());
+        // 对 key → 放行
+        assert!(validate_auth(&auth, Some("Bearer sk-secret")).is_ok());
     }
 }
