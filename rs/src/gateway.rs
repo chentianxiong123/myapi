@@ -1581,6 +1581,41 @@ pub fn list_models(config: &GatewayConfig) -> Vec<serde_json::Value> {
 
 /// 主动健康探测（学 LiteLLM /health 主动 ping deployment）：轻量 GET {base_url}/models
 /// 不花 token，只探通道上游可达性。返回每通道 live/dead + 延迟 + HTTP status。
+/// 拉取上游模型列表（学 new-api FetchUpstreamModels）：GET base_url/models，解析 OpenAI 格式
+/// 返回模型 id 列表（供面板自动填充，避免手填写错）
+pub async fn fetch_upstream_models(base_url: &str, api_key: &str, headers: &[(String, String)]) -> Result<Vec<String>, String> {
+    let base = base_url.trim_end_matches('/');
+    let url = format!("{}/models", base);
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("client 构造失败: {}", e))?;
+    let mut req = client.get(&url).header("Authorization", format!("Bearer {}", api_key));
+    for (k, v) in headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    let resp = req.send().await.map_err(|e| format!("请求上游失败: {}", e))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("上游返回 {}", status.as_u16()));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
+    // OpenAI 格式 {data: [{id: "gpt-4", ...}, ...]}；兼容 {models: [...]} / 裸数组
+    let ids: Vec<String> = if let Some(data) = body.get("data").and_then(|v| v.as_array()) {
+        data.iter().filter_map(|m| m.get("id").and_then(|x| x.as_str()).map(|s| s.to_string())).collect()
+    } else if let Some(models) = body.get("models").and_then(|v| v.as_array()) {
+        models.iter().filter_map(|m| {
+            m.get("id").or_else(|| m.get("name")).and_then(|x| x.as_str()).map(|s| s.to_string())
+        }).collect()
+    } else if let Some(arr) = body.as_array() {
+        arr.iter().filter_map(|m| m.get("id").and_then(|x| x.as_str()).map(|s| s.to_string())).collect()
+    } else {
+        vec![]
+    };
+    Ok(ids)
+}
+
 pub async fn probe_upstream(root: &std::path::Path) -> Vec<serde_json::Value> {
     let config = load_config(root);
     let client = match reqwest::Client::builder()

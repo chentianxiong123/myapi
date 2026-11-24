@@ -178,6 +178,39 @@ export default function Providers() {
   }
 
   // ---- 通道内的模型映射 ----
+  // 拉取上游模型列表（学 new-api FetchUpstreamModels）：GET 上游 /models → 填充模型映射（去重）
+  const [fetchingIdx, setFetchingIdx] = useState<{ p: number; c: number } | null>(null)
+  const [fetchMsg, setFetchMsg] = useState<string>('')
+  async function fetchUpstreamModels(pidx: number, cidx: number) {
+    const p = providers[pidx]
+    const apiKey = p.keys.find(k => k.name === (p.channels[cidx].key_name || p.keys[0]?.name))?.['api-key'] || p.keys[0]?.['api-key'] || ''
+    setFetchingIdx({ p: pidx, c: cidx })
+    setFetchMsg('')
+    try {
+      const res = await postJSON<{ ok: boolean; models?: string[]; error?: string }>('/api/providers/fetch-models', {
+        base_url: p.base_url,
+        api_key: apiKey,
+        headers: p.headers || {},
+      })
+      if (!res.ok || !res.models) {
+        setFetchMsg(res.error || '拉取失败')
+        return
+      }
+      const existing = new Set(providers[pidx].channels[cidx].models.map(m => m.name))
+      const added = res.models.filter(id => !existing.has(id))
+      if (added.length === 0) { setFetchMsg('无新模型'); return }
+      const newModels = added.map(id => ({ name: id, alias: '', protocol: 'openai_chat' as const }))
+      const next = [...providers]
+      next[pidx].channels[cidx].models = [...next[pidx].channels[cidx].models, ...newModels]
+      setProviders(next)
+      setFetchMsg(`+${added.length}`)
+    } catch (e: any) {
+      setFetchMsg(e?.message || '拉取失败')
+    } finally {
+      setFetchingIdx(null)
+    }
+  }
+
   function addChannelModel(pidx: number, cidx: number, protocol: ModelProtocol) {
     const ps = [...providers]
     ps[pidx].channels[cidx].models.push({ name: '', alias: '', protocol })
@@ -427,7 +460,22 @@ export default function Providers() {
                             <span className="flex items-center gap-1 text-xs font-medium text-gray-500">
                               <Layers className="h-3 w-3" />模型映射（{ch.models.length}）
                             </span>
-                            <button onClick={() => addChannelModel(idx, cidx, 'openai_chat')} className="text-xs text-blue-600 hover:text-blue-700">+ 添加</button>
+                            <div className="flex items-center gap-2">
+                              {p.base_url && !ch.models.some(m => m.kind === 'webSearch') && (
+                                <button
+                                  onClick={() => fetchUpstreamModels(idx, cidx)}
+                                  disabled={fetchingIdx?.p === idx && fetchingIdx?.c === cidx}
+                                  className="text-xs text-emerald-600 hover:text-emerald-700 disabled:opacity-50"
+                                  title="从上游 /models 拉取模型列表"
+                                >
+                                  {fetchingIdx?.p === idx && fetchingIdx?.c === cidx ? '拉取中…' : '↓ 拉取模型'}
+                                </button>
+                              )}
+                              {fetchMsg && fetchingIdx?.p === idx && fetchingIdx?.c === cidx && (
+                                <span className="text-xs text-gray-400">{fetchMsg}</span>
+                              )}
+                              <button onClick={() => addChannelModel(idx, cidx, 'openai_chat')} className="text-xs text-blue-600 hover:text-blue-700">+ 添加</button>
+                            </div>
                           </div>
                           <div className="overflow-x-auto">
                             <table className="w-full min-w-[560px] text-left text-xs">

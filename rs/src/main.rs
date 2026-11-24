@@ -351,12 +351,35 @@ async fn gateway_health_upstream(State(s): State<S>) -> axum::Json<Value> {
     axum::Json(serde_json::json!({"object": "list", "data": data}))
 }
 
+/// POST /api/providers/fetch-models：拉上游模型列表（学 new-api FetchUpstreamModels）
+/// 入参 {base_url, api_key, headers?} → GET 上游 /models → 返回 {models: [id...]}
+async fn fetch_upstream_models_handler(
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let base_url = body.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
+    let api_key = body.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
+    let headers: Vec<(String, String)> = body.get("headers")
+        .and_then(|v| v.as_object())
+        .map(|m| m.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
+        .unwrap_or_default();
+    if base_url.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"ok": false, "error": "缺少 base_url"}))).into_response();
+    }
+    match gateway::fetch_upstream_models(base_url, api_key, &headers).await {
+        Ok(models) => axum::Json(serde_json::json!({"ok": true, "models": models})).into_response(),
+        Err(e) => (axum::http::StatusCode::BAD_GATEWAY,
+            axum::Json(serde_json::json!({"ok": false, "error": e}))).into_response(),
+    }
+}
+
 /// 构建应用 Router（main 和集成测试共用；集成测试用 oneshot 真打端点）
 pub fn build_router(state: S) -> Router {
     Router::new()
         .route("/api/config", get(get_config).post(post_config))
         // ---- 网关配置：读写 gateway.yaml（热加载即时生效）----
         .route("/api/providers", get(get_providers).post(post_providers))
+        .route("/api/providers/fetch-models", post(fetch_upstream_models_handler))
         .route("/api/routing", get(get_routing).post(post_routing))
         .route("/api/proxypools", get(get_proxypools).post(post_proxypools))
         .route("/api/mcp", get(get_mcp).put(put_mcp))
