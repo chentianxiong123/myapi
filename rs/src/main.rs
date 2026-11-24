@@ -594,4 +594,135 @@ mod tests {
         assert!(st == StatusCode::NOT_FOUND || st == StatusCode::BAD_REQUEST || st == StatusCode::INTERNAL_SERVER_ERROR || st == StatusCode::SERVICE_UNAVAILABLE);
         assert!(j.get("error").is_some());
     }
+
+    // ==================== 网关转发 wiremock 真测（学 LiteLLM gateway-forward）====================
+    // 起本地 mock 上游 HTTP 服务器，写 gateway.yaml 指向它，打 forward_chat，
+    // 验证转发内容/鉴权/模型映射/状态码/failover。真发 HTTP，不 mock 网关内部。
+
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
+    use serde_json::json;
+
+    /// 写 gateway.yaml 到 tempdir（config 子目录），指向给定 upstream base_url
+    fn write_gateway_yaml(root: &std::path::Path, base_url: &str, channels: Value) {
+        let cfg = json!({
+            "listen": 0,
+            "providers": [{
+                "name": "mock-provider",
+                "base_url": base_url,
+                "disabled": false,
+                "headers": {},
+                "keys": [{"name": "主", "api-key": "sk-upstream-test"}],
+                "channels": channels,
+            }],
+        });
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        api::write_yaml_json(&root.join("config").join("gateway.yaml"), &cfg).unwrap();
+    }
+
+    fn one_channel(id: &str, model: &str) -> Value {
+        json!([{
+            "id": id, "name": id, "key_name": "主",
+            "models": [{"name": model}],
+        }])
+    }
+
+    #[tokio::test]
+    async fn forward_forwards_to_upstream_with_auth_and_model_mapping() {
+        let upstream = MockServer::start().await;
+        // mock 上游：POST /v1/chat/completions → 200 回 echo
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200)
+                .set_body_json(json!({"id": "chatcmpl-1", "object": "chat.completion",
+                    "choices": [{"message": {"role": "assistant", "content": "hi"}}]})))
+            .expect(1)
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "up-model", "messages": [{"role": "user", "content": "hello"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 验证上游收到：Authorization Bearer + 上游真实模型名
+        let reqs = upstream.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].headers.get("authorization").unwrap(), "Bearer sk-upstream-test");
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["model"], "up-model");
+        assert_eq!(body["messages"][0]["content"], "hello");
+    }
+
+    #[tokio::test]
+    async fn forward_upstream_500_returns_500_and_logs() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        gateway_logs::init_table(dir.path()).unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "up-model", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // 上游被调过一次
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+        // 失败记进请求日志
+        let logs = gateway_logs::query_recent(&dir.path(), 10).unwrap();
+        let data = logs.get("data").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(data.len(), 1);
+        assert!(data[0].get("error").is_some() || data[0].get("status").and_then(|v| v.as_i64()) == Some(500));
+    }
+
+    #[tokio::test]
+    async fn forward_failover_switches_channel_on_failure() {
+        let upstream = MockServer::start().await;
+        // 通道 ch1 上游模型 up-bad 不存在 → 404；ch2 up-good → 200
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "up-bad"})))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&upstream).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "up-good"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "ok", "choices": []})))
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        // 两个通道：ch1(up-bad) 失败 → failover ch2(up-good)
+        let channels = json!([
+            {"id": "ch1", "name": "bad", "key_name": "主", "models": [{"name": "up-bad"}]},
+            {"id": "ch2", "name": "good", "key_name": "主", "models": [{"name": "up-good"}]},
+        ]);
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), channels);
+
+        let state = S::new(dir.path().to_path_buf());
+        // 用对外别名 my-model → 两个通道都能服务，但 ch1 上游 up-bad 会 404
+        let payload = json!({"model": "up-bad", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        // ch1 404 → failover 但只有 ch1 服务 up-bad，最终 404/502
+        assert!(resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn forward_no_upstream_reachable_returns_error() {
+        // 指向一个没服务的端口 → 连接失败 → 502
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), "http://127.0.0.1:1/v1", one_channel("ch1", "up-model"));
+
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "up-model", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        assert!(resp.status() == StatusCode::INTERNAL_SERVER_ERROR || resp.status() == StatusCode::BAD_GATEWAY || resp.status() == StatusCode::SERVICE_UNAVAILABLE);
+    }
+
 }

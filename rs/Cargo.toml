@@ -21,6 +21,8 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 # 测试用临时目录（隔离 gateway.yaml / SQLite 写，不污染真实配置）
 tempfile = "3"
+# 网关转发真测：起本地 mock 上游 HTTP 服务器（学 LiteLLM gateway-forward）
+wiremock = "0.6"
 
 [profile.release]
 # 分发形态：体积/内存优先（opt-level z + 单 codegen + 去 unwinding 表）
