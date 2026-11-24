@@ -38,6 +38,9 @@ fn ensure_ready(root: &std::path::Path) -> Result<(), String> {
             ttft_ms INTEGER NOT NULL,
             input_tokens INTEGER,
             output_tokens INTEGER,
+            cache_read_tokens INTEGER,
+            cache_creation_tokens INTEGER,
+            downstream_key TEXT,
             error TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_request_logs_ts ON request_logs(ts);
@@ -57,6 +60,9 @@ pub struct LogEntry {
     pub ttft_ms: u64,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_creation_tokens: Option<i64>,
+    pub downstream_key: Option<String>,
     pub error: Option<String>,
 }
 
@@ -67,11 +73,13 @@ pub async fn log_request(root: std::path::PathBuf, entry: LogEntry) {
         let conn = Connection::open(db_path(&root)).map_err(|e| e.to_string())?;
         let ts = chrono_now_secs_iso();
         conn.execute(
-            "INSERT INTO request_logs (ts, model, provider, channel, status, latency_ms, ttft_ms, input_tokens, output_tokens, error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO request_logs (ts, model, provider, channel, status, latency_ms, ttft_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, downstream_key, error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![ts, entry.model, entry.provider, entry.channel, entry.status as i64,
                     entry.latency_ms as i64, entry.ttft_ms as i64,
-                    entry.input_tokens, entry.output_tokens, entry.error],
+                    entry.input_tokens, entry.output_tokens,
+                    entry.cache_read_tokens, entry.cache_creation_tokens,
+                    entry.downstream_key, entry.error],
         ).map_err(|e| e.to_string())?;
         Ok(())
     }).await;
@@ -87,7 +95,7 @@ pub fn query_recent(root: &std::path::Path, limit: usize) -> Result<Value, Strin
     ensure_ready(root)?;
     let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
-        "SELECT ts, model, provider, channel, status, latency_ms, ttft_ms, input_tokens, output_tokens, error
+        "SELECT ts, model, provider, channel, status, latency_ms, ttft_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, downstream_key, error
          FROM request_logs ORDER BY id DESC LIMIT ?1"
     ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![limit as i64], |row| {
@@ -101,7 +109,10 @@ pub fn query_recent(root: &std::path::Path, limit: usize) -> Result<Value, Strin
             "ttft_ms": row.get::<_, i64>(6)?,
             "input_tokens": row.get::<_, Option<i64>>(7)?,
             "output_tokens": row.get::<_, Option<i64>>(8)?,
-            "error": row.get::<_, Option<String>>(9)?,
+            "cache_read_tokens": row.get::<_, Option<i64>>(9)?,
+            "cache_creation_tokens": row.get::<_, Option<i64>>(10)?,
+            "downstream_key": row.get::<_, Option<String>>(11)?,
+            "error": row.get::<_, Option<String>>(12)?,
         }))
     }).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
@@ -152,7 +163,9 @@ pub fn query_stats(root: &std::path::Path) -> Result<Value, String> {
                 AVG(ttft_ms) AS avg_ttft,
                 AVG(latency_ms) AS avg_latency,
                 SUM(COALESCE(input_tokens,0)) AS in_tok,
-                SUM(COALESCE(output_tokens,0)) AS out_tok
+                SUM(COALESCE(output_tokens,0)) AS out_tok,
+                SUM(COALESCE(cache_read_tokens,0)) AS cache_read,
+                SUM(COALESCE(cache_creation_tokens,0)) AS cache_creation
          FROM request_logs
          GROUP BY channel
          ORDER BY total DESC"
@@ -175,6 +188,8 @@ pub fn query_stats(root: &std::path::Path) -> Result<Value, String> {
             "status": status,
             "total_input_tokens": row.get::<_, i64>(5)?,
             "total_output_tokens": row.get::<_, i64>(6)?,
+            "total_cache_read_tokens": row.get::<_, i64>(7)?,
+            "total_cache_creation_tokens": row.get::<_, i64>(8)?,
         }))
     }).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
@@ -196,6 +211,8 @@ pub fn query_summary(root: &std::path::Path) -> Result<Value, String> {
                 COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),0),
                 COALESCE(SUM(COALESCE(input_tokens,0)),0),
                 COALESCE(SUM(COALESCE(output_tokens,0)),0),
+                COALESCE(SUM(COALESCE(cache_read_tokens,0)),0),
+                COALESCE(SUM(COALESCE(cache_creation_tokens,0)),0),
                 COALESCE(AVG(ttft_ms),0),
                 COALESCE(AVG(latency_ms),0)
          FROM request_logs",
@@ -203,10 +220,11 @@ pub fn query_summary(root: &std::path::Path) -> Result<Value, String> {
         |r| Ok((
             r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?,
             r.get::<_, i64>(3)?, r.get::<_, i64>(4)?,
-            r.get::<_, f64>(5).unwrap_or(0.0), r.get::<_, f64>(6).unwrap_or(0.0),
+            r.get::<_, i64>(5)?, r.get::<_, i64>(6)?,
+            r.get::<_, f64>(7).unwrap_or(0.0), r.get::<_, f64>(8).unwrap_or(0.0),
         )),
     ).map_err(|e| e.to_string())?;
-    let (total, success, errors, in_tok, out_tok, avg_ttft, avg_latency) = v;
+    let (total, success, errors, in_tok, out_tok, cache_read, cache_creation, avg_ttft, avg_latency) = v;
     let success_rate = if total > 0 { success as f64 / total as f64 * 100.0 } else { 0.0 };
     let error_rate = if total > 0 { errors as f64 / total as f64 * 100.0 } else { 0.0 };
     // 输出速度：out_tok / 平均延迟（ms→s）
@@ -219,10 +237,13 @@ pub fn query_summary(root: &std::path::Path) -> Result<Value, String> {
         "error_rate": (error_rate * 100.0).round() / 100.0,
         "total_input_tokens": in_tok,
         "total_output_tokens": out_tok,
-        "total_cache_creation_tokens": 0, // 表暂无 cache 字段，先返 0
-        "total_cache_read_tokens": 0,
-        "real_total_tokens": in_tok + out_tok,
-        "cache_hit_rate": 0.0,
+        "total_cache_read_tokens": cache_read,
+        "total_cache_creation_tokens": cache_creation,
+        "real_total_tokens": in_tok + out_tok + cache_read + cache_creation,
+        // 缓存命中率 = cache_read / (input + cache_read)（读缓存占全部输入的比例）
+        "cache_hit_rate": if in_tok + cache_read > 0 {
+            (cache_read as f64 / (in_tok + cache_read) as f64 * 10000.0).round() / 100.0
+        } else { 0.0 },
         "avg_ttft_ms": (avg_ttft * 10.0).round() / 10.0,
         "avg_latency_ms": (avg_latency * 10.0).round() / 10.0,
         "avg_speed_tps": (avg_speed * 10.0).round() / 10.0,
@@ -240,7 +261,9 @@ pub fn query_provider_stats(root: &std::path::Path) -> Result<Value, String> {
                 AVG(ttft_ms),
                 AVG(latency_ms),
                 SUM(COALESCE(input_tokens,0)),
-                SUM(COALESCE(output_tokens,0))
+                SUM(COALESCE(output_tokens,0)),
+                SUM(COALESCE(cache_read_tokens,0)),
+                SUM(COALESCE(cache_creation_tokens,0))
          FROM request_logs
          GROUP BY provider
          ORDER BY total DESC"
@@ -260,8 +283,8 @@ pub fn query_provider_stats(root: &std::path::Path) -> Result<Value, String> {
             "weight": 1,
             "total_input_tokens": row.get::<_, i64>(5)?,
             "total_output_tokens": row.get::<_, i64>(6)?,
-            "total_cache_read_tokens": 0,
-            "total_cache_creation_tokens": 0,
+            "total_cache_read_tokens": row.get::<_, i64>(7)?,
+            "total_cache_creation_tokens": row.get::<_, i64>(8)?,
             "cache_hit_rate": 0.0,
         }))
     }).map_err(|e| e.to_string())?;
@@ -280,7 +303,8 @@ pub fn query_trend(root: &std::path::Path, hours: u32) -> Result<Value, String> 
                 SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS errors,
                 AVG(ttft_ms),
                 SUM(COALESCE(input_tokens,0)),
-                SUM(COALESCE(output_tokens,0))
+                SUM(COALESCE(output_tokens,0)),
+                SUM(COALESCE(cache_read_tokens,0))
          FROM request_logs
          WHERE ts >= datetime('now', ?1)
          GROUP BY hour
@@ -295,7 +319,7 @@ pub fn query_trend(root: &std::path::Path, hours: u32) -> Result<Value, String> 
             "errors": row.get::<_, i64>(2)?,
             "input_tokens": row.get::<_, i64>(4)?,
             "output_tokens": row.get::<_, i64>(5)?,
-            "cache_read_tokens": 0,
+            "cache_read_tokens": row.get::<_, i64>(6)?,
         }))
     }).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
@@ -311,7 +335,9 @@ pub fn query_daily(root: &std::path::Path, days: u32) -> Result<Value, String> {
         "SELECT substr(ts,1,10) AS day,
                 COUNT(*) AS total,
                 SUM(COALESCE(input_tokens,0)),
-                SUM(COALESCE(output_tokens,0))
+                SUM(COALESCE(output_tokens,0)),
+                SUM(COALESCE(cache_read_tokens,0)),
+                SUM(COALESCE(cache_creation_tokens,0))
          FROM request_logs
          WHERE ts >= datetime('now', ?1)
          GROUP BY day
@@ -321,14 +347,16 @@ pub fn query_daily(root: &std::path::Path, days: u32) -> Result<Value, String> {
     let rows = stmt.query_map(params![since], |row| {
         let in_tok: i64 = row.get(2)?;
         let out_tok: i64 = row.get(3)?;
+        let cache_read: i64 = row.get(4)?;
+        let cache_creation: i64 = row.get(5)?;
         Ok(json!({
             "date": row.get::<_, String>(0)?,
             "requests": row.get::<_, i64>(1)?,
             "input_tokens": in_tok,
             "output_tokens": out_tok,
-            "cache_read_tokens": 0,
-            "cache_creation_tokens": 0,
-            "total_tokens": in_tok + out_tok,
+            "cache_read_tokens": cache_read,
+            "cache_creation_tokens": cache_creation,
+            "total_tokens": in_tok + out_tok + cache_read + cache_creation,
         }))
     }).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
@@ -355,7 +383,9 @@ mod tests {
         LogEntry {
             model: model.into(), provider: provider.into(), channel: channel.into(),
             status, latency_ms: lat, ttft_ms: ttft,
-            input_tokens: Some(in_tok), output_tokens: Some(out_tok), error: None,
+            input_tokens: Some(in_tok), output_tokens: Some(out_tok),
+            cache_read_tokens: None, cache_creation_tokens: None,
+            downstream_key: None, error: None,
         }
     }
 
@@ -425,4 +455,21 @@ mod tests {
         let daily = query_daily(&root, 7).unwrap();
         assert!(daily.get("data").and_then(|x| x.as_array()).is_some());
     }
+}
+
+/// 查某下游 key 今日(UTC)已用 token 总量（input+output+cache），用量限额用
+pub fn today_tokens_for_key(root: &std::path::Path, key: &str) -> Result<i64, String> {
+    ensure_ready(root)?;
+    let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
+    let today = chrono_now_secs_iso(); // 当前 ISO，取日期前缀
+    let today_prefix = &today[..10.min(today.len())];
+    let v: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)
+                +COALESCE(cache_read_tokens,0)+COALESCE(cache_creation_tokens,0)),0)
+         FROM request_logs
+         WHERE downstream_key = ?1 AND substr(ts,1,10) = ?2",
+        params![key, today_prefix],
+        |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    Ok(v)
 }

@@ -1110,4 +1110,134 @@ mod tests {
         assert_eq!(resp.headers().get("openai-organization").and_then(|v| v.to_str().ok()), Some("org-abc"));
     }
 
+
+    // ==================== 四个基本要素真测：错误分类/cache token/用量限额 ====================
+
+    #[tokio::test]
+    async fn fatal_4xx_passes_through_without_failover() {
+        // 错误分类（学 LiteLLM）：上游 401 鉴权错误=致命 → 直接透传 401，不 failover 也不退避
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({"error": {"message": "bad key"}})))
+            .expect(1) // 只被调 1 次（致命错误不 failover 到第二通道）
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        // 两通道都服务同一模型 → 若 failover 会打两次，断言只打 1 次即验证"致命不重试"
+        write_two_channel_yaml(dir.path(), &format!("{}/v1", upstream.uri()), "m1", "m2", false);
+
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        // 401 致命错误直接透传（不换成 502）
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1, "致命 4xx 不 failover");
+    }
+
+    #[tokio::test]
+    async fn non_streaming_cache_tokens_logged() {
+        // cache token（学 LiteLLM 字段）：非流式响应带 prompt_tokens_details.cached_tokens → 入库
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "x", "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {
+                    "prompt_tokens": 100, "completion_tokens": 50,
+                    "prompt_tokens_details": {"cached_tokens": 80, "cache_creation_tokens": 10}
+                }
+            })))
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "up-model", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let logs = gateway_logs::query_recent(&dir.path(), 5).unwrap();
+        let data = logs.get("data").and_then(|v| v.as_array()).unwrap();
+        let entry = &data[0];
+        assert_eq!(entry.get("input_tokens").and_then(|v| v.as_i64()), Some(100));
+        assert_eq!(entry.get("output_tokens").and_then(|v| v.as_i64()), Some(50));
+        assert_eq!(entry.get("cache_read_tokens").and_then(|v| v.as_i64()), Some(80), "cache_read 入库");
+        assert_eq!(entry.get("cache_creation_tokens").and_then(|v| v.as_i64()), Some(10), "cache_creation 入库");
+    }
+
+    #[tokio::test]
+    async fn daily_token_budget_returns_429_when_exceeded() {
+        // 用量限额（学 LiteLLM max_budget）：daily_token_budget=100，先记 200 token → 下一请求 429
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "x", "choices": [],
+                "usage": {"prompt_tokens": 150, "completion_tokens": 50}
+            })))
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        let cfg = json!({
+            "listen": 0,
+            "auth": {"api_keys": ["sk-user"], "daily_token_budget": 100},
+            "providers": [{
+                "name": "p", "base_url": format!("{}/v1", upstream.uri()),
+                "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk-up"}],
+                "channels": [{"id": "ch1", "name": "c", "key_name": "主",
+                              "models": [{"name": "m", "alias": "my-model"}]}],
+            }],
+        });
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
+
+        // 第 1 次：预算内（0 < 100），放行，记 200 token
+        let resp1 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, Some("Bearer sk-user"), payload.clone()).await;
+        assert_eq!(resp1.status(), StatusCode::OK);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await; // 等日志落库
+
+        // 第 2 次：已用 200 > 预算 100 → 429
+        let resp2 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, Some("Bearer sk-user"), payload).await;
+        assert_eq!(resp2.status(), StatusCode::TOO_MANY_REQUESTS, "超每日 token 预算应 429");
+    }
+
+    #[tokio::test]
+    async fn retryable_5xx_backs_off_then_fails_over() {
+        // 重试退避（学 LiteLLM）：上游 500=可重试 → 退避后 failover 到 ch2；致命 401 直接透传
+        let upstream = MockServer::start().await;
+        // ch1 模型恒 500（可重试），ch2 模型 200
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "m1"})))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&upstream).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "m2"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "ok", "choices": []})))
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        write_two_channel_yaml(dir.path(), &format!("{}/v1", upstream.uri()), "m1", "m2", false);
+
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload).await;
+        // 500 可重试 → 退避后 failover 到 ch2 → 整体 200
+        assert_eq!(resp.status(), StatusCode::OK);
+        // ch1(500) 至少被试 1 次
+        let reqs = upstream.received_requests().await.unwrap();
+        let m1_hits = reqs.iter().filter(|r| {
+            let b: Value = serde_json::from_slice(&r.body).unwrap_or(json!({}));
+            b["model"] == "m1"
+        }).count();
+        assert!(m1_hits >= 1, "可重试 5xx 应先试 ch1");
+    }
+
 }

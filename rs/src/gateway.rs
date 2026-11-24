@@ -386,10 +386,18 @@ pub struct AuthConfig {
     /// 允许的下游 key 列表（空=不鉴权，本机内网可用；配了=严格校验 Bearer）
     #[serde(default)]
     pub api_keys: Vec<String>,
+    /// 每个 key 每日 token 上限（input+output+cache；None/0=不限）。超限返 429。学 LiteLLM max_budget
+    #[serde(default)]
+    pub daily_token_budget: Option<i64>,
+}
+
+/// 提取下游 Bearer token（用量限额按 key 记账用）
+fn downstream_key(auth_header: Option<&str>) -> Option<String> {
+    auth_header.and_then(|h| h.strip_prefix("Bearer ").map(|t| t.to_string()))
 }
 impl Default for AuthConfig {
     fn default() -> Self {
-        Self { api_keys: Vec::new() }
+        Self { api_keys: Vec::new(), daily_token_budget: None }
     }
 }
 
@@ -828,8 +836,26 @@ pub async fn forward_generic(
             axum::Json(serde_json::json!({"error": {"message": e, "type": "authentication_error"}})),
         ).into_response();
     }
+    // 用量限额（学 LiteLLM max_budget）：配了 daily_token_budget → 查今日该 key 已用 token，超限返 429
+    if let Some(budget) = config.auth.daily_token_budget {
+        if budget > 0 {
+            if let Some(dkey) = downstream_key(auth_header) {
+                let used = crate::gateway_logs::today_tokens_for_key(root, &dkey).unwrap_or(0);
+                if used >= budget {
+                    return (
+                        axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        axum::Json(serde_json::json!({"error": {
+                            "message": format!("每日 token 预算已用尽（{used}/{budget}），明日重置", ),
+                            "type": "budget_exceeded_error"
+                        }})),
+                    ).into_response();
+                }
+            }
+        }
+    }
     let requested_model = payload.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let pin_key = session_key(&payload, auth_header);
+    let dkey = downstream_key(auth_header); // 传给 forward_one 记账（用量限额按 key）
 
     // Auto 模式：model=auto 且开启 auto_mode → 聚合所有可用模型按 capability+延迟排序，逐个试，失败 fallback 下一个
     if requested_model == "auto" && config.routing.auto_mode_enabled {
@@ -838,6 +864,7 @@ pub async fn forward_generic(
             return error_response(404, "auto: 无可用模型");
         }
         let mut last_err = String::new();
+        let mut attempted: u32 = 0; // 已重试次数（退避指数用）
         for cand in &candidates {
             let sel = SelectedChannel {
                 provider: cand.provider.clone(),
@@ -849,10 +876,19 @@ pub async fn forward_generic(
             if let Some(rpm) = cand.channel.rpm {
                 if is_rate_limited(rates, &cand.channel.id, rpm) { continue; }
             }
-            match forward_one(root, &config, health, &sel, &requested_model, &payload, upstream_path).await {
+            match forward_one(root, &config, health, &sel, &requested_model, &payload, upstream_path, dkey.as_deref()).await {
                 Ok(resp) => return resp,
                 Err(e) => {
-                    last_err = e;
+                    // 错误分类（学 LiteLLM）：致命 4xx（鉴权/参数）重试也没用 → 直接透传
+                    if !e.is_retryable() {
+                        return error_response(e.status().unwrap_or(502), &e.message());
+                    }
+                    last_err = e.message();
+                    // 可重试：退避（0.5×2→8s + jitter，尊重 retry-after）再 failover
+                    if attempted as usize + 1 < candidates.len() {
+                        tokio::time::sleep(retry_delay(attempted, e.retry_after())).await;
+                    }
+                    attempted += 1;
                     continue; // fallback 下一个
                 }
             }
@@ -877,12 +913,13 @@ pub async fn forward_generic(
     }
     let max_retries = config.routing.max_retries.min(candidates.len());
     let mut last_err = String::new();
+    let mut attempted: u32 = 0; // 已重试次数（退避指数用）
     for cand in candidates.iter().take(max_retries.max(1)) {
         // 限流：通道配了 rpm 且超限 → 跳过（防打爆上游）
         if let Some(rpm) = cand.channel.rpm {
             if is_rate_limited(rates, &cand.channel.id, rpm) { continue; }
         }
-        match forward_one(root, &config, health, cand, &requested_model, &payload, upstream_path).await {
+        match forward_one(root, &config, health, cand, &requested_model, &payload, upstream_path, dkey.as_deref()).await {
             Ok(resp) => {
                 // 成功：更新黏性 pin 到这条通道（供后续复用）
                 if let Some(k) = pin_key.as_deref() {
@@ -893,7 +930,16 @@ pub async fn forward_generic(
                 return resp;
             }
             Err(e) => {
-                last_err = e;
+                // 错误分类（学 LiteLLM）：致命 4xx（鉴权/参数）重试也没用 → 直接透传
+                if !e.is_retryable() {
+                    return error_response(e.status().unwrap_or(502), &e.message());
+                }
+                last_err = e.message();
+                // 可重试：退避（0.5×2→8s + jitter，尊重 retry-after）再 failover
+                if attempted as usize + 1 < max_retries.max(1) {
+                    tokio::time::sleep(retry_delay(attempted, e.retry_after())).await;
+                }
+                attempted += 1;
                 continue; // failover 下一个
             }
         }
@@ -901,7 +947,74 @@ pub async fn forward_generic(
     error_response(502, &format!("所有通道失败（试了 {} 条）: {}", max_retries.max(1), last_err))
 }
 
-/// 转发到单个通道（Auto 和普通路由共用）：失败返回 Err(msg)，成功返回响应
+/// 转发失败分类（学 LiteLLM AttemptError）：区分可重试/不可重试
+#[derive(Debug, Clone)]
+enum ForwardError {
+    /// 可重试：连接失败 / 408 409 429 / 5xx。重试退避后可试其他通道。
+    Retryable { status: Option<u16>, retry_after: Option<std::time::Duration>, msg: String },
+    /// 不可重试：其他 4xx（鉴权/参数/找不到）。重试也没用，直接透传。
+    Fatal { status: Option<u16>, msg: String },
+}
+
+impl ForwardError {
+    fn is_retryable(&self) -> bool {
+        matches!(self, ForwardError::Retryable { .. })
+    }
+    fn status(&self) -> Option<u16> {
+        match self {
+            ForwardError::Retryable { status, .. } | ForwardError::Fatal { status, .. } => *status,
+        }
+    }
+    fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            ForwardError::Retryable { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+    fn message(&self) -> String {
+        match self {
+            ForwardError::Retryable { msg, .. } | ForwardError::Fatal { msg, .. } => msg.clone(),
+        }
+    }
+}
+
+/// 哪些状态码可重试（学 LiteLLM should_retry_status）：408 请求超时 / 409 冲突 / 429 限流 / 5xx 服务端错误。
+/// 其余 4xx（400/401/403/404）是客户端错误，换通道也没用，不重试。
+fn should_retry_status(status: u16) -> bool {
+    matches!(status, 408 | 409 | 429) || status >= 500
+}
+
+/// 从上游响应头读 retry-after（秒），仅尊重 ≤ 60s 的（学 LiteLLM MAX_HONOURED_RETRY_AFTER）
+fn parse_retry_after(resp: &reqwest::Response) -> Option<std::time::Duration> {
+    let v = resp.headers().get("retry-after")?.to_str().ok()?;
+    let secs: u64 = v.trim().parse().ok()?;
+    let d = std::time::Duration::from_secs(secs);
+    if d <= std::time::Duration::from_secs(60) { Some(d) } else { None }
+}
+
+/// 重试退避延迟（学 LiteLLM Backoff）：0.5s 起，指数 ×2 到 8s 封顶，加 0.75 jitter 防雪崩。
+/// 优先尊重上游 retry-after。attempted=已重试次数。
+fn retry_delay(attempted: u32, retry_after: Option<std::time::Duration>) -> std::time::Duration {
+    const INITIAL: f64 = 0.5;
+    const MAX: f64 = 8.0;
+    const JITTER: f64 = 0.75;
+    // 尊重上游明确要求的 retry-after
+    if let Some(ra) = retry_after {
+        return ra + std::time::Duration::from_secs_f64(JITTER * pseudo_rand());
+    }
+    let doubled = INITIAL * 2f64.powi(attempted as i32);
+    let secs = doubled.min(MAX);
+    std::time::Duration::from_secs_f64(secs + JITTER * pseudo_rand())
+}
+
+/// 轻量伪随机 [0,1)，从纳秒时间戳取，避免引 rand 依赖（jitter 防雪崩够用）
+fn pseudo_rand() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    (nanos % 1000) as f64 / 1000.0
+}
+
+/// 转发到单个通道（Auto 和普通路由共用）：失败返回 ForwardError（区分可重试），成功返回响应
 async fn forward_one(
     root: &std::path::Path,
     config: &GatewayConfig,
@@ -910,7 +1023,8 @@ async fn forward_one(
     requested_model: &str,
     payload: &serde_json::Value,
     upstream_path: &str,
-) -> Result<axum::response::Response, String> {
+    dkey: Option<&str>,
+) -> Result<axum::response::Response, ForwardError> {
     // 把请求里的模型名换成上游真实名
     let mut upstream_payload = payload.clone();
     if let Some(obj) = upstream_payload.as_object_mut() {
@@ -926,7 +1040,7 @@ async fn forward_one(
         .connect_timeout(std::time::Duration::from_secs(config.timeout.streaming_first_byte))
         .timeout(std::time::Duration::from_secs(config.timeout.non_streaming))
         .build()
-        .map_err(|e| format!("client 构造失败: {}", e))?;
+        .map_err(|e| ForwardError::Retryable { status: None, retry_after: None, msg: format!("client 构造失败: {}", e) })?;
     let mut req = client.post(&url)
         .header("Authorization", format!("Bearer {}", selected.api_key))
         .header("Content-Type", "application/json");
@@ -940,7 +1054,7 @@ async fn forward_one(
         Ok(r) => r,
         Err(e) => {
             record_outcome(health, &selected.channel.id, false, 0, cb, false).await;
-            return Err(format!("上游请求失败: {}", e));
+            return Err(ForwardError::Retryable { status: None, retry_after: None, msg: format!("上游请求失败: {}", e) });
         }
     };
     let ttft = start.elapsed().as_millis() as u64;
@@ -961,9 +1075,12 @@ async fn forward_one(
             ttft_ms: ttft,
             input_tokens: None,
             output_tokens: None,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+            downstream_key: dkey.map(|s| s.to_string()),
             error: Some(format!("HTTP {}", status.as_u16())),
         }).await;
-        return Err(format!("上游服务端错误 {}", status.as_u16()));
+        return Err(ForwardError::Retryable { status: Some(status.as_u16()), retry_after: parse_retry_after(&resp), msg: format!("上游服务端错误 {}", status.as_u16()) });
     }
 
     // 回传（真流式：SSE 逐 chunk 透传；非流式回整包）
@@ -989,12 +1106,12 @@ async fn forward_one(
         // 同时用 SseUsageTap 扫描 data: 行抓 usage token，流结束后补记完整日志
         use axum::body::Body;
         // 日志延到流结束：建 oneshot channel，tap 流完时把 usage 发给后台任务补记
-        let (usage_tx, usage_rx) = tokio::sync::oneshot::channel::<(Option<i64>, Option<i64>)>();
+        let (usage_tx, usage_rx) = tokio::sync::oneshot::channel::<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>();
         let stream = resp.bytes_stream();
         let tap = SseUsageTap {
             inner: Box::pin(stream),
             buf: Vec::new(),
-            usage: (None, None),
+            usage: (None, None, None, None),
             usage_tx: Some(usage_tx),
         };
         // 后台任务：等流结束后拿 usage token，补一条带 token 的完整日志
@@ -1005,9 +1122,10 @@ async fn forward_one(
         let log_status = status.as_u16();
         let log_latency = start.elapsed().as_millis() as u64;
         let log_error = if ok { None } else { Some(format!("HTTP {}", status.as_u16())) };
+        let log_dkey = dkey.map(|s| s.to_string()); // spawn 要 'static，先把借用的 dkey 转 owned
         tokio::spawn(async move {
             // 等流结束（tap drop / 发送端关闭时 rx 得 None）
-            let (in_tok, out_tok) = usage_rx.await.unwrap_or((None, None));
+            let (in_tok, out_tok, cache_read, cache_creation) = usage_rx.await.unwrap_or((None, None, None, None));
             crate::gateway_logs::log_request(log_root, crate::gateway_logs::LogEntry {
                 model: log_model,
                 provider: log_provider,
@@ -1017,15 +1135,18 @@ async fn forward_one(
                 ttft_ms: ttft,
                 input_tokens: in_tok,
                 output_tokens: out_tok,
+                cache_read_tokens: cache_read,
+                cache_creation_tokens: cache_creation,
+                downstream_key: log_dkey,
                 error: log_error,
             }).await;
         });
         let body = Body::from_stream(tap);
-        out.body(body).map_err(|e| format!("流式回传失败: {}", e))
+        out.body(body).map_err(|e| ForwardError::Retryable { status: None, retry_after: None, msg: format!("流式回传失败: {}", e) })
     } else {
         // 非流式：整包 + 解析 usage token 入日志
         let body_bytes = resp.bytes().await.unwrap_or_default();
-        let (in_tok, out_tok) = parse_usage(&body_bytes);
+        let (in_tok, out_tok, cache_read, cache_creation) = parse_usage(&body_bytes);
         crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
             model: requested_model.into(),
             provider: selected.provider.name.clone(),
@@ -1035,23 +1156,40 @@ async fn forward_one(
             ttft_ms: ttft,
             input_tokens: in_tok,
             output_tokens: out_tok,
+            cache_read_tokens: cache_read,
+            cache_creation_tokens: cache_creation,
+            downstream_key: dkey.map(|s| s.to_string()),
             error: if ok { None } else { Some(format!("HTTP {}", status.as_u16())) },
         }).await;
         out.body(axum::body::Body::from(body_bytes))
-            .map_err(|e| format!("回传失败: {}", e))
+            .map_err(|e| ForwardError::Retryable { status: None, retry_after: None, msg: format!("回传失败: {}", e) })
     }
 }
 
 /// 从非流式响应解析 usage（OpenAI 格式 usage.input_tokens/output_tokens）
-fn parse_usage(body: &[u8]) -> (Option<i64>, Option<i64>) {
+fn parse_usage(body: &[u8]) -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
     let v: serde_json::Value = match serde_json::from_slice(body) {
         Ok(v) => v,
-        Err(_) => return (None, None),
+        Err(_) => return (None, None, None, None),
     };
-    let u = v.get("usage");
-    let get = |k: &str| u.and_then(|x| x.get(k)).and_then(|x| x.as_i64());
-    (get("input_tokens").or_else(|| get("prompt_tokens")),
-     get("output_tokens").or_else(|| get("completion_tokens")))
+    parse_usage_json(&v)
+}
+
+/// 从 usage JSON 提取 (input, output, cache_read, cache_creation)
+/// 抄 LiteLLM/llms-types 字段名：OpenAI prompt_tokens_details.cached_tokens /
+/// cache_creation_tokens；Anthropic cache_read_input_tokens / cache_creation_input_tokens
+fn parse_usage_json(v: &serde_json::Value) -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
+    let u = match v.get("usage") { Some(u) if !u.is_null() => u, _ => return (None, None, None, None) };
+    let get = |k: &str| u.get(k).and_then(|x| x.as_i64());
+    let input = get("input_tokens").or_else(|| get("prompt_tokens"));
+    let output = get("output_tokens").or_else(|| get("completion_tokens"));
+    // cache read: OpenAI prompt_tokens_details.cached_tokens；Anthropic cache_read_input_tokens
+    let cache_read = get("cache_read_input_tokens")
+        .or_else(|| u.get("prompt_tokens_details").and_then(|d| d.get("cached_tokens")).and_then(|x| x.as_i64()));
+    // cache creation: Anthropic cache_creation_input_tokens；OpenAI cache_creation_tokens
+    let cache_creation = get("cache_creation_input_tokens")
+        .or_else(|| u.get("prompt_tokens_details").and_then(|d| d.get("cache_creation_tokens")).and_then(|x| x.as_i64()));
+    (input, output, cache_read, cache_creation)
 }
 
 /// SSE 流式 usage 捕获：包装字节流，逐 chunk 透传客户端的同时累积缓冲，
@@ -1060,8 +1198,8 @@ fn parse_usage(body: &[u8]) -> (Option<i64>, Option<i64>) {
 struct SseUsageTap {
     inner: std::pin::Pin<Box<dyn futures_core::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
     buf: Vec<u8>,
-    usage: (Option<i64>, Option<i64>),
-    usage_tx: Option<tokio::sync::oneshot::Sender<(Option<i64>, Option<i64>)>>,
+    usage: (Option<i64>, Option<i64>, Option<i64>, Option<i64>),
+    usage_tx: Option<tokio::sync::oneshot::Sender<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>>,
 }
 
 impl futures_core::Stream for SseUsageTap {
@@ -1100,7 +1238,7 @@ impl futures_core::Stream for SseUsageTap {
 }
 
 /// 扫描 SSE 缓冲里所有 `data:` 行，取最后一个带 usage 的 JSON 的 token
-fn sse_scan_usage(buf: &[u8]) -> Option<(Option<i64>, Option<i64>)> {
+fn sse_scan_usage(buf: &[u8]) -> Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> {
     let s = std::str::from_utf8(buf).ok()?;
     let mut usage = None;
     for line in s.lines() {
@@ -1112,12 +1250,10 @@ fn sse_scan_usage(buf: &[u8]) -> Option<(Option<i64>, Option<i64>)> {
             }
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(d) {
                 // usage 可能在顶层（OpenAI），或 message_delta 的 usage 字段（Anthropic）
-                if let Some(u) = v.get("usage").filter(|x| !x.is_null()) {
-                    let get = |k: &str| u.get(k).and_then(|x| x.as_i64());
-                    let in_tok = get("prompt_tokens").or_else(|| get("input_tokens"));
-                    let out_tok = get("completion_tokens").or_else(|| get("output_tokens"));
-                    if in_tok.is_some() || out_tok.is_some() {
-                        usage = Some((in_tok, out_tok));
+                if v.get("usage").map(|u| !u.is_null()).unwrap_or(false) {
+                    let (in_tok, out_tok, cr, cc) = parse_usage_json(&v);
+                    if in_tok.is_some() || out_tok.is_some() || cr.is_some() || cc.is_some() {
+                        usage = Some((in_tok, out_tok, cr, cc));
                     }
                 }
             }
@@ -1732,14 +1868,14 @@ mod tests {
     #[test]
     fn auth_no_keys_allows_all() {
         // api_keys 空 → 不鉴权（内网可用），任意 header 都放行
-        let auth = AuthConfig { api_keys: vec![] };
+        let auth = AuthConfig { api_keys: vec![] , daily_token_budget: None };
         assert!(validate_auth(&auth, None).is_ok());
         assert!(validate_auth(&auth, Some("Bearer anything")).is_ok());
     }
 
     #[test]
     fn auth_configured_requires_valid_key() {
-        let auth = AuthConfig { api_keys: vec!["sk-secret".into()] };
+        let auth = AuthConfig { api_keys: vec!["sk-secret".into()] , daily_token_budget: None };
         // 无 header → 401
         assert!(validate_auth(&auth, None).is_err());
         // 错 key → 401
