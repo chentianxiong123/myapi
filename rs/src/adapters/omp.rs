@@ -65,7 +65,7 @@ impl OmpAdapter {
             if k.as_str() == Some(DEFAULT_PROVIDER_ID) { return Some(DEFAULT_PROVIDER_ID.into()); }
         }
         for (k, v) in providers {
-            if v.get("name": DEFAULT_PROVIDER_ID) {
+            if v.get("name").and_then(|n| n.as_str()) == Some(DEFAULT_PROVIDER_ID) {
                 return Some(k.as_str().unwrap_or("").to_string());
             }
         }
@@ -117,7 +117,7 @@ impl Adapter for OmpAdapter {
         // 清掉 name=myapi 但 key != myapi 的旧条目
         if let Some(providers) = data.get_mut("providers").and_then(|v| v.as_mapping_mut()) {
             let stale: Vec<YV> = providers.iter().filter(|(k, v)| {
-                k.as_str() != Some(DEFAULT_PROVIDER_ID) && v.get("name": DEFAULT_PROVIDER_ID)
+                k.as_str() != Some(DEFAULT_PROVIDER_ID) && v.get("name").and_then(|n| n.as_str()) == Some(DEFAULT_PROVIDER_ID)
             }).map(|(k, _)| k.clone()).collect();
             for k in stale { providers.remove(&k); }
         }

@@ -28,7 +28,7 @@ impl PiAdapter {
     fn find_myapi_key(data: &Value) -> Option<String> {
         let providers = data.get("providers")?.as_object()?;
         for (k, v) in providers {
-            if v.get("name": DEFAULT_PROVIDER_ID) { return Some(k.clone()); }
+            if v.get("name").and_then(|n| n.as_str()) == Some(DEFAULT_PROVIDER_ID) { return Some(k.clone()); }
         }
         for (k, v) in providers {
             if v.get("baseUrl").and_then(|b| b.as_str()).unwrap_or("").contains(":8317") { return Some(k.clone()); }
@@ -110,7 +110,7 @@ impl Adapter for PiAdapter {
             let p = providers.as_object_mut().unwrap();
             if !p.contains_key(&target_key) { p.insert(target_key.clone(), Value::Object(Default::default())); }
             let c = p.get_mut(&target_key).unwrap().as_object_mut().unwrap();
-            c.insert("name": DEFAULT_PROVIDER_ID.into()));
+            c.insert("name".into(), DEFAULT_PROVIDER_ID.into());
             c.insert("baseUrl".into(), Value::String(ir.base_url.clone()));
             c.insert("api".into(), Value::String(if ir.api.is_empty() { "openai-completions".into() } else { ir.api.clone() }));
             c.insert("apiKey".into(), Value::String(ir.api_key.clone()));

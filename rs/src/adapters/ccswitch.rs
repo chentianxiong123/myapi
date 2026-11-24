@@ -4,6 +4,7 @@ use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use crate::adapters::DEFAULT_PROVIDER_ID;
 
 pub fn db_path() -> PathBuf {
     std::env::var("CC_SWITCH_DB").map(PathBuf::from).unwrap_or_else(|_| {
