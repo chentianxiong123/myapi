@@ -3,6 +3,7 @@ mod api;
 mod cli;
 mod adapters;
 mod gateway;
+mod gateway_logs;
 pub mod core {
     pub mod ir;
     pub mod config;
@@ -169,6 +170,14 @@ async fn gateway_embeddings(
     gateway::forward_embeddings(&s.root, &s.health, &s.pins, auth, payload).await
 }
 
+/// GET /v1/logs：查询最近请求日志（observability）
+async fn gateway_logs(State(s): State<S>) -> axum::Json<Value> {
+    match gateway_logs::query_recent(&s.root, 100) {
+        Ok(v) => axum::Json(v),
+        Err(e) => axum::Json(serde_json::json!({"error": {"message": e, "type": "api_error"}})),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     if maybe_cli(&std::env::args().skip(1).collect::<Vec<_>>()).await { return; }
@@ -177,6 +186,10 @@ async fn main() {
         health: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         pins: gateway::new_pin_store(),
     };
+    // 网关请求日志表（幂等）
+    if let Err(e) = gateway_logs::init_table(&state.root) {
+        eprintln!("[gateway-logs] 建表失败: {}", e);
+    }
     let app = Router::new()
         .route("/api/config", get(get_config).post(post_config))
         .route("/api/adapters", get(|| async { axum::Json(serde_json::json!({"ok": true, "names": api::get_adapters_info().get("names").cloned().unwrap_or_default(), "hosts": api::get_adapters_info().get("hosts").cloned().unwrap_or_default(), "adapter_instances": api::get_adapters_info().get("adapter_instances").cloned().unwrap_or_default(), "targets": api::get_adapters_info().get("targets").cloned().unwrap_or_default(), "strategies": api::get_adapters_info().get("strategies").cloned().unwrap_or_default()})) }))
@@ -205,6 +218,7 @@ async fn main() {
         .route("/v1/models", get(gateway_models))
         .route("/v1/chat/completions", post(gateway_chat))
         .route("/v1/embeddings", post(gateway_embeddings))
+        .route("/v1/logs", get(gateway_logs))
         .fallback_service(ServeDir::new(root().join("web").join("static")))
         .with_state(state);
     let addr = format!("127.0.0.1:{}", api::gateway_cfg().panel_port);

@@ -771,7 +771,7 @@ pub async fn forward_generic(
                 upstream_model: cand.upstream_model.clone(),
                 api_key: cand.api_key.clone(),
             };
-            match forward_one(&config, health, &sel, &requested_model, &payload, upstream_path).await {
+            match forward_one(root, &config, health, &sel, &requested_model, &payload, upstream_path).await {
                 Ok(resp) => return resp,
                 Err(e) => {
                     last_err = e;
@@ -800,7 +800,7 @@ pub async fn forward_generic(
     let max_retries = config.routing.max_retries.min(candidates.len());
     let mut last_err = String::new();
     for cand in candidates.iter().take(max_retries.max(1)) {
-        match forward_one(&config, health, cand, &requested_model, &payload, upstream_path).await {
+        match forward_one(root, &config, health, cand, &requested_model, &payload, upstream_path).await {
             Ok(resp) => {
                 // 成功：更新黏性 pin 到这条通道（供后续复用）
                 if let Some(k) = pin_key.as_deref() {
@@ -821,6 +821,7 @@ pub async fn forward_generic(
 
 /// 转发到单个通道（Auto 和普通路由共用）：失败返回 Err(msg)，成功返回响应
 async fn forward_one(
+    root: &std::path::Path,
     config: &GatewayConfig,
     health: &HealthMap,
     selected: &SelectedChannel,
@@ -886,15 +887,51 @@ async fn forward_one(
     if is_sse {
         // 真流式：逐 chunk 转发字节流，客户端实时收到每个 SSE event
         use axum::body::Body;
+        // 流式日志（token 解析需聚合 SSE，先记 TTFT/状态）
+        crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
+            model: requested_model.into(),
+            provider: selected.provider.name.clone(),
+            channel: selected.channel.name.clone(),
+            status: status.as_u16(),
+            latency_ms: start.elapsed().as_millis() as u64,
+            ttft_ms: ttft,
+            input_tokens: None,
+            output_tokens: None,
+            error: if ok { None } else { Some(format!("HTTP {}", status.as_u16())) },
+        }).await;
         let stream = resp.bytes_stream();
         let body = Body::from_stream(stream);
         out.body(body).map_err(|e| format!("流式回传失败: {}", e))
     } else {
-        // 非流式：整包
+        // 非流式：整包 + 解析 usage token 入日志
         let body_bytes = resp.bytes().await.unwrap_or_default();
+        let (in_tok, out_tok) = parse_usage(&body_bytes);
+        crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
+            model: requested_model.into(),
+            provider: selected.provider.name.clone(),
+            channel: selected.channel.name.clone(),
+            status: status.as_u16(),
+            latency_ms: start.elapsed().as_millis() as u64,
+            ttft_ms: ttft,
+            input_tokens: in_tok,
+            output_tokens: out_tok,
+            error: if ok { None } else { Some(format!("HTTP {}", status.as_u16())) },
+        }).await;
         out.body(axum::body::Body::from(body_bytes))
             .map_err(|e| format!("回传失败: {}", e))
     }
+}
+
+/// 从非流式响应解析 usage（OpenAI 格式 usage.input_tokens/output_tokens）
+fn parse_usage(body: &[u8]) -> (Option<i64>, Option<i64>) {
+    let v: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+    let u = v.get("usage");
+    let get = |k: &str| u.and_then(|x| x.get(k)).and_then(|x| x.as_i64());
+    (get("input_tokens").or_else(|| get("prompt_tokens")),
+     get("output_tokens").or_else(|| get("completion_tokens")))
 }
 
 /// chat 端点包装（forward_generic + /chat/completions）
