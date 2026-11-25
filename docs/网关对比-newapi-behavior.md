@@ -70,6 +70,17 @@ new-api 为计费合并（PromptTokens 要算钱）；myapi 为观测拆开存�
 | Redis | 可选 | 无（个人够用） |
 | 多租户 | 有（用户/令牌/分组） | 无（个人） |
 
+### 图像 token 估算（多模态）
+各协议图像 token 算法不同（计费用）：
+- OpenAI GPT-4o: high `85 + 170×tiles`（512²切块）/ low 85
+- Gemini: ≤384px 258/图，否则 `258×ceil(w/768)×ceil(h/768)`
+- Claude: `ceil(w×h/750)`
+
+**myapi 取舍**：`estimate_input_tokens` 只算文本（len/4），**不算图像**。
+理由：该估算只用于上下文窗口粗筛（max_input_tokens），**不计费不统计**（统计用上游真实 usage）。
+粗筛只需量级对，不需图像精度。强行补图像算法=增加复杂度且仍不如上游准。
+→ **已知取舍，非缺陷**。多模态请求的图像 token 由上游 usage 回传后如实记录。
+
 ## 待办
 - [x] myapi 补 Gemini usage 统计（usageMetadata 字段）— 已完成 119 测试全绿
 - [ ] 考虑 Gemini completion=0 兜底（本地估算）
