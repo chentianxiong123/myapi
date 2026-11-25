@@ -82,6 +82,7 @@ myapi 价值（直接回应）：
 - session affinity（同会话粘同一个 provider，缓存友好）
 - 透传 headers（客户端 UA 原样传给上游）
 - 流式转发（SSE，不改格式）
+- vision 能力硬约束：当前轮带图 → 只选有 vision 能力的通道；无可用 → 409 显式失败（不静默降级）；历史轮的图 → 占位符降级（对照 9router）
 - 轻量统计（异步写 SQLite：时间/模型/provider/TTFT/tokens/error）
 - Web UI（看统计、改配置）
 
