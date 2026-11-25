@@ -95,6 +95,24 @@ new-api 为计费合并（PromptTokens 要算钱）；myapi 为观测拆开存�
 - myapi 熔断 = **三态自动恢复**（open 后 half-open 探测，成功则 closed）
 - new-api 独有**关键词熔断**（按错误文本禁渠道，如余额不足），myapi 可考虑借鉴
 
+### 协议/算法差异全景（对照 new-api 源码 + 实测）
+| 协议/机制 | new-api 算法 | myapi 状态 |
+|---|---|---|
+| OpenAI usage | prompt_tokens/completion_tokens | ✅ 一致 |
+| Anthropic usage | input_tokens/output_tokens | ✅ 一致 |
+| Gemini usage | usageMetadata.promptTokenCount/candidatesTokenCount | ✅ 已补 |
+| cache token 口径 | 合并进 PromptTokens（计费） | ✅ 独立三列（观测，更忠实） |
+| 图像 token | 各协议精算 | ⚪ 不补（粗筛够用） |
+| 重试状态码 | AutomaticRetryStatusCodes 细范围 | ✅ 可配 |
+| 熔断 | 按次数一次性禁用 | ✅ 三态（更好，能恢复） |
+| 关键词熔断 | AutomaticDisableKeywords（按错误文本禁渠道） | ❌ 无，可借鉴 |
+
+### 可借鉴：关键词熔断
+new-api `AutomaticDisableKeywords`（默认含"Your credit balance is too low"/
+"This organization has been disabled"等）：匹配上游错误文本直接禁渠道。
+比等连续 N 次失败更快，对上游欠费/封禁场景实用。myapi 可考虑加：
+错误响应体匹配关键词 → 立即标记渠道不健康（进熔断 open）。
+
 ## 待办
 - [x] myapi 补 Gemini usage 统计（usageMetadata 字段）— 已完成 119 测试全绿
 - [ ] 考虑 Gemini completion=0 兜底（本地估算）
