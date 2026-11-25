@@ -366,15 +366,15 @@ async fn gateway_messages(
     Json(payload): Json<Value>,
 ) -> axum::response::Response {
     let auth = headers.get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok());
-    // 流式：SSE 转换待实现（第一版拦截）
-    if payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false) {
-        return proto_error(501, "Anthropic 流式（SSE 转换）待实现");
-    }
+    let stream = payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
     let chat_body = match protocol::anthropic_to_openai(&payload) {
         Ok(b) => b,
         Err(e) => return proto_error(400, &format!("Anthropic 转换失败: {e}")),
     };
     let resp = gateway::forward_chat(&s.root, &s.health, &s.pins, &s.rates, auth, chat_body, &s.cache).await;
+    if stream {
+        return proto_stream_reply(resp, protocol_stream::AnthropicSseState::new()).await;
+    }
     proto_reply(resp, |chat| protocol::openai_to_anthropic(chat)).await
 }
 
@@ -385,15 +385,80 @@ async fn gateway_responses(
     Json(payload): Json<Value>,
 ) -> axum::response::Response {
     let auth = headers.get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok());
-    if payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false) {
-        return proto_error(501, "Responses 流式（SSE 转换）待实现");
-    }
+    let stream = payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
     let chat_body = match protocol::responses_to_chat(&payload) {
         Ok(b) => b,
         Err(e) => return proto_error(400, &format!("Responses 转换失败: {e}")),
     };
     let resp = gateway::forward_chat(&s.root, &s.health, &s.pins, &s.rates, auth, chat_body, &s.cache).await;
+    if stream {
+        return proto_stream_reply(resp, protocol_stream::ResponsesSseState::new()).await;
+    }
     proto_reply(resp, |chat| protocol::chat_to_responses(chat)).await
+}
+
+/// 流式响应：读上游 chat SSE 流 → 逐行转换 → 目标协议 SSE 流（学 cc-switch streaming 管道）
+async fn proto_stream_reply<S: protocol_stream::SseTransformer + Send + 'static>(
+    resp: axum::response::Response,
+    mut state: S,
+) -> axum::response::Response {
+    let status = resp.status();
+    if !status.is_success() {
+        let (parts, body) = resp.into_parts();
+        let bytes = http_body_util::BodyExt::collect(body).await.map(|b| b.to_bytes()).unwrap_or_default();
+        let mut r = axum::response::Response::builder().status(status);
+        if let Some(ct) = parts.headers.get("content-type") { r = r.header("content-type", ct); }
+        return r.body(axum::body::Body::from(bytes)).unwrap_or_else(|_| proto_error(502, "错误响应构造失败"));
+    }
+    let (parts, body) = resp.into_parts();
+    use http_body_util::BodyExt;
+    let mut chunks = body.into_data_stream();
+    let mut buffer = String::new();
+    let mut finished = false;
+    let stream = futures_util::stream::poll_fn(move |cx| -> std::task::Poll<Option<Result<bytes::Bytes, std::convert::Infallible>>> {
+        loop {
+            if finished { return std::task::Poll::Ready(None); }
+            if let Some(pos) = buffer.find('\n') {
+                let line = buffer[..pos].trim().to_string();
+                buffer = buffer[pos + 1..].to_string();
+                if let Some(data) = line.strip_prefix("data:") {
+                    let data = data.trim();
+                    if data == "[DONE]" {
+                        let out = state.finish();
+                        finished = true;
+                        if !out.is_empty() {
+                            return std::task::Poll::Ready(Some(Ok(bytes::Bytes::from(out.join("")))));
+                        }
+                        return std::task::Poll::Ready(None);
+                    }
+                    let out = state.push(data);
+                    if !out.is_empty() {
+                        return std::task::Poll::Ready(Some(Ok(bytes::Bytes::from(out.join("")))));
+                    }
+                }
+                continue;
+            }
+            match futures_util::StreamExt::poll_next_unpin(&mut chunks, cx) {
+                std::task::Poll::Ready(Some(Ok(b))) => {
+                    buffer.push_str(&String::from_utf8_lossy(&b));
+                }
+                std::task::Poll::Ready(Some(Err(_))) | std::task::Poll::Ready(None) => {
+                    let out = state.finish();
+                    finished = true;
+                    if !out.is_empty() {
+                        return std::task::Poll::Ready(Some(Ok(bytes::Bytes::from(out.join("")))));
+                    }
+                    return std::task::Poll::Ready(None);
+                }
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
+    });
+    let mut r = axum::response::Response::builder().status(200).header("content-type", "text/event-stream");
+    for (k, v) in parts.headers.iter() {
+        if k != "content-type" && k != "content-length" { r = r.header(k, v); }
+    }
+    r.body(axum::body::Body::from_stream(stream)).unwrap_or_else(|_| proto_error(502, "流式响应构造失败"))
 }
 
 /// 读 chat 响应 body → 转目标协议 → 返回；错误时透传原始 body
@@ -2225,4 +2290,121 @@ mod tests {
         assert_eq!(st, CircuitState::Open, "两次 record_outcome（第二次 force_open）应 Open");
     }
 
+
+    // ==================== 协议端点端到端（/v1/messages + /v1/responses 走 mock 上游）====================
+    #[tokio::test]
+    async fn messages_endpoint_anthropic_roundtrip() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-1", "model": "up-model",
+                "choices": [{"message": {"role": "assistant", "content": "你好"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            }))).expect(1).mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+        let router = build_router(S::new(dir.path().to_path_buf()));
+
+        let body = json!({"model": "up-model", "max_tokens": 100,
+            "system": "你是助手", "messages": [{"role": "user", "content": "你好"}]});
+        let resp = router.oneshot(Request::post("/v1/messages")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let j: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(j["role"], "assistant");
+        assert_eq!(j["content"][0]["type"], "text");
+        assert_eq!(j["content"][0]["text"], "你好");
+        assert_eq!(j["stop_reason"], "end_turn");
+        assert_eq!(j["usage"]["input_tokens"], 10);
+        assert_eq!(j["usage"]["output_tokens"], 5);
+    }
+
+    #[tokio::test]
+    async fn messages_endpoint_anthropic_stream() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!("data: {\"choices\":[{\"delta\":{\"content\":\"你好\"},\"index\":0}],\"model\":\"up-model\"}\n\n", "data: {\"choices\":[{\"delta\":{},\"index\":0}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n", "data: [DONE]\n\n")))
+            .expect(1).mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+        let router = build_router(S::new(dir.path().to_path_buf()));
+
+        let body = json!({"model": "up-model", "max_tokens": 100, "stream": true,
+            "messages": [{"role": "user", "content": "你好"}]});
+        let resp = router.oneshot(Request::post("/v1/messages")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let s = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(s.contains("message_start"), "应发 message_start，实际: {s}");
+        assert!(s.contains("text_delta"), "应发 text_delta，实际: {s}");
+        assert!(s.contains("你好"), "文本应转换，实际: {s}");
+        assert!(s.contains("message_delta"), "应发 message_delta，实际: {s}");
+        assert!(s.contains("message_stop"), "应发 message_stop，实际: {s}");
+    }
+
+    #[tokio::test]
+    async fn responses_endpoint_roundtrip() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-1", "model": "up-model", "created": 123,
+                "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+            }))).expect(1).mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+        let router = build_router(S::new(dir.path().to_path_buf()));
+
+        let body = json!({"model": "up-model", "instructions": "you are helper",
+            "input": [{"type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}]}]});
+        let resp = router.oneshot(Request::post("/v1/responses")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let j: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(j["object"], "response");
+        assert_eq!(j["status"], "completed");
+        assert_eq!(j["output"][0]["type"], "message");
+        assert_eq!(j["output"][0]["content"][0]["text"], "hi");
+        assert_eq!(j["usage"]["input_tokens"], 3);
+    }
+
+    #[tokio::test]
+    async fn responses_endpoint_stream() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"index\":0}],\"model\":\"up-model\"}\n\n", "data: {\"choices\":[{\"delta\":{},\"index\":0}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n", "data: [DONE]\n\n")))
+            .expect(1).mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+        let router = build_router(S::new(dir.path().to_path_buf()));
+
+        let body = json!({"model": "up-model", "stream": true,
+            "input": [{"type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}]}]});
+        let resp = router.oneshot(Request::post("/v1/responses")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let s = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(s.contains("response.created"), "应发 response.created，实际: {s}");
+        assert!(s.contains("response.output_text.delta"), "应发 delta，实际: {s}");
+        assert!(s.contains("response.completed"), "应发 completed，实际: {s}");
+        assert!(s.contains("\"status\":\"completed\""));
+    }
 }

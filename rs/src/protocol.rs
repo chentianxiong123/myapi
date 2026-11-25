@@ -156,8 +156,23 @@ pub fn openai_to_anthropic(body: &Value) -> Result<Value, String> {
     });
     if let Some(id) = body.get("id") { result["id"] = id.clone(); }
     if let Some(model) = body.get("model") { result["model"] = model.clone(); }
-    if let Some(usage) = body.get("usage") { result["usage"] = usage.clone(); }
+    if let Some(usage) = body.get("usage") { result["usage"] = chat_usage_to_anthropic(usage); }
     Ok(result)
+}
+
+/// chat usage → Anthropic 三桶 usage（学 cc-switch build_anthropic_usage_json）。
+fn chat_usage_to_anthropic(u: &Value) -> Value {
+    let prompt = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let completion = u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let cache_read = u.get("prompt_tokens_details").and_then(|d| d.get("cached_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
+    let cache_creation = u.get("prompt_tokens_details").and_then(|d| d.get("cached_tokens")).map(|_| 0).unwrap_or(0);
+    let mut out = json!({
+        "input_tokens": prompt.saturating_sub(cache_read).saturating_sub(cache_creation),
+        "output_tokens": completion,
+    });
+    if cache_read > 0 { out["cache_read_input_tokens"] = json!(cache_read); }
+    if cache_creation > 0 { out["cache_creation_input_tokens"] = json!(cache_creation); }
+    out
 }
 
 /// 流式请求注入 `stream_options.include_usage`（学 cc-switch `inject_openai_stream_include_usage`）。
@@ -602,7 +617,8 @@ mod tests {
         assert_eq!(out["content"][0]["type"], "text");
         assert_eq!(out["content"][0]["text"], "你好");
         assert_eq!(out["stop_reason"], "end_turn");
-        assert_eq!(out["usage"]["prompt_tokens"], 10);
+        assert_eq!(out["usage"]["input_tokens"], 10);
+        assert_eq!(out["usage"]["output_tokens"], 5);
     }
 
     #[test]

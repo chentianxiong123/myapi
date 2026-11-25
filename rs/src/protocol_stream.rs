@@ -336,6 +336,22 @@ impl ResponsesSseState {
     }
 }
 
+/// 统一 SSE 转换接口（main.rs 的 proto_stream_reply 使用）。
+pub trait SseTransformer {
+    fn push(&mut self, data: &str) -> Vec<String>;
+    fn finish(&mut self) -> Vec<String>;
+}
+
+impl SseTransformer for AnthropicSseState {
+    fn push(&mut self, data: &str) -> Vec<String> { AnthropicSseState::push(self, data) }
+    fn finish(&mut self) -> Vec<String> { AnthropicSseState::finish(self) }
+}
+
+impl SseTransformer for ResponsesSseState {
+    fn push(&mut self, data: &str) -> Vec<String> { ResponsesSseState::push(self, data) }
+    fn finish(&mut self) -> Vec<String> { ResponsesSseState::finish(self) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
