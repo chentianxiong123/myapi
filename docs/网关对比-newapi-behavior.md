@@ -45,6 +45,17 @@
 
 **结论**：myapi 已补齐 Gemini usage 统计（usageMetadata/promptTokenCount/candidatesTokenCount/cachedContentTokenCount），与 new-api 对齐。wiremock 真测通过。
 
+### cache token 口径差异（Claude 三段式）
+| | new-api | myapi |
+|---|---|---|
+| input_tokens | 含 cache 的总输入（OpenAI 风格合并，`cacheCreation = PromptTokens - input - cached`） | 纯 input（Anthropic 原始） |
+| cache_read/creation | 合并进 PromptTokens 计费 | **独立三列保留** |
+| total_input 公式 | prompt_tokens 已含 cache | `cache_read + cache_creation + input`（Anthropic 官方口径） |
+
+**Anthropic 官方**：`total_input = cache_read_input_tokens + cache_creation_input_tokens + input_tokens`。
+new-api 为计费合并（PromptTokens 要算钱）；myapi 为观测拆开存（能直接算 cache 命中率）。
+**两种都对，目的不同**，myapi 忠实保留原始三段，不低估不漏。
+
 ### 统计口径
 | 维度 | new-api | myapi |
 |---|---|---|
