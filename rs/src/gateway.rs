@@ -47,6 +47,10 @@ pub struct RetryConfig {
     /// 一次命中即强制熔断该通道 + failover（不等连续失败次数）。针对欠费/封号等"重试也没用"的错误。
     #[serde(default)]
     pub disable_keywords: Vec<String>,
+    /// 上下文不足关键词（context_length_exceeded 等）：命中 → 视为"模型窗口不够"，
+    /// 可换更大窗口通道重试（豁免 max_retries），全候选都窗口不够才反馈客户端。
+    #[serde(default)]
+    pub context_keywords: Vec<String>,
 }
 
 fn def_retry_max() -> usize { 3 }
@@ -71,6 +75,17 @@ fn def_disable_keywords() -> Vec<String> {
     ]
 }
 
+/// 上下文不足默认词表（context_length_exceeded 等）：模型窗口装不下请求
+fn def_context_keywords() -> Vec<String> {
+    vec![
+        "context_length_exceeded".into(),
+        "maximum context length".into(),
+        "exceeds the maximum".into(),
+        "too many tokens".into(),
+        "context length".into(),
+    ]
+}
+
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
@@ -82,6 +97,7 @@ impl Default for RetryConfig {
             jitter: def_jitter(),
             respect_retry_after: def_respect_retry_after(),
             disable_keywords: def_disable_keywords(),
+            context_keywords: def_context_keywords(),
         }
     }
 }
@@ -1153,6 +1169,7 @@ pub async fn forward_generic(
         }
         let mut last_err = String::new();
         let mut attempted: u32 = 0; // 已重试次数（退避指数用）
+        let mut last_context_err: Option<String> = None;
         for cand in &candidates {
             let sel = SelectedChannel {
                 provider: cand.provider.clone(),
@@ -1167,6 +1184,11 @@ pub async fn forward_generic(
             match forward_one(root, &config, health, &sel, &requested_model, &payload, upstream_path, dkey.as_deref(), &policy).await {
                 Ok(resp) => return resp,
                 Err(e) => {
+                    // context 不足：豁免 max_retries，继续试下一个（换更大窗口通道，全废才反馈）
+                    if e.is_context() {
+                        last_context_err = Some(e.message());
+                        continue;
+                    }
                     // 错误分类（学 LiteLLM）：致命 4xx（鉴权/参数）重试也没用 → 直接透传
                     if !e.is_retryable() {
                         return error_response(e.status().unwrap_or(502), &e.message());
@@ -1180,6 +1202,9 @@ pub async fn forward_generic(
                     continue; // fallback 下一个
                 }
             }
+        }
+        if let Some(ctx) = last_context_err {
+            return error_response(502, &format!("auto: 所有候选都装不下上下文（最后: {}）", ctx));
         }
         return error_response(502, &format!("auto: 所有候选失败, 最后错误: {}", last_err));
     }
@@ -1224,7 +1249,9 @@ pub async fn forward_generic(
     let max_retries = config.retry.max_retries.min(candidates.len());
     let mut last_err = String::new();
     let mut attempted: u32 = 0; // 已重试次数（退避指数用）
-    for cand in candidates.iter().take(max_retries.max(1)) {
+    let mut last_context_err: Option<String> = None;
+    for cand in candidates.iter() {
+        if (attempted as usize) >= max_retries.max(1) { break; } // 普通失败达上限；context 不足不占次数
         // 限流：通道配了 rpm 且超限 → 跳过（防打爆上游）
         if let Some(rpm) = cand.channel.rpm {
             if is_rate_limited(rates, &cand.channel.id, rpm) { continue; }
@@ -1252,6 +1279,11 @@ pub async fn forward_generic(
                 return resp;
             }
             Err(e) => {
+                // context 不足：豁免 max_retries，继续试下一个（换更大窗口通道，全废才反馈）
+                if e.is_context() {
+                    last_context_err = Some(e.message());
+                    continue;
+                }
                 // 错误分类（学 LiteLLM）：致命 4xx（鉴权/参数）重试也没用 → 直接透传
                 if !e.is_retryable() {
                     return error_response(e.status().unwrap_or(502), &e.message());
@@ -1288,6 +1320,10 @@ pub async fn forward_generic(
             }
         }
     }
+    // context 不足优先反馈（客户端无感，除非全候选窗口都不够）
+    if let Some(ctx) = last_context_err {
+        return error_response(502, &format!("所有候选都装不下上下文（最后: {}）", ctx));
+    }
     error_response(502, &format!("所有通道失败（试了 {} 条）: {}", max_retries.max(1), last_err))
 }
 
@@ -1298,15 +1334,20 @@ enum ForwardError {
     Retryable { status: Option<u16>, retry_after: Option<std::time::Duration>, msg: String },
     /// 不可重试：其他 4xx（鉴权/参数/找不到）。重试也没用，直接透传。
     Fatal { status: Option<u16>, msg: String },
+    /// 上下文不足（context_length_exceeded）：模型窗口装不下请求。可换更大窗口通道重试，豁免 max_retries。
+    Context { status: Option<u16>, msg: String },
 }
 
 impl ForwardError {
     fn is_retryable(&self) -> bool {
         matches!(self, ForwardError::Retryable { .. })
     }
+    fn is_context(&self) -> bool {
+        matches!(self, ForwardError::Context { .. })
+    }
     fn status(&self) -> Option<u16> {
         match self {
-            ForwardError::Retryable { status, .. } | ForwardError::Fatal { status, .. } => *status,
+            ForwardError::Retryable { status, .. } | ForwardError::Fatal { status, .. } | ForwardError::Context { status, .. } => *status,
         }
     }
     fn retry_after(&self) -> Option<std::time::Duration> {
@@ -1317,7 +1358,7 @@ impl ForwardError {
     }
     fn message(&self) -> String {
         match self {
-            ForwardError::Retryable { msg, .. } | ForwardError::Fatal { msg, .. } => msg.clone(),
+            ForwardError::Retryable { msg, .. } | ForwardError::Fatal { msg, .. } | ForwardError::Context { msg, .. } => msg.clone(),
         }
     }
 }
@@ -1557,20 +1598,55 @@ async fn forward_one(
 
     // 错误分类（学 LiteLLM，可配置）：致命 4xx（鉴权/参数）直接透传；可重试状态码返 Err 触发 failover
     let code = status.as_u16();
-    if status.is_server_error() && policy.is_fatal(code) {
-        // 5xx 但被配成致命（罕见）→ 透传
-        return Err(ForwardError::Fatal { status: Some(code), msg: format!("上游错误（配置为致命）{}", code) });
-    }
-    if status.is_client_error() && policy.is_fatal(code) {
-        return Err(ForwardError::Fatal { status: Some(code), msg: format!("上游客户端错误 {}", code) });
-    }
-    if status.is_server_error() || (status.is_client_error() && policy.is_retryable(code)) {
-        // 关键词熔断（学 new-api）：先读错误响应体，含欠费/封号等关键词 → 强制 open + Retryable 切通道。
-        // 必须在 5xx 早返回之前做，否则 5xx 直接 return 到不了后面的关键词分支。
-        let retry_after = parse_retry_after(&resp); // 只读 headers，在消耗 body 前取
-        let body_bytes = resp.bytes().await.unwrap_or_default();
-        if let Some(kw) = hit_disable_keyword(&body_bytes, &policy.disable_keywords) {
-            record_outcome(health, &selected.channel.id, false, ttft, cb, false, true).await;
+    if !status.is_success() {
+        // 失败路径：读 body 分类（move resp 后不再需要回传）
+        let retry_after = parse_retry_after(&resp);
+        let body_bytes = resp.bytes().await.unwrap_or_default().to_vec();
+        // context 不足检测（任何 fatal 判断前）：模型窗口装不下 → 可换更大窗口通道，豁免 max_retries
+        if !policy.context_keywords.is_empty() {
+            if let Some(kw) = hit_disable_keyword(&body_bytes, &policy.context_keywords) {
+                record_outcome(health, &selected.channel.id, false, ttft, cb, false, false).await;
+                crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
+                    model: requested_model.into(),
+                    provider: selected.provider.name.clone(),
+                    channel: selected.channel.name.clone(),
+                    status: status.as_u16(),
+                    latency_ms: start.elapsed().as_millis() as u64,
+                    ttft_ms: ttft,
+                    input_tokens: None, output_tokens: None,
+                    cache_read_tokens: None, cache_creation_tokens: None,
+                    downstream_key: dkey.map(|s| s.to_string()),
+                    error: Some(format!("上下文不足 '{}'：{}", kw, String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(200)]))),
+                }).await;
+                return Err(ForwardError::Context { status: Some(code), msg: format!("上下文不足：{}", kw) });
+            }
+        }
+        if status.is_server_error() && policy.is_fatal(code) {
+            return Err(ForwardError::Fatal { status: Some(code), msg: format!("上游错误（配置为致命）{}", code) });
+        }
+        if status.is_client_error() && policy.is_fatal(code) {
+            return Err(ForwardError::Fatal { status: Some(code), msg: format!("上游客户端错误 {}", code) });
+        }
+        if status.is_server_error() || (status.is_client_error() && policy.is_retryable(code)) {
+            // 关键词熔断（学 new-api）：含欠费/封号等关键词 → 强制 open + Retryable 切通道
+            if let Some(kw) = hit_disable_keyword(&body_bytes, &policy.disable_keywords) {
+                record_outcome(health, &selected.channel.id, false, ttft, cb, false, true).await;
+                crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
+                    model: requested_model.into(),
+                    provider: selected.provider.name.clone(),
+                    channel: selected.channel.name.clone(),
+                    status: status.as_u16(),
+                    latency_ms: start.elapsed().as_millis() as u64,
+                    ttft_ms: ttft,
+                    input_tokens: None, output_tokens: None,
+                    cache_read_tokens: None, cache_creation_tokens: None,
+                    downstream_key: dkey.map(|s| s.to_string()),
+                    error: Some(format!("关键词熔断命中 '{}'：{}", kw, String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(200)]))),
+                }).await;
+                return Err(ForwardError::Retryable { status: Some(status.as_u16()), retry_after: None,
+                    msg: format!("关键词熔断：响应体命中 '{}'，切通道", kw) });
+            }
+            // 普通错误（无关键词）：记日志 + 早返回触发 failover
             crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
                 model: requested_model.into(),
                 provider: selected.provider.name.clone(),
@@ -1578,31 +1654,18 @@ async fn forward_one(
                 status: status.as_u16(),
                 latency_ms: start.elapsed().as_millis() as u64,
                 ttft_ms: ttft,
-                input_tokens: None, output_tokens: None,
-                cache_read_tokens: None, cache_creation_tokens: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
                 downstream_key: dkey.map(|s| s.to_string()),
-                error: Some(format!("关键词熔断命中 '{}'：{}", kw, String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(200)]))),
+                error: Some(format!("HTTP {}", status.as_u16())),
             }).await;
-            return Err(ForwardError::Retryable { status: Some(status.as_u16()), retry_after: None,
-                msg: format!("关键词熔断：响应体命中 '{}'，切通道", kw) });
+            return Err(ForwardError::Retryable { status: Some(status.as_u16()), retry_after, msg: format!("上游服务端错误 {}", status.as_u16()) });
         }
-        // 普通错误（无关键词）：记日志 + 早返回触发 failover
-        crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
-            model: requested_model.into(),
-            provider: selected.provider.name.clone(),
-            channel: selected.channel.name.clone(),
-            status: status.as_u16(),
-            latency_ms: start.elapsed().as_millis() as u64,
-            ttft_ms: ttft,
-            input_tokens: None,
-            output_tokens: None,
-            cache_read_tokens: None,
-            cache_creation_tokens: None,
-            downstream_key: dkey.map(|s| s.to_string()),
-            error: Some(format!("HTTP {}", status.as_u16())),
-        }).await;
-        return Err(ForwardError::Retryable { status: Some(status.as_u16()), retry_after, msg: format!("上游服务端错误 {}", status.as_u16()) });
+        return Err(ForwardError::Fatal { status: Some(code), msg: format!("上游错误 {}", code) });
     }
+
 
     // 回传（真流式：SSE 逐 chunk 透传；非流式回整包）
     let upstream_headers = resp.headers().clone();
@@ -2750,4 +2813,32 @@ mod tests {
         assert_eq!(sse_scan_usage(body.as_bytes()), None);
     }
 
+
+    // ---- context 不足错误反馈（用户拍板：网关全试，全废才反馈）----
+
+    #[test]
+    fn context_keyword_detection() {
+        let cfg = RetryConfig::default();
+        // 标准 OpenAI context_length_exceeded 响应体
+        let body = br#"{"error":{"message":"This model's maximum context length is 200000 tokens. You requested 250000 tokens."}}"#;
+        assert!(hit_disable_keyword(body, &cfg.context_keywords).is_some(),
+            "context 词表应命中 context_length_exceeded");
+        // 欠费词表不命中 context 错误（两组词表独立）
+        assert!(hit_disable_keyword(body, &cfg.disable_keywords).is_none(),
+            "欠费词表不应命中 context 错误");
+        // 欠费错误也不命中 context 词表
+        let quota = br#"{"error":{"message":"insufficient quota"}}"#;
+        assert!(hit_disable_keyword(quota, &cfg.disable_keywords).is_some());
+        assert!(hit_disable_keyword(quota, &cfg.context_keywords).is_none());
+    }
+
+    #[test]
+    fn forward_error_context_is_context() {
+        let e = ForwardError::Context { status: Some(400), msg: "ctx".into() };
+        assert!(e.is_context(), "Context 变体应 is_context");
+        assert!(!e.is_retryable(), "Context 不是普通可重试");
+        assert_eq!(e.status(), Some(400));
+        let r = ForwardError::Retryable { status: Some(429), retry_after: None, msg: "r".into() };
+        assert!(!r.is_context(), "Retryable 不是 context");
+    }
 }
