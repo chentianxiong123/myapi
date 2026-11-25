@@ -156,6 +156,15 @@ pub struct ChannelModel {
     /// 硬能力（vision/pdf/audio，学 9router HARD_CAPS）；Auto 模式按请求需求匹配
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// 协议（openai_chat/openai_responses/anthropic/gemini/ollama，前端配置）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    /// 模型类型（chat/webSearch/webFetch/embedding/vision，前端配置）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// 模型级上下文窗口（token）：上下文错误反馈时跳过装不下的（配置时填，运行时零成本）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<i64>,
 }
 
 /// 供应商：上游一个厂商（含密钥池 + 多条通道）
@@ -176,6 +185,12 @@ pub struct Provider {
     /// 渠道级代理（空=直连）
     #[serde(default)]
     pub proxy: String,
+    /// 代理池引用（学 9router proxyPools；空=不用池）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proxy_pool_id: String,
+    /// 代理池选择策略（round-robin/random/none）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proxy_strategy: String,
 }
 
 /// 网关配置（config/gateway.yaml）
@@ -2163,10 +2178,12 @@ mod tests {
                 name: "c1".into(),
                 path: None,
                 key_name: None,
-                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }],
+                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] ,
+                    ..Default::default()}],
                 weight: 1, rpm: None, retry: None, max_input_tokens: None }],
             proxy: String::new(),
-        });
+        
+            ..Default::default()});
         let h = health_map();
         // ch1 打开 + 未超恢复超时 → select_channel 应回退到它（KeepAll，全熔断兼底）
         for _ in 0..5 {
@@ -2187,12 +2204,15 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
+                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] ,
+                        ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None },
                 Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
+                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] ,
+                        ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None },
             ],
             proxy: String::new(),
-        });
+        
+            ..Default::default()});
         let h = health_map();
         let pins = new_pin_store();
         // 第一次选通道（应 pin 到 ch1，第一个候选）
@@ -2214,12 +2234,15 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
+                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] ,
+                        ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None },
                 Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
+                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] ,
+                        ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None },
             ],
             proxy: String::new(),
-        });
+        
+            ..Default::default()});
         let h = health_map();
         let pins = new_pin_store();
         // 先 pin 到 ch1
@@ -2244,9 +2267,11 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None }],
+                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] ,
+                    ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None }],
             proxy: String::new(),
-        });
+        
+            ..Default::default()});
         let h = health_map();
         let pins = new_pin_store();
         // 关闭黏性 → 不打 pin
@@ -2264,9 +2289,11 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None }],
+                models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] ,
+                    ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None }],
             proxy: String::new(),
-        });
+        
+            ..Default::default()});
         let h = health_map();
         let pins = new_pin_store();
         // pin 到 ch1
@@ -2294,12 +2321,15 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "slow".into(), name: "slow".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] ,
+                        ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None },
                 Channel { id: "fast".into(), name: "fast".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] ,
+                        ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None },
             ],
             proxy: String::new(),
-        });
+        
+            ..Default::default()});
         let h = health_map();
         // slow 通道平均 TTFT 800ms，fast 通道 200ms
         for _ in 0..5 {
@@ -2338,12 +2368,15 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] ,
+                        ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None },
                 Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] ,
+                        ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None },
             ],
             proxy: String::new(),
-        });
+        
+            ..Default::default()});
         cfg
     }
 
@@ -2398,10 +2431,12 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel {
                 id: "ch-text".into(), name: "text".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "text-only".into(), alias: None, capabilities: vec![] }],
+                models: vec![ChannelModel { name: "text-only".into(), alias: None, capabilities: vec![] ,
+                    ..Default::default()}],
                 weight: 1, rpm: None, retry: None, max_input_tokens: None }],
             proxy: String::new(),
-        });
+        
+            ..Default::default()});
         let h = health_map();
         // 带图请求需要 vision，text-only 没该能力 → 应过滤掉
         let payload = serde_json::json!({"messages":[{"role":"user","content":[
@@ -2462,10 +2497,12 @@ mod tests {
             keys: vec![NamedKey { name: "k".into(), api_key: "k".into() }],
             channels: vec![Channel {
                 id: "ch-text".into(), name: "t".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "my-model".into(), alias: None, capabilities: vec![] }],
+                models: vec![ChannelModel { name: "my-model".into(), alias: None, capabilities: vec![] ,
+                    ..Default::default()}],
                 weight: 1, rpm: None, retry: None, max_input_tokens: None }],
             proxy: String::new(),
-        });
+        
+            ..Default::default()});
         let h = health_map();
         // 模型存在但缺 vision 能力 → 能力过滤后空（调用点据此返回 409，不静默降级）
         assert!(ordered_candidates(&cfg, "my-model", &h, None, 0, &["vision".into()]).is_empty());
@@ -2482,14 +2519,17 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "ch-slow".into(), name: "slow".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m-slow".into(), alias: None, capabilities: vec!["vision".into()] }],
+                    models: vec![ChannelModel { name: "m-slow".into(), alias: None, capabilities: vec!["vision".into()] ,
+                        ..Default::default()}],
                     weight: 1, rpm: None, retry: None, max_input_tokens: None },
                 Channel { id: "ch-fast".into(), name: "fast".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m-fast".into(), alias: None, capabilities: vec!["vision".into()] }],
+                    models: vec![ChannelModel { name: "m-fast".into(), alias: None, capabilities: vec!["vision".into()] ,
+                        ..Default::default()}],
                     weight: 1, rpm: None, retry: None, max_input_tokens: None },
             ],
             proxy: String::new(),
-        });
+        
+            ..Default::default()});
         let h = health_map();
         // fast 200ms, slow 800ms
         for _ in 0..5 {
@@ -2513,10 +2553,12 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel {
                 id: "ch-open".into(), name: "open".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "m".into(), alias: None, capabilities: vec![] }],
+                models: vec![ChannelModel { name: "m".into(), alias: None, capabilities: vec![] ,
+                    ..Default::default()}],
                 weight: 1, rpm: None, retry: None, max_input_tokens: None }],
             proxy: String::new(),
-        });
+        
+            ..Default::default()});
         let h = health_map();
         // ch-open 连续失败 5 次 → open（未超恢复时间）
         for _ in 0..5 {
@@ -2540,12 +2582,15 @@ mod tests {
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![
                 Channel { id: "chA".into(), name: "a".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] ,
+                        ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None },
                 Channel { id: "chB".into(), name: "b".into(), path: None, key_name: None,
-                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None },
+                    models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] ,
+                        ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None },
             ],
             proxy: String::new(),
-        });
+        
+            ..Default::default()});
         let h = health_map();
         // 无 pin：应返回两条候选（failover 链完整）
         let cands = ordered_candidates(&cfg, "my-model", &h, None, 0, &[]);
@@ -2563,17 +2608,21 @@ mod tests {
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "chOff".into(), name: "off".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None }],
+                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] ,
+                    ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None }],
             proxy: String::new(),
-        });
+        
+            ..Default::default()});
         cfg.providers.push(Provider {
             name: "on".into(), base_url: "http://y/v1".into(), disabled: false,
             headers: HashMap::new(),
             keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
             channels: vec![Channel { id: "chOn".into(), name: "on".into(), path: None, key_name: None,
-                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] }], weight: 1, rpm: None, retry: None, max_input_tokens: None }],
+                models: vec![ChannelModel { name: "m".into(), alias: Some("my-model".into()), capabilities: vec![] ,
+                    ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None }],
             proxy: String::new(),
-        });
+        
+            ..Default::default()});
         let h = health_map();
         let cands = ordered_candidates(&cfg, "my-model", &h, None, 0, &[]);
         assert_eq!(cands.len(), 1, "disabled provider 应被跳过");

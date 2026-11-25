@@ -65,7 +65,8 @@ fn extract_models(s: &Value) -> Vec<ChannelModel> {
     let mut out: Vec<ChannelModel> = Vec::new();
     let mut push = |id: String| {
         if !id.trim().is_empty() && !out.iter().any(|m| m.name == id) {
-            out.push(ChannelModel { name: id, alias: None, capabilities: Vec::new() });
+            out.push(ChannelModel { name: id, alias: None, capabilities: Vec::new() ,
+                ..Default::default()});
         }
     };
     // 1) models[].id（openclaw / dsh / gemini 用）
@@ -189,7 +190,8 @@ pub fn import_from_db(db_path: &str) -> Result<Vec<Provider>, String> {
                 max_input_tokens: None,
             }],
             proxy: String::new(),
-        });
+        
+            ..Default::default()});
     }
     Ok(out)
 }
@@ -321,11 +323,13 @@ mod tests {
             Provider { name: "existing".into(), base_url: "http://a/v1".into(), disabled: false,
                 headers: HashMap::new(), keys: vec![NamedKey{name:"主".into(),api_key:"k".into()}],
                 channels: vec![Channel{id:"c1".into(),name:"existing".into(),path:None,key_name:Some("主".into()),
-                    models:vec![],weight:1,rpm:None,retry:None,max_input_tokens:None}], proxy: String::new() },
+                    models:vec![],weight:1,rpm:None,retry:None,max_input_tokens:None}], proxy: String::new() ,
+                ..Default::default()},
             Provider { name: "new-provider".into(), base_url: "http://b/v1".into(), disabled: false,
                 headers: HashMap::new(), keys: vec![NamedKey{name:"主".into(),api_key:"k2".into()}],
                 channels: vec![Channel{id:"c2".into(),name:"new-provider".into(),path:None,key_name:Some("主".into()),
-                    models:vec![],weight:1,rpm:None,retry:None,max_input_tokens:None}], proxy: String::new() },
+                    models:vec![],weight:1,rpm:None,retry:None,max_input_tokens:None}], proxy: String::new() ,
+                ..Default::default()},
         ];
         let added = merge_into_yaml(&yaml, &imported).unwrap();
         assert_eq!(added, 1, "同名 existing 应跳过，只加 new-provider");
