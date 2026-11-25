@@ -1876,4 +1876,105 @@ mod tests {
         assert_eq!(summary["total_output_tokens"].as_i64(), Some(6), "Gemini candidatesTokenCount 记进 output");
     }
 
+
+    // ==================== mock 供应商·流式 SSE 端到端（纳入测试框架）====================
+    // wiremock 造假上游返回 SSE，核对跨 chunk 累积的 usage 记进统计。三协议各一。
+    // 非流式 e2e mock 见本模块 e2e_mock_provider_*。
+
+    async fn stream_mock_state(dir: &std::path::Path, upstream: &MockServer) -> S {
+        let cfg = json!({
+            "listen": 0, "sticky": {"enabled": false},
+            "retry": {"max_retries": 1, "retry_on_status": []},
+            "providers": [{
+                "name": "mock-co", "base_url": format!("{}/v1", upstream.uri()),
+                "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk-mock"}],
+                "channels": [{"id": "ch1", "name": "mock通道", "key_name": "主",
+                              "models": [{"name": "m", "alias": "my-model"}]}],
+            }],
+        });
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        api::write_yaml_json(&dir.join("config").join("gateway.yaml"), &cfg).unwrap();
+        S::new(dir.to_path_buf())
+    }
+
+    fn sse(chunks: &[String]) -> String {
+        let mut s = String::new();
+        for c in chunks { s.push_str("data: "); s.push_str(c); s.push_str("\n\n"); }
+        s.push_str("data: [DONE]\n\n");
+        s
+    }
+
+    #[tokio::test]
+    async fn stream_mock_openai_usage_recorded() {
+        let upstream = MockServer::start().await;
+        let body = sse(&[
+            json!({"choices":[{"delta":{"content":"he"}}]}).to_string(),
+            json!({"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":8}}).to_string(),
+        ]);
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body)
+                .insert_header("content-type", "text/event-stream"))
+            .mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        let state = stream_mock_state(dir.path(), &upstream).await;
+        let payload = json!({"model":"my-model","stream":true,"messages":[{"role":"user","content":"hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let _ = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let summary = gateway_logs::query_summary(&dir.path()).unwrap();
+        assert_eq!(summary["total_input_tokens"].as_i64(), Some(20), "OpenAI 流式 input");
+        assert_eq!(summary["total_output_tokens"].as_i64(), Some(8), "OpenAI 流式 output");
+    }
+
+    #[tokio::test]
+    async fn stream_mock_anthropic_split_usage_recorded() {
+        // Anthropic 流式 usage 分片：message_start(input) + message_delta(output)，跨 chunk 合并
+        let upstream = MockServer::start().await;
+        let body = sse(&[
+            json!({"type":"message_start","usage":{"input_tokens":30}}).to_string(),
+            json!({"type":"content_block_delta","delta":{"text":"he"}}).to_string(),
+            json!({"type":"message_delta","usage":{"output_tokens":12}}).to_string(),
+        ]);
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body)
+                .insert_header("content-type", "text/event-stream"))
+            .mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        let state = stream_mock_state(dir.path(), &upstream).await;
+        let payload = json!({"model":"my-model","stream":true,"messages":[{"role":"user","content":"hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let _ = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let summary = gateway_logs::query_summary(&dir.path()).unwrap();
+        assert_eq!(summary["total_input_tokens"].as_i64(), Some(30), "Anthropic 分片 input（message_start）");
+        assert_eq!(summary["total_output_tokens"].as_i64(), Some(12), "Anthropic 分片 output（message_delta）");
+    }
+
+    #[tokio::test]
+    async fn stream_mock_gemini_usage_recorded() {
+        // Gemini 流式：chunk 顶层 usageMetadata
+        let upstream = MockServer::start().await;
+        let body = sse(&[
+            json!({"candidates":[{"content":{"parts":[{"text":"he"}]}}]}).to_string(),
+            json!({"usageMetadata":{"promptTokenCount":25,"candidatesTokenCount":9}}).to_string(),
+        ]);
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body)
+                .insert_header("content-type", "text/event-stream"))
+            .mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        let state = stream_mock_state(dir.path(), &upstream).await;
+        let payload = json!({"model":"my-model","stream":true,"messages":[{"role":"user","content":"hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let _ = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let summary = gateway_logs::query_summary(&dir.path()).unwrap();
+        assert_eq!(summary["total_input_tokens"].as_i64(), Some(25), "Gemini 流式 input");
+        assert_eq!(summary["total_output_tokens"].as_i64(), Some(9), "Gemini 流式 output");
+    }
+
 }
