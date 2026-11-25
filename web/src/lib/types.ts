@@ -20,6 +20,29 @@ export interface Provider {
   proxy_strategy: 'round-robin' | 'random' | 'none'
 }
 
+// 通道内模型映射（学 LiteLLM Deployment model 字段 + 9router 能力标注）
+export interface ChannelModel {
+  name: string
+  alias?: string
+  protocol?: ModelProtocol
+  kind?: ModelKind
+  // 硬能力（vision/pdf/audio，学 9router HARD_CAPS）：请求需要而模型缺 → 过滤/降级
+  capabilities?: string[]
+  // 模型级上下文窗口（token）：上下文错误反馈时跳过装不下的（配置时填，运行时零成本）
+  context_window?: number
+}
+
+// 通道级重试覆盖（学 LiteLLM RetryPolicy；空=继承全局 retry）
+export interface RetryOverride {
+  max_retries?: number
+  retry_on_status?: number[]
+  fatal_status?: number[]
+  backoff_initial_ms?: number
+  backoff_max_ms?: number
+  jitter?: number
+  respect_retry_after?: boolean
+}
+
 // 通道（命名待定，暂用通道/Channel）：供应商的一条具体接入方式
 // = 一个 key（引用密钥池）× 一条网络路径 × 一组模型名映射 三件套
 // 参考：LiteLLM Deployment（api_key + api_base + model 全绑死在一个 deployment）
@@ -29,8 +52,14 @@ export interface Channel {
   path?: string                 // 网络路径（IPv4/IPv6 描述；空=直连/继承供应商代理）
   key_name?: string             // 引用密钥池的名字（空=用第一个「主」密钥）
   // 该通道覆盖的模型映射：上游真实名 → 可选对外别名
-  models: Array<{ name: string; alias?: string; protocol?: ModelProtocol; kind?: ModelKind }>
+  models: ChannelModel[]
   weight: number                // 路由权重（权重高调用多，默认 1）
+  // 每分钟请求上限（RPM，空=不限）；超限当不可用跳过（防打爆上游）
+  rpm?: number
+  // 通道级最大输入 token（上下文窗口过滤：超长请求跳过装不下的通道）
+  max_input_tokens?: number
+  // 通道级重试覆盖（空=继承全局 retry）
+  retry?: RetryOverride
 }
 
 // 模型类型（学 9router /v1/models 分类：chat/webSearch/webFetch/embedding）

@@ -6,6 +6,9 @@ import { postJSON } from '@/lib/api'
 import type { Provider, ModelProtocol, ProxyPool, Channel } from '@/lib/types'
 import { MODEL_PROTOCOLS, PROXY_STRATEGIES, MODEL_KINDS } from '@/lib/types'
 
+// 硬能力（学 9router HARD_CAPS）：模型能处理的输入类型；缺失的按 9router 规则过滤/降级
+const MODEL_CAPS = ['vision', 'pdf', 'audio'] as const
+
 export default function Providers() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
@@ -238,7 +241,7 @@ export default function Providers() {
     ps[pidx].channels[cidx].models.splice(midx, 1)
     setProviders(ps)
   }
-  function updateChannelModel(pidx: number, cidx: number, midx: number, field: 'name' | 'alias' | 'protocol' | 'kind', value: string) {
+  function updateChannelModel(pidx: number, cidx: number, midx: number, field: 'name' | 'alias' | 'protocol' | 'kind' | 'capabilities' | 'context_window', value: any) {
     const ps = [...providers]
     const m = { ...ps[pidx].channels[cidx].models[midx] } as any
     m[field] = value
@@ -466,6 +469,26 @@ export default function Providers() {
                               className="w-16 rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700"
                             />
                           </div>
+                          <div className="flex items-center gap-1" title="每分钟请求上限，超限当不可用跳过（防打爆上游）">
+                            <span className="text-xs text-gray-400">RPM</span>
+                            <input
+                              type="number"
+                              value={ch.rpm ?? ''}
+                              onChange={e => updateChannel(idx, cidx, 'rpm', e.target.value ? parseInt(e.target.value) : undefined)}
+                              placeholder="不限"
+                              className="w-16 rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700"
+                            />
+                          </div>
+                          <div className="flex items-center gap-1" title="通道级最大输入 token，超长请求跳过装不下的通道">
+                            <span className="text-xs text-gray-400">上限token</span>
+                            <input
+                              type="number"
+                              value={ch.max_input_tokens ?? ''}
+                              onChange={e => updateChannel(idx, cidx, 'max_input_tokens', e.target.value ? parseInt(e.target.value) : undefined)}
+                              placeholder="不限"
+                              className="w-20 rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700"
+                            />
+                          </div>
                           <div className="ml-auto flex items-center gap-2">
                             <button
                               onClick={() => testChannel(idx, cidx)}
@@ -535,6 +558,8 @@ export default function Providers() {
                                   <th className="pb-1 font-medium text-gray-500">Alias（对外，空=用name）</th>
                                   <th className="pb-1 font-medium text-gray-500">协议</th>
                                   <th className="pb-1 font-medium text-gray-500">类型</th>
+                                  <th className="pb-1 font-medium text-gray-500">能力</th>
+                                  <th className="pb-1 font-medium text-gray-500">上下文窗口</th>
                                   <th className="pb-1 w-8"></th>
                                 </tr>
                               </thead>
@@ -574,6 +599,34 @@ export default function Providers() {
                                       >
                                         {MODEL_KINDS.map(kind => <option key={kind.id} value={kind.id}>{kind.label}</option>)}
                                       </select>
+                                    </td>
+                                    <td className="py-1 pr-2">
+                                      <div className="flex flex-wrap gap-1">
+                                        {MODEL_CAPS.map(cap => (
+                                          <label key={cap} className="flex items-center gap-0.5 text-[11px] text-gray-500">
+                                            <input
+                                              type="checkbox"
+                                              checked={(m.capabilities || []).includes(cap)}
+                                              onChange={e => {
+                                                const cur = m.capabilities || []
+                                                const next = e.target.checked ? [...cur, cap] : cur.filter(c => c !== cap)
+                                                updateChannelModel(idx, cidx, midx, 'capabilities', next)
+                                              }}
+                                            />
+                                            {cap}
+                                          </label>
+                                        ))}
+                                      </div>
+                                    </td>
+                                    <td className="py-1 pr-2">
+                                      <input
+                                        type="number"
+                                        value={m.context_window ?? ''}
+                                        onChange={e => updateChannelModel(idx, cidx, midx, 'context_window', e.target.value ? parseInt(e.target.value) : undefined)}
+                                        placeholder="（token）"
+                                        title="模型级上下文窗口：上下文错误反馈时跳过装不下的"
+                                        className="w-full rounded border border-gray-300 px-2 py-1 font-mono dark:border-gray-600 dark:bg-gray-700"
+                                      />
                                     </td>
                                     <td className="py-1">
                                       <button onClick={() => removeChannelModel(idx, cidx, midx)} className="text-red-500 hover:text-red-700">
