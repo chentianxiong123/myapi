@@ -358,6 +358,75 @@ async fn gateway_embeddings(
     gateway::forward_embeddings(&s.root, &s.health, &s.pins, &s.rates, auth, payload, &s.cache).await
 }
 
+/// POST /v1/messages：Anthropic 请求 → 转 chat → 路由 → 响应转回 Anthropic（学 cc-switch 接管 Claude）
+async fn gateway_messages(
+    State(s): State<S>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<Value>,
+) -> axum::response::Response {
+    let auth = headers.get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+    // 流式：SSE 转换待实现（第一版拦截）
+    if payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return proto_error(501, "Anthropic 流式（SSE 转换）待实现");
+    }
+    let chat_body = match protocol::anthropic_to_openai(&payload) {
+        Ok(b) => b,
+        Err(e) => return proto_error(400, &format!("Anthropic 转换失败: {e}")),
+    };
+    let resp = gateway::forward_chat(&s.root, &s.health, &s.pins, &s.rates, auth, chat_body, &s.cache).await;
+    proto_reply(resp, |chat| protocol::openai_to_anthropic(chat)).await
+}
+
+/// POST /v1/responses：Responses 请求 → 转 chat → 路由 → 响应转回 Responses（学 cc-switch 接管 Codex）
+async fn gateway_responses(
+    State(s): State<S>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<Value>,
+) -> axum::response::Response {
+    let auth = headers.get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+    if payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return proto_error(501, "Responses 流式（SSE 转换）待实现");
+    }
+    let chat_body = match protocol::responses_to_chat(&payload) {
+        Ok(b) => b,
+        Err(e) => return proto_error(400, &format!("Responses 转换失败: {e}")),
+    };
+    let resp = gateway::forward_chat(&s.root, &s.health, &s.pins, &s.rates, auth, chat_body, &s.cache).await;
+    proto_reply(resp, |chat| protocol::chat_to_responses(chat)).await
+}
+
+/// 读 chat 响应 body → 转目标协议 → 返回；错误时透传原始 body
+async fn proto_reply<F>(resp: axum::response::Response, f: F) -> axum::response::Response
+where F: Fn(&Value) -> Result<Value, String> {
+    let status = resp.status();
+    let (parts, body) = resp.into_parts();
+    let bytes = http_body_util::BodyExt::collect(body).await.map(|b| b.to_bytes()).unwrap_or_default();
+    if status.is_success() {
+        match serde_json::from_slice::<Value>(&bytes) {
+            Ok(v) => match f(&v) {
+                Ok(converted) => {
+                    let mut r = axum::response::Response::builder().status(status);
+                    if let Some(ct) = parts.headers.get("content-type") { r = r.header("content-type", ct); }
+                    return r.body(axum::body::Body::from(serde_json::to_vec(&converted).unwrap_or_default()))
+                        .unwrap_or_else(|_| proto_error(500, "响应构造失败"));
+                }
+                Err(e) => return proto_error(502, &e),
+            },
+            Err(e) => return proto_error(502, &format!("响应解析失败: {e}")),
+        }
+    }
+    let mut r = axum::response::Response::builder().status(status);
+    if let Some(ct) = parts.headers.get("content-type") { r = r.header("content-type", ct); }
+    r.body(axum::body::Body::from(bytes)).unwrap_or_else(|_| proto_error(502, "错误响应构造失败"))
+}
+
+fn proto_error(code: u16, msg: &str) -> axum::response::Response {
+    (
+        axum::http::StatusCode::from_u16(code).unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+        axum::Json(serde_json::json!({"error": {"message": msg, "type": "api_error"}})),
+    ).into_response()
+}
+
 /// GET /v1/logs：查询最近请求日志（observability）
 async fn gateway_logs(State(s): State<S>) -> axum::Json<Value> {
     match gateway_logs::query_recent(&s.root, 100) {
@@ -503,6 +572,8 @@ pub fn build_router(state: S) -> Router {
         .route("/v1/models", get(gateway_models))
         .route("/v1/chat/completions", post(gateway_chat))
         .route("/v1/embeddings", post(gateway_embeddings))
+        .route("/v1/messages", post(gateway_messages))
+        .route("/v1/responses", post(gateway_responses))
         .route("/v1/completions", post(gateway_chat)) // legacy 端点：同一 handler（OpenAI 兼容）
         .route("/v1/logs", get(gateway_logs))
         .route("/v1/stats", get(gateway_stats))
