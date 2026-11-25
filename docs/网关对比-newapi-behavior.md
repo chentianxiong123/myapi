@@ -7,17 +7,28 @@
 
 ## 测试环境
 - **new-api**：`v1.0.0-rc.51`（Windows exe 138MB），SQLite，端口 3000，计划任务 SYSTEM 启动
+- **LiteLLM proxy**：`v1.111.0`（pip venv 装），端口 4000，计划任务 SYSTEM 启动；无 DB 模式
+  （spend/logs 需 PostgreSQL，本地 mock 测试不装，故日志明细为已知限制）
 - **myapi**：本机 Rust debug 版，端口 8317
 - **mock 上游**：win11 `127.0.0.1:9999`，Python http.server 返回假 OpenAI 响应带 usage
 - 同流量：3 成功 + 2 失败
+- 全程假数据：本地 mock、假 key、假模型，不碰真上游不花钱；cc-switch 本机只读参考绝不碰
 
-## 性能对比
+## 性能对比（三网关，同 win11 实测）
 
-| 维度 | new-api | myapi | 结论 |
-|---|---|---|---|
-| 二进制体积 | 138MB | ~10MB | myapi 轻 |
-| 空载内存 RSS | **52MB** | **8.5MB** | myapi 轻 6 倍 |
-| 语言 | Go | Rust | 静态编译，无运行时 |
+| 维度 | LiteLLM proxy | new-api | myapi | 结论 |
+|---|---|---|---|---|
+| 语言/运行时 | Python（uvicorn） | Go | Rust | myapi 无运行时 |
+| 二进制/安装 | pip 装（~500MB 依赖） | 138MB exe | ~10MB | myapi 最小 |
+| **空载内存 RSS** | **503MB** | **28MB** | **8.5MB** | **myapi 比 LiteLLM 轻 60 倍** |
+| 日志存储 | 需 PostgreSQL（SQLite 不支持） | SQLite 内置 | SQLite 内置 | myapi/new-api 自包含 |
+| 端口 | 4000 | 3000 | 8317 | — |
+
+**重磅**：LiteLLM（Python）空载就吃 503MB——拖整个 Python 运行时 + fastapi/pydantic/
+openai 等依赖。myapi 静态编译 8.5MB，**轻 60 倍**。个人网关/手机场景 LiteLLM 完全不适用。
+
+> 注：new-api 内存从最早测的 52MB 降到 28MB（不同版本/空闲状态波动），量级一致：
+> Go 网关几十 MB，Rust 个位数 MB，Python 数百 MB。
 
 ## 行为对比
 
