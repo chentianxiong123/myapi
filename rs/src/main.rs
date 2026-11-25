@@ -1809,4 +1809,71 @@ mod tests {
         assert_eq!(chb["total_output_tokens"].as_i64(), Some(10), "通道B output=10");
     }
 
+
+    // ==================== 特殊协议 usage 统计：Gemini 格式 ====================
+
+    #[test]
+    fn parse_usage_gemini_format() {
+        // Gemini usage 在顶层 usageMetadata，字段名 promptTokenCount/candidatesTokenCount
+        let v = json!({
+            "candidates": [{"content": {"parts": [{"text": "hi"}]}}],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 20, "totalTokenCount": 30, "cachedContentTokenCount": 5}
+        });
+        let (inp, out, cr, _cc) = gateway::parse_usage_json(&v);
+        assert_eq!(inp, Some(10), "Gemini promptTokenCount → input");
+        assert_eq!(out, Some(20), "Gemini candidatesTokenCount → output");
+        assert_eq!(cr, Some(5), "Gemini cachedContentTokenCount → cache_read");
+    }
+
+    #[test]
+    fn parse_usage_openai_and_anthropic_still_work() {
+        // 回归：OpenAI / Anthropic 格式没被 Gemini 改动弄坏
+        let oai = json!({"usage": {"prompt_tokens": 7, "completion_tokens": 3,
+            "prompt_tokens_details": {"cached_tokens": 2}}});
+        let (i, o, cr, _) = gateway::parse_usage_json(&oai);
+        assert_eq!((i, o, cr), (Some(7), Some(3), Some(2)), "OpenAI 格式");
+        let ant = json!({"usage": {"input_tokens": 8, "output_tokens": 4,
+            "cache_read_input_tokens": 1, "cache_creation_input_tokens": 2}});
+        let (i, o, cr, cc) = gateway::parse_usage_json(&ant);
+        assert_eq!((i, o, cr, cc), (Some(8), Some(4), Some(1), Some(2)), "Anthropic 格式");
+    }
+
+    #[tokio::test]
+    async fn e2e_gemini_usage_recorded() {
+        // 造假 Gemini 上游（返回 usageMetadata），打请求核对 token 记进日志
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
+                "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 6, "totalTokenCount": 18}
+            })))
+            .mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        let cfg = json!({
+            "listen": 0, "sticky": {"enabled": false},
+            "retry": {"max_retries": 1, "retry_on_status": []},
+            "providers": [{
+                "name": "gem-co", "base_url": format!("{}/v1", upstream.uri()),
+                "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk"}],
+                "channels": [{"id": "ch1", "name": "gem通道", "key_name": "主",
+                              "models": [{"name": "gemini-pro", "alias": "gemini-pro"}]}],
+            }],
+        });
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+        let state = S::new(dir.path().to_path_buf());
+
+        let payload = json!({"model": "gemini-pro", "messages": [{"role": "user", "content": "hi"}]});
+        let r = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let summary = gateway_logs::query_summary(&dir.path()).unwrap();
+        assert_eq!(summary["total_input_tokens"].as_i64(), Some(12), "Gemini promptTokenCount 记进 input");
+        assert_eq!(summary["total_output_tokens"].as_i64(), Some(6), "Gemini candidatesTokenCount 记进 output");
+    }
+
 }

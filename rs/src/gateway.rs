@@ -1530,13 +1530,25 @@ fn parse_usage(body: &[u8]) -> (Option<i64>, Option<i64>, Option<i64>, Option<i6
 /// 从 usage JSON 提取 (input, output, cache_read, cache_creation)
 /// 抄 LiteLLM/llms-types 字段名：OpenAI prompt_tokens_details.cached_tokens /
 /// cache_creation_tokens；Anthropic cache_read_input_tokens / cache_creation_input_tokens
-fn parse_usage_json(v: &serde_json::Value) -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
-    let u = match v.get("usage") { Some(u) if !u.is_null() => u, _ => return (None, None, None, None) };
+pub(crate) fn parse_usage_json(v: &serde_json::Value) -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
+    // usage 位置因协议而异：
+    //   OpenAI/Anthropic: usage 字段
+    //   Gemini: 顶层 usageMetadata（promptTokenCount/candidatesTokenCount）
+    let u = if let Some(u) = v.get("usage") {
+        if !u.is_null() { u } else { return (None, None, None, None) }
+    } else if let Some(g) = v.get("usageMetadata") {
+        if !g.is_null() { g } else { return (None, None, None, None) }
+    } else {
+        return (None, None, None, None);
+    };
     let get = |k: &str| u.get(k).and_then(|x| x.as_i64());
-    let input = get("input_tokens").or_else(|| get("prompt_tokens"));
-    let output = get("output_tokens").or_else(|| get("completion_tokens"));
-    // cache read: OpenAI prompt_tokens_details.cached_tokens；Anthropic cache_read_input_tokens
+    // input: OpenAI prompt_tokens / Anthropic input_tokens / Gemini promptTokenCount
+    let input = get("input_tokens").or_else(|| get("prompt_tokens")).or_else(|| get("promptTokenCount"));
+    // output: OpenAI completion_tokens / Anthropic output_tokens / Gemini candidatesTokenCount
+    let output = get("output_tokens").or_else(|| get("completion_tokens")).or_else(|| get("candidatesTokenCount"));
+    // cache read: OpenAI prompt_tokens_details.cached_tokens；Anthropic cache_read_input_tokens；Gemini cachedContentTokenCount
     let cache_read = get("cache_read_input_tokens")
+        .or_else(|| get("cachedContentTokenCount"))
         .or_else(|| u.get("prompt_tokens_details").and_then(|d| d.get("cached_tokens")).and_then(|x| x.as_i64()));
     // cache creation: Anthropic cache_creation_input_tokens；OpenAI cache_creation_tokens
     let cache_creation = get("cache_creation_input_tokens")
@@ -1601,8 +1613,10 @@ fn sse_scan_usage(buf: &[u8]) -> Option<(Option<i64>, Option<i64>, Option<i64>, 
                 continue;
             }
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(d) {
-                // usage 可能在顶层（OpenAI），或 message_delta 的 usage 字段（Anthropic）
-                if v.get("usage").map(|u| !u.is_null()).unwrap_or(false) {
+                // usage 位置因协议而异：OpenAI/Anthropic 在 usage 字段；Gemini 在顶层 usageMetadata
+                let has_usage = v.get("usage").map(|u| !u.is_null()).unwrap_or(false)
+                    || v.get("usageMetadata").map(|u| !u.is_null()).unwrap_or(false);
+                if has_usage {
                     let (in_tok, out_tok, cr, cc) = parse_usage_json(&v);
                     if in_tok.is_some() || out_tok.is_some() || cr.is_some() || cc.is_some() {
                         usage = Some((in_tok, out_tok, cr, cc));
