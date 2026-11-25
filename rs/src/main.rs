@@ -2,6 +2,7 @@
 mod api;
 mod cli;
 mod adapters;
+mod ccswitch_import;
 mod gateway;
 mod gateway_logs;
 pub mod core {
@@ -276,7 +277,7 @@ async fn post_run(Json(p): Json<Value>) -> axum::Json<Value> {
 async fn maybe_cli(args: &[String]) -> bool {
     let first = args.iter().find(|a| !a.starts_with('-'));
     let cmd = match first { Some(v) => v.as_str(), None => return false };
-    if !matches!(cmd, "check" | "models" | "list" | "apply" | "doctor" | "sync" | "probe") { return false; }
+    if !matches!(cmd, "check" | "models" | "list" | "apply" | "doctor" | "sync" | "probe" | "import-ccswitch") { return false; }
     let cfg = args.iter().position(|a| a == "--config")
         .and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
     // --host h1,h2：中心下发选目标（只处理这些 host 的实例）
@@ -284,11 +285,35 @@ async fn maybe_cli(args: &[String]) -> bool {
         .and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
     let only_hosts: Vec<String> = if hosts_csv.is_empty() { vec![] }
         else { hosts_csv.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect() };
+    // --db：cc-switch db 路径（import-ccswitch 用）
+    let cc_db = args.iter().position(|a| a == "--db")
+        .and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
     let out = if cmd == "check" { crate::cli::check_hosts(&cfg, &only_hosts).await }
         else if cmd == "models" { crate::cli::models(&cfg).await }
         else if cmd == "apply" { crate::cli::apply_hosts(&cfg, false, &[], &only_hosts).await }
         else if cmd == "doctor" { crate::cli::doctor(&cfg).await }
         else if cmd == "probe" { crate::cli::probe(&cfg, &hosts_csv) }
+        else if cmd == "import-ccswitch" {
+            // 一次性导入 cc-switch 的 provider 资产 → gateway.yaml
+            // 用法：myapi import-ccswitch --db <cc-switch.db路径> [--config gateway.yaml路径]
+            let yaml_path = if cfg.is_empty() { root().join("config").join("gateway.yaml") } else { PathBuf::from(&cfg) };
+            if cc_db.is_empty() {
+                serde_json::json!({"ok": false, "error": "缺少 --db 参数（cc-switch 的 cc-switch.db 路径）"})
+            } else {
+                match crate::ccswitch_import::import_from_db(&cc_db) {
+                    Ok(providers) => {
+                        let n = providers.len();
+                        match crate::ccswitch_import::merge_into_yaml(&yaml_path, &providers) {
+                            Ok(added) => serde_json::json!({"ok": true,
+                                "imported": n, "added": added, "skipped": n - added,
+                                "note": format!("已导入 {} 个 provider 到 {}（去重后新增 {} 个）", n, yaml_path.display(), added)}),
+                            Err(e) => serde_json::json!({"ok": false, "error": e}),
+                        }
+                    }
+                    Err(e) => serde_json::json!({"ok": false, "error": e}),
+                }
+            }
+        }
         else if cmd == "sync" {
             // 交互式 TUI 向导在 Rust 版由 web 面板承担；CLI sync 输出诊断+预览，执行用 apply
             let doc = crate::cli::doctor(&cfg).await;
