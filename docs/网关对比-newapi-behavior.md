@@ -113,6 +113,21 @@ new-api `AutomaticDisableKeywords`（默认含"Your credit balance is too low"/
 比等连续 N 次失败更快，对上游欠费/封禁场景实用。myapi 可考虑加：
 错误响应体匹配关键词 → 立即标记渠道不健康（进熔断 open）。
 
+### 流式 SSE usage 适配（跨 chunk 累积）
+各协议流式 usage 位置不同，myapi 已全覆盖（对照 new-api）：
+| 协议 | 流式 usage 位置 | myapi 处理 |
+|---|---|---|
+| OpenAI | 最后 chunk `usage.prompt_tokens/completion_tokens` | ✅ 单 chunk |
+| Anthropic | **分片**：`message_start.usage.input_tokens` + `message_delta.usage.output_tokens` | ✅ **跨 chunk 累积合并**（修了"取最后一个丢 input"的 bug） |
+| Gemini | chunk 顶层 `usageMetadata.promptTokenCount/candidatesTokenCount` | ✅ |
+
+### mock 供应商测试体系（纳入框架）
+每种协议都有三层测试，全 wiremock 假上游（不碰真上游）：
+- **单元对照**（gateway.rs `proto_*`）：parse_usage_json + sse_scan_usage 逐协议验证
+- **非流式 e2e**（main.rs `e2e_mock_*`）：打请求核对统计/日志落库一致
+- **流式 e2e**（main.rs `stream_mock_*`）：wiremock 返 SSE，核对跨 chunk usage 落库
+合计 129 测试全绿。
+
 ## 待办
 - [x] myapi 补 Gemini usage 统计（usageMetadata 字段）— 已完成 119 测试全绿
 - [ ] 考虑 Gemini completion=0 兜底（本地估算）
