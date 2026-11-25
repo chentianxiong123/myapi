@@ -550,6 +550,251 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+// ---- 上游 Anthropic 转发：chat 请求 → anthropic 请求 + anthropic 响应 → chat 响应 ----
+
+/// chat 请求 → anthropic 请求（上游 Claude /v1/messages）。cc-switch 无此函数
+/// （它假设客户端已是 anthropic）；myapi 内部统一 chat，需自实现。
+pub fn chat_to_anthropic_request(chat: &Value) -> Result<Value, String> {
+    let mut result = json!({});
+    if let Some(m) = chat.get("model") { result["model"] = m.clone(); }
+
+    let mut messages: Vec<Value> = Vec::new();
+    let mut system_parts: Vec<String> = Vec::new();
+    if let Some(msgs) = chat.get("messages").and_then(|v| v.as_array()) {
+        for msg in msgs {
+            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+            if role == "system" {
+                if let Some(s) = chat_text_of(msg) {
+                    if !s.is_empty() { system_parts.push(s); }
+                }
+                continue;
+            }
+            messages.push(chat_message_to_anthropic(msg, role));
+        }
+    }
+    if !system_parts.is_empty() { result["system"] = json!(system_parts.join("\n")); }
+    result["messages"] = json!(messages);
+
+    for k in ["max_tokens", "max_completion_tokens"] {
+        if let Some(v) = chat.get(k) { result["max_tokens"] = v.clone(); break; }
+    }
+    for k in ["temperature", "top_p"] {
+        if let Some(v) = chat.get(k) { result[k] = v.clone(); }
+    }
+    if let Some(v) = chat.get("stop") { result["stop_sequences"] = v.clone(); }
+    if let Some(v) = chat.get("stream") { result["stream"] = v.clone(); }
+
+    // reasoning_effort → thinking 块（学 resolve_reasoning_effort 的反向映射）
+    if let Some(effort) = chat.get("reasoning_effort").and_then(|v| v.as_str()) {
+        let budget = match effort { "high" => 32000, "medium" => 16000, _ => 4000 };
+        result["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+    }
+
+    // tools（function）→ anthropic tools
+    if let Some(tools) = chat.get("tools").and_then(|v| v.as_array()) {
+        let anth_tools: Vec<Value> = tools.iter().filter_map(|t| {
+            if t.get("type").and_then(|v| v.as_str()) != Some("function") { return None; }
+            let f = t.get("function")?;
+            let mut at = json!({
+                "name": f.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                "input_schema": f.get("parameters").cloned()
+                    .unwrap_or(json!({"type": "object", "properties": {}})),
+            });
+            if let Some(d) = f.get("description").filter(|d| !d.is_null()) {
+                at["description"] = d.clone();
+            }
+            Some(json!({"type": "tool", "name": at["name"].clone(),
+                "description": at.get("description").cloned().unwrap_or(Value::Null),
+                "input_schema": at["input_schema"].clone()}))
+        }).collect();
+        if !anth_tools.is_empty() { result["tools"] = json!(anth_tools); }
+    }
+
+    if let Some(v) = chat.get("tool_choice") {
+        result["tool_choice"] = map_tool_choice_to_anthropic(v);
+    }
+    Ok(result)
+}
+
+/// chat 消息 → anthropic 消息（content 块数组）
+fn chat_message_to_anthropic(msg: &Value, role: &str) -> Value {
+    let mut content: Vec<Value> = Vec::new();
+    // reasoning_content → thinking 块
+    if role == "assistant" {
+        if let Some(rc) = msg.get("reasoning_content").and_then(|v| v.as_str()) {
+            if !rc.is_empty() { content.push(json!({"type": "thinking", "thinking": rc})); }
+        }
+    }
+    // content 块
+    let c = msg.get("content");
+    match c {
+        Some(Value::String(s)) => {
+            if !s.is_empty() { content.push(json!({"type": "text", "text": s})); }
+        }
+        Some(Value::Array(parts)) => {
+            for part in parts {
+                match part.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+                    "text" | "output_text" => {
+                        if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
+                            if !t.is_empty() { content.push(json!({"type": "text", "text": t})); }
+                        }
+                    }
+                    "image_url" => {
+                        if let Some(url) = part.get("image_url").and_then(|v| v.get("url")).and_then(|v| v.as_str()) {
+                            if let Some(block) = image_url_to_anthropic(url) { content.push(block); }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    // assistant tool_calls → tool_use 块
+    if role == "assistant" {
+        if let Some(tcs) = msg.get("tool_calls").and_then(|v| v.as_array()) {
+            for tc in tcs {
+                let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let name = tc.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()).unwrap_or("");
+                let args = tc.get("function").and_then(|f| f.get("arguments")).and_then(|v| v.as_str()).unwrap_or("{}");
+                let input: Value = serde_json::from_str(args).unwrap_or(json!({}));
+                content.push(json!({"type": "tool_use", "id": id, "name": name, "input": input}));
+            }
+        }
+    }
+    // tool 消息 → tool_result 块
+    if role == "tool" {
+        let tool_use_id = msg.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or("");
+        let content_str = match c {
+            Some(Value::String(s)) => s.clone(),
+            Some(v) => canonical_json_string(v),
+            None => String::new(),
+        };
+        return json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": content_str}]});
+    }
+    let mut out = json!({"role": role});
+    if content.is_empty() {
+        out["content"] = json!([{"type": "text", "text": ""}]);
+    } else if content.len() == 1 && content[0].get("text").is_some() {
+        out["content"] = json!([{"type": "text", "text": content[0]["text"].clone()}]);
+    } else {
+        out["content"] = json!(content);
+    }
+    out
+}
+
+/// chat image_url data URL → anthropic image 块（source base64）
+fn image_url_to_anthropic(url: &str) -> Option<Value> {
+    let rest = url.strip_prefix("data:")?;
+    let (media, data) = rest.split_once(',')?;
+    let media_type = media.split(';').next().unwrap_or("image/png");
+    Some(json!({"type": "image", "source": {
+        "type": "base64", "media_type": media_type, "data": data}}))
+}
+
+fn map_tool_choice_to_anthropic(tc: &Value) -> Value {
+    match tc {
+        Value::String(s) => match s.as_str() {
+            "required" => json!("any"),
+            _ => json!(s),
+        },
+        Value::Object(obj) => {
+            match obj.get("type").and_then(|v| v.as_str()) {
+                Some("function") => {
+                    let name = obj.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()).unwrap_or("");
+                    json!({"type": "tool", "name": name})
+                }
+                _ => tc.clone(),
+            }
+        }
+        _ => tc.clone(),
+    }
+}
+
+fn chat_text_of(msg: &Value) -> Option<String> {
+    match msg.get("content") {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Array(parts)) => {
+            let texts: Vec<String> = parts.iter().filter_map(|p| p.get("text").and_then(|v| v.as_str()).map(|s| s.to_string())).collect();
+            if texts.is_empty() { None } else { Some(texts.join("\n")) }
+        }
+        _ => None,
+    }
+}
+
+/// anthropic 响应 → chat 响应（上游 Claude 返回，myapi 内部转回 chat）
+pub fn anthropic_to_openai_response(anth: &Value) -> Result<Value, String> {
+    let content = anth.get("content").and_then(|v| v.as_array())
+        .cloned().unwrap_or_default();
+    let mut msg_content: Vec<Value> = Vec::new();
+    let mut reasoning = String::new();
+    let mut tool_calls: Vec<Value> = Vec::new();
+    for block in &content {
+        match block.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "text" => {
+                if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                    if !t.is_empty() { msg_content.push(json!({"type": "text", "text": t})); }
+                }
+            }
+            "thinking" => {
+                if let Some(t) = block.get("thinking").and_then(|v| v.as_str()) {
+                    if !t.is_empty() { reasoning.push_str(t); }
+                }
+            }
+            "tool_use" => {
+                let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let input = block.get("input").cloned().unwrap_or(json!({}));
+                tool_calls.push(json!({"id": id, "type": "function",
+                    "function": {"name": name, "arguments": canonical_json_string(&input)}}));
+            }
+            _ => {}
+        }
+    }
+    let content_value = if msg_content.is_empty() {
+        Value::Null
+    } else if msg_content.len() == 1 && msg_content[0].get("text").is_some() {
+        msg_content[0]["text"].clone()
+    } else {
+        json!(msg_content)
+    };
+    let mut message = json!({"role": "assistant", "content": content_value});
+    if !reasoning.is_empty() { message["reasoning_content"] = json!(reasoning); }
+    if !tool_calls.is_empty() { message["tool_calls"] = json!(tool_calls); }
+
+    let finish_reason = match anth.get("stop_reason").and_then(|v| v.as_str()) {
+        Some("tool_use") => "tool_calls",
+        Some("max_tokens") => "length",
+        Some("end_turn") => "stop",
+        Some(other) => other,
+        None => "stop",
+    };
+
+    let mut result = json!({
+        "id": anth.get("id").cloned().unwrap_or_else(|| json!("chatcmpl-anthropic")),
+        "object": "chat.completion",
+        "model": anth.get("model").cloned().unwrap_or(Value::Null),
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+    });
+    if let Some(usage) = anth.get("usage") {
+        result["usage"] = anthropic_usage_to_chat(usage);
+    }
+    Ok(result)
+}
+
+/// anthropic usage → chat usage（三桶合并回 prompt）
+fn anthropic_usage_to_chat(u: &Value) -> Value {
+    let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let cache_read = u.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let cache_creation = u.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    json!({
+        "prompt_tokens": input + cache_read + cache_creation,
+        "completion_tokens": output,
+        "total_tokens": input + output + cache_read + cache_creation,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,5 +950,63 @@ mod tests {
         assert_eq!(out["output"][0]["type"], "function_call");
         assert_eq!(out["output"][0]["name"], "search");
         assert_eq!(out["output"][0]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn chat_to_anthropic_request_basic() {
+        let body = json!({
+            "model": "m", "max_tokens": 100, "temperature": 0.5,
+            "messages": [
+                {"role": "system", "content": "你是助手"},
+                {"role": "user", "content": "你好"},
+                {"role": "assistant", "content": "好的",
+                 "tool_calls": [{"id": "call_1", "type": "function",
+                     "function": {"name": "search", "arguments": "{\"q\":\"r\"}"}}]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "结果"},
+            ],
+            "tools": [{"type": "function", "function": {"name": "search",
+                "description": "搜索", "parameters": {"type": "object", "properties": {}}}}],
+        });
+        let out = chat_to_anthropic_request(&body).unwrap();
+        assert_eq!(out["system"], "你是助手");
+        assert_eq!(out["messages"][0]["role"], "user");
+        assert_eq!(out["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(out["messages"][1]["role"], "assistant");
+        assert_eq!(out["messages"][1]["content"][1]["type"], "tool_use");
+        assert_eq!(out["messages"][1]["content"][1]["name"], "search");
+        assert_eq!(out["messages"][2]["role"], "user");
+        assert_eq!(out["messages"][2]["content"][0]["type"], "tool_result");
+        assert_eq!(out["max_tokens"], 100);
+        assert_eq!(out["tools"][0]["type"], "tool");
+        assert_eq!(out["tools"][0]["name"], "search");
+    }
+
+    #[test]
+    fn anthropic_response_to_chat() {
+        let body = json!({
+            "id": "msg_1", "model": "claude-x",
+            "content": [
+                {"type": "text", "text": "你好"},
+                {"type": "tool_use", "id": "call_1", "name": "search", "input": {"q": "r"}},
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 3},
+        });
+        let out = anthropic_to_openai_response(&body).unwrap();
+        assert_eq!(out["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(out["choices"][0]["message"]["content"], "你好");
+        assert_eq!(out["choices"][0]["message"]["tool_calls"][0]["function"]["name"], "search");
+        assert_eq!(out["usage"]["prompt_tokens"], 13);
+        assert_eq!(out["usage"]["completion_tokens"], 5);
+    }
+
+    #[test]
+    fn anthropic_response_thinking_to_reasoning() {
+        let body = json!({
+            "content": [{"type": "thinking", "thinking": "思考中"}],
+            "stop_reason": "end_turn",
+        });
+        let out = anthropic_to_openai_response(&body).unwrap();
+        assert_eq!(out["choices"][0]["message"]["reasoning_content"], "思考中");
     }
 }

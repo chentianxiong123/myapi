@@ -415,6 +415,7 @@ pub struct AutoCandidate {
     pub upstream_model: String,
     pub api_key: String,
     pub score: f64, // 排序分（延迟，越低越优先）
+    pub protocol: Option<String>,
 }
 
 /// 当前 user turn = 最后一条 assistant/model 之后到末尾的消息（学 9router `trailingUserItems`）。
@@ -538,6 +539,7 @@ pub fn auto_candidates(
                     upstream_model: m.name.clone(),
                     api_key: resolve_key(provider, channel).unwrap_or_default(),
                     score,
+                    protocol: m.protocol.clone(),
                 });
             }
         }
@@ -834,6 +836,8 @@ pub struct SelectedChannel {
     pub upstream_model: String,
     /// 实际用的 API key（从密钥池解析）
     pub api_key: String,
+    /// 上游协议（ChannelModel.protocol）：None/"chat"=OpenAI chat；"anthropic"=Claude 上游
+    pub protocol: Option<String>,
 }
 
 /// 按对外模型名选通道。
@@ -870,7 +874,9 @@ pub fn select_channel(
         provider: (*provider).clone(),
         channel: (*channel).clone(),
         upstream_model: m.name.clone(),
-        api_key })
+        api_key,
+        protocol: m.protocol.clone(),
+    })
 }
 
 /// 解析通道实际用的 key：key_name 指定 → 池里找同名；否则用第一个（主）
@@ -1008,7 +1014,8 @@ pub fn ordered_candidates(
             provider: (*p).clone(),
             channel: (*c).clone(),
             upstream_model: m.name.clone(),
-            api_key: resolve_key(p, c).unwrap_or_default() });
+            api_key: resolve_key(p, c).unwrap_or_default(),
+            protocol: m.protocol.clone() });
         used[i] = true;
     };
 
@@ -1089,7 +1096,8 @@ fn find_channel_by_id(config: &GatewayConfig, channel_id: &str, requested_model:
                         provider: provider.clone(),
                         channel: channel.clone(),
                         upstream_model: m.name.clone(),
-                        api_key: resolve_key(provider, channel).unwrap_or_default() });
+                        api_key: resolve_key(provider, channel).unwrap_or_default(),
+                        protocol: m.protocol.clone() });
                 }
             }
         }
@@ -1175,7 +1183,8 @@ pub async fn forward_generic(
                 provider: cand.provider.clone(),
                 channel: cand.channel.clone(),
                 upstream_model: cand.upstream_model.clone(),
-                api_key: cand.api_key.clone() };
+                api_key: cand.api_key.clone(),
+                protocol: cand.protocol.clone() };
             // 限流：通道配了 rpm 且超限 → 跳过（防打爆上游）
             if let Some(rpm) = cand.channel.rpm {
                 if is_rate_limited(rates, &cand.channel.id, rpm) { continue; }
@@ -1504,6 +1513,7 @@ pub async fn test_channel(
         channel: channel.clone(),
         upstream_model: model.clone(),
         api_key,
+        protocol: channel.models.iter().find(|mm| mm.name == model).and_then(|mm| mm.protocol.clone()),
     };
     // 强制非流式，便于取回整包内容
     let payload = serde_json::json!({
@@ -1565,26 +1575,41 @@ async fn forward_one(
         }
     }
     let is_stream = payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_anthropic = selected.protocol.as_deref() == Some("anthropic");
 
-    // 构造上游 URL（base_url + 可配置路径，如 /chat/completions 或 /embeddings）
+    // 构造上游 URL + 请求体（按协议：anthropic → /v1/messages + chat→anthropic 请求）
     let base = selected.provider.base_url.trim_end_matches('/');
-    let url = format!("{}{}", base, upstream_path);
+    let (url, send_payload) = if is_anthropic {
+        let anth = crate::protocol::chat_to_anthropic_request(&upstream_payload)
+            .map_err(|e| ForwardError::Retryable { status: None, retry_after: None, msg: format!("chat→anthropic 转换失败: {}", e) })?;
+        (format!("{}/v1/messages", base), anth)
+    } else {
+        (format!("{}{}", base, upstream_path), upstream_payload)
+    };
 
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(config.timeout.streaming_first_byte))
         .timeout(std::time::Duration::from_secs(config.timeout.non_streaming))
         .build()
         .map_err(|e| ForwardError::Retryable { status: None, retry_after: None, msg: format!("client 构造失败: {}", e) })?;
-    let mut req = client.post(&url)
-        .header("Authorization", format!("Bearer {}", selected.api_key))
-        .header("Content-Type", "application/json");
+    let mut req = if is_anthropic {
+        // Claude 上游用 x-api-key + anthropic-version（非 Bearer）
+        client.post(&url)
+            .header("x-api-key", &selected.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+    } else {
+        client.post(&url)
+            .header("Authorization", format!("Bearer {}", selected.api_key))
+            .header("Content-Type", "application/json")
+    };
     for (k, v) in &selected.provider.headers {
         req = req.header(k.as_str(), v.as_str());
     }
 
     let start = std::time::Instant::now();
     let cb = &config.circuit_breaker;
-    let resp = match req.json(&upstream_payload).send().await {
+    let resp = match req.json(&send_payload).send().await {
         Ok(r) => r,
         Err(e) => {
             record_outcome(health, &selected.channel.id, false, 0, cb, false, false).await;
@@ -1692,11 +1717,16 @@ async fn forward_one(
         // 日志延到流结束：建 oneshot channel，tap 流完时把 usage 发给后台任务补记
         let (usage_tx, usage_rx) = tokio::sync::oneshot::channel::<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>();
         let stream = resp.bytes_stream();
-        let tap = SseUsageTap {
-            inner: Box::pin(stream),
-            buf: Vec::new(),
-            usage: (None, None, None, None),
-            usage_tx: Some(usage_tx),
+        // 按上游协议选 tap：anthropic → 转换流（anthropic SSE→chat SSE）；否则透传
+        let tap: std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send>> = if is_anthropic {
+            Box::pin(crate::protocol_stream::AnthropicUpstreamTap::new(stream, usage_tx))
+        } else {
+            Box::pin(SseUsageTap {
+                inner: Box::pin(stream),
+                buf: Vec::new(),
+                usage: (None, None, None, None),
+                usage_tx: Some(usage_tx),
+            })
         };
         // 后台任务：等流结束后拿 usage token，补一条带 token 的完整日志
         let log_root = root.to_path_buf();
@@ -1730,7 +1760,17 @@ async fn forward_one(
     } else {
         // 非流式：整包 + 解析 usage token 入日志
         // （关键词熔断已在前面 5xx/可重试早返回块统一处理，这里只处理成功/非重试响应）
-        let body_bytes = resp.bytes().await.unwrap_or_default();
+        let raw_bytes = resp.bytes().await.unwrap_or_default().to_vec();
+        // 上游 anthropic → 转回 chat（myapi 内部统一协议）
+        let body_bytes: Vec<u8> = if is_anthropic {
+            let converted = serde_json::from_slice::<serde_json::Value>(&raw_bytes).ok()
+                .and_then(|v| crate::protocol::anthropic_to_openai_response(&v).ok())
+                .and_then(|chat| serde_json::to_vec(&chat).ok());
+            match converted {
+                Some(bytes) => bytes,
+                None => raw_bytes,
+            }
+        } else { raw_bytes };
         let (in_tok, out_tok, cache_read, cache_creation) = parse_usage(&body_bytes);
         crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
             model: requested_model.into(),
