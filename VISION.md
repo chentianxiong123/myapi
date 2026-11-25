@@ -158,14 +158,17 @@ myapi/
 ### Phase 1：网关 MVP（当前）
 - [x] React 前端骨架 + Dashboard
 - [x] Config 页（Provider + 路由策略）
-- [ ] Rust 后端（axum + 路由 + 透传）
-- [ ] 统计日志（SQLite）—— 日志入库 schema（后端实现时遵循，字段已定）：
+- [x] Rust 后端（axum + 路由 + 透传）
+- [x] 统计日志（SQLite）—— 日志入库 schema（后端实现时遵循，字段已定）：
   - 基础：id / timestamp / model / provider / app_type / session_id
   - **使用者：key_name**（请求带哪个 key 入库——主密钥/好友名，区分"我的/好友"）
   - Token：input_tokens / output_tokens / cache_read / cache_creation / real_total_tokens
   - 延迟：ttft_ms / latency_ms / duration_s / output_speed_tps
   - 状态：status_code / error / is_stream
-- [ ] 流式转发
+- [x] 流式转发
+- [x] 协议转换（anthropic↔chat + responses↔chat + SSE 流式 + 端点 /v1/messages + /v1/responses）
+- [ ] 上游 anthropic 转发（chat→anthropic 上游，Claude 上游通道）
+- [ ] 档位路由重构（auto/fast/smart 定义 + 路由映射）
 
 ### Phase 2：下发器回归
 - [ ] 恢复 10 个 adapter（从旧代码迁移）
