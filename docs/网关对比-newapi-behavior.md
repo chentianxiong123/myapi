@@ -81,6 +81,20 @@ new-api 为计费合并（PromptTokens 要算钱）；myapi 为观测拆开存�
 粗筛只需量级对，不需图像精度。强行补图像算法=增加复杂度且仍不如上游准。
 → **已知取舍，非缺陷**。多模态请求的图像 token 由上游 usage 回传后如实记录。
 
+### 重试/熔断机制
+| 维度 | new-api | myapi | 差异 |
+|---|---|---|---|
+| 重试开关 | `RetryTimes`（默认 0=不重试） | RetryConfig.max_retries（可配） | myapi 默认可重试 |
+| 重试状态码 | `AutomaticRetryStatusCodes`=100-199,300-399,401-407,409-499,500-503,505-523,525-599 | retry_on_status（可配） | new-api 默认范围细 |
+| 熔断机制 | **按次数禁用**（`ChannelDisableThreshold`=5 连续失败）+ `AutomaticDisableStatusCodes`(401) | **三态熔断**（closed/open/half-open，可恢复） | **myapi 能自动恢复** |
+| 关键词熔断 | `AutomaticDisableKeywords`（匹配"credit balance too low"等文本自动禁渠道） | 无 | new-api 有，myapi 无 |
+| 熔断恢复 | 手动启用（disabled 渠道需人工开） | half-open 自动探测恢复 | **myapi 更智能** |
+
+**核心差异**：
+- new-api 熔断 = **一次性禁用**（连续 N 次失败→disabled，需人工恢复）
+- myapi 熔断 = **三态自动恢复**（open 后 half-open 探测，成功则 closed）
+- new-api 独有**关键词熔断**（按错误文本禁渠道，如余额不足），myapi 可考虑借鉴
+
 ## 待办
 - [x] myapi 补 Gemini usage 统计（usageMetadata 字段）— 已完成 119 测试全绿
 - [ ] 考虑 Gemini completion=0 兜底（本地估算）
