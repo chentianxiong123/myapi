@@ -1508,7 +1508,6 @@ async fn forward_one(
             }
         }
     }
-    }
     let is_stream = payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // 构造上游 URL（base_url + 可配置路径，如 /chat/completions 或 /embeddings）
@@ -2415,20 +2414,20 @@ mod tests {
 
     #[test]
     fn trailing_user_turn_stops_at_last_assistant() {
+        // 历史轮带图，当前轮纯文本
         let msgs = vec![
             serde_json::json!({"role":"user","content":[
                 {"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"x"}}]}),
             serde_json::json!({"role":"assistant","content":"ok"}),
             serde_json::json!({"role":"user","content":"hi"}),
-            serde_json::json!({"role":"user","content":[{"type":"image_url","image_url":{"url":"y"}}]}),
         ];
         let cur = trailing_user_turn(&msgs);
-        assert_eq!(cur.len(), 2, "当前轮=最后 assistant 之后全部 user 消息");
-        // 历史轮的图不该被当成硬需求
+        assert_eq!(cur.len(), 1, "当前轮=最后 assistant 之后的全部 user 消息");
+        // 历史轮带图、当前轮不带图 → 无硬需求（历史媒体不 pin 住能力选择）
         assert!(detect_required_caps(&serde_json::json!({"messages": msgs.clone()})).is_empty(),
             "历史轮带图、当前轮不带图 → 无硬需求");
         // 当前轮带图 → 有 vision 硬需求
-        let msgs2 = vec![msgs[1].clone(), serde_json::json!({"role":"user","content":[
+        let msgs2 = vec![msgs[0].clone(), msgs[1].clone(), serde_json::json!({"role":"user","content":[
             {"type":"text","text":"看这图"},{"type":"image_url","image_url":{"url":"y"}}]})];
         assert_eq!(detect_required_caps(&serde_json::json!({"messages": msgs2})), vec!["vision"]);
     }
