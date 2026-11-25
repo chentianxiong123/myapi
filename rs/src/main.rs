@@ -5,6 +5,7 @@ mod adapters;
 mod ccswitch_import;
 mod gateway;
 mod gateway_logs;
+mod protocol;
 pub mod core {
     pub mod ir;
     pub mod config;
