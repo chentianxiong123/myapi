@@ -1601,10 +1601,29 @@ impl futures_core::Stream for SseUsageTap {
     }
 }
 
-/// 扫描 SSE 缓冲里所有 `data:` 行，取最后一个带 usage 的 JSON 的 token
+/// 合并两个 usage 元组：逐字段取非 None（后者优先）。用于流式跨 chunk 累积——
+/// Anthropic 把 usage 拆两处（message_start 带 input，message_delta 带 output），
+/// 必须合并而非"取最后一个"，否则丢 input。
+fn merge_usage(
+    a: (Option<i64>, Option<i64>, Option<i64>, Option<i64>),
+    b: (Option<i64>, Option<i64>, Option<i64>, Option<i64>),
+) -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
+    (
+        b.0.or(a.0),
+        b.1.or(a.1),
+        b.2.or(a.2),
+        b.3.or(a.3),
+    )
+}
+
+/// 扫描 SSE 缓冲里所有 `data:` 行，累积合并各 chunk 的 usage token。
+/// 覆盖三种协议的流式格式：
+///   OpenAI：最后 chunk 的 usage.prompt_tokens/completion_tokens
+///   Anthropic：message_start.usage.input_tokens + message_delta.usage.output_tokens（分片）
+///   Gemini：chunk 顶层 usageMetadata.promptTokenCount/candidatesTokenCount
 fn sse_scan_usage(buf: &[u8]) -> Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> {
     let s = std::str::from_utf8(buf).ok()?;
-    let mut usage = None;
+    let mut usage: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = None;
     for line in s.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("data:") {
@@ -1619,7 +1638,8 @@ fn sse_scan_usage(buf: &[u8]) -> Option<(Option<i64>, Option<i64>, Option<i64>, 
                 if has_usage {
                     let (in_tok, out_tok, cr, cc) = parse_usage_json(&v);
                     if in_tok.is_some() || out_tok.is_some() || cr.is_some() || cc.is_some() {
-                        usage = Some((in_tok, out_tok, cr, cc));
+                        let cur = usage.unwrap_or((None, None, None, None));
+                        usage = Some(merge_usage(cur, (in_tok, out_tok, cr, cc)));
                     }
                 }
             }
@@ -1856,6 +1876,7 @@ http {{
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use serde_json::json;
 
     fn cb() -> CircuitBreakerConfig {
         CircuitBreakerConfig {
@@ -2393,4 +2414,73 @@ mod tests {
         assert!(is_rate_limited(&store, "ch1", 3), "ch1 应限流");
         assert!(!is_rate_limited(&store, "ch2", 3), "ch2 应独立放行");
     }
+
+    // ==================== 各协议 usage 统计对照测试（非流式 + 流式 SSE）====================
+    // 每种协议的 usage 字段名/位置不同，这里逐协议对照验证 parse + SSE scan。
+    // 对照基准：new-api relay-{openai,claude,gemini}.go 的 usage 解析。
+
+    #[test]
+    fn proto_openai_usage_nonstream() {
+        // OpenAI 非流式：usage.prompt_tokens / completion_tokens
+        let v = json!({"usage": {"prompt_tokens": 10, "completion_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 3}}});
+        let (i, o, cr, cc) = parse_usage_json(&v);
+        assert_eq!((i, o, cr, cc), (Some(10), Some(5), Some(3), None), "OpenAI 非流式");
+    }
+
+    #[test]
+    fn proto_anthropic_usage_nonstream() {
+        // Anthropic 非流式：usage.input_tokens / output_tokens + cache 两字段
+        let v = json!({"usage": {"input_tokens": 8, "output_tokens": 4,
+            "cache_read_input_tokens": 6, "cache_creation_input_tokens": 2}});
+        let (i, o, cr, cc) = parse_usage_json(&v);
+        assert_eq!((i, o, cr, cc), (Some(8), Some(4), Some(6), Some(2)), "Anthropic 非流式");
+    }
+
+    #[test]
+    fn proto_gemini_usage_nonstream() {
+        // Gemini 非流式：顶层 usageMetadata.promptTokenCount / candidatesTokenCount
+        let v = json!({"usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 7,
+            "cachedContentTokenCount": 4}});
+        let (i, o, cr, _cc) = parse_usage_json(&v);
+        assert_eq!((i, o, cr), (Some(12), Some(7), Some(4)), "Gemini 非流式");
+    }
+
+    #[test]
+    fn proto_openai_usage_stream() {
+        // OpenAI 流式：最后 chunk 带 usage（同一 chunk 含 input+output）
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+                    data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":3}}\n\n\
+                    data: [DONE]\n\n";
+        let u = sse_scan_usage(body.as_bytes()).unwrap();
+        assert_eq!(u, (Some(9), Some(3), None, None), "OpenAI 流式");
+    }
+
+    #[test]
+    fn proto_anthropic_usage_stream_split() {
+        // Anthropic 流式：usage 分片——message_start 带 input，message_delta 带 output。
+        // 必须"跨 chunk 累积合并"，不能取最后一个（否则丢 input）。
+        let body = "data: {\"type\":\"message_start\",\"usage\":{\"input_tokens\":11}}\n\n\
+                    data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hi\"}}\n\n\
+                    data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n";
+        let u = sse_scan_usage(body.as_bytes()).unwrap();
+        assert_eq!(u, (Some(11), Some(5), None, None), "Anthropic 分片合并 input+output");
+    }
+
+    #[test]
+    fn proto_gemini_usage_stream() {
+        // Gemini 流式：chunk 顶层 usageMetadata（promptTokenCount/candidatesTokenCount）
+        let body = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n\
+                    data: {\"usageMetadata\":{\"promptTokenCount\":15,\"candidatesTokenCount\":6}}\n\n";
+        let u = sse_scan_usage(body.as_bytes()).unwrap();
+        assert_eq!(u, (Some(15), Some(6), None, None), "Gemini 流式");
+    }
+
+    #[test]
+    fn proto_stream_no_usage_returns_none() {
+        // 无 usage 的流（纯内容）→ None，不误报
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+        assert_eq!(sse_scan_usage(body.as_bytes()), None);
+    }
+
 }
