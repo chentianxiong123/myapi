@@ -79,6 +79,36 @@ cc-switch（client GUI，可选）                        ← 吸收其资产，
 
 **自立门派（gateway.yaml 自包含），但造个一次性导入器吸收 cc-switch 的 provider 资产；运行时绝不依赖它，协同但不耦合。**
 
+## 六、补充：cc-switch 的"路由"本质（源码实证）
+
+读 `provider.rs:266` `ProviderManager`：
+```rust
+pub struct ProviderManager {
+    pub providers: IndexMap<String, Provider>,
+    pub current: String,          // 当前激活（单选）
+}
+```
+Provider 有 `in_failover_queue` 字段，但核心是 **`current` 单选**。
+
+**这决定了 cc-switch 和 myapi 的层次差异**：
+
+| | cc-switch | myapi |
+|---|---|---|
+| 本质 | **单选切换器**（`current` 指一个 provider，改写本地配置把工具指过去） | **多供应商路由器**（一请求动态选通道：权重/最闲/黏性/failover/熔断） |
+| 层 | client 配置层（决定工具连哪个端点） | server 转发层（决定请求路由到哪个上游） |
+| 切换粒度 | 手动、人驱动、一次一个 | 自动、每请求、多通道并发容错 |
+| 有无负载均衡 | ❌（纯切换） | ✅（权重/最闲/延迟感知） |
+| 有无自动 failover | 弱（`in_failover_queue`，仍以手动切换为主） | ✅（熔断+重试+降级链） |
+
+**结论强化**：cc-switch 的"路由"= 手动单选切换（改配置文件指向），myapi 的"路由"= 自动多供应商负载均衡容错。**根本不是一回事，无可替代性**。myapi 吸收的是它的 **provider 资产**（各家 base_url/key/模型清单），不是它的"路由"（它没有真路由）。
+
+## 七、win11 实测情况（诚实）
+
+- win11 本来就装了 cc-switch（`%LOCALAPPDATA%\Programs\CC Switch\cc-switch.exe`），我绕远路去下载 msi 还断三次——多此一举，已纠正。
+- 该机 cc-switch **未初始化**（无 config.json、无 `~/.codex`/`~/.claude`）——没跑过/没切过 provider。
+- cc-switch 是 Tauri GUI，SSH headless 下启动无意义（弹窗无人操作），故未实跑。
+- 分析基于**完整源码（只读参考）**，这才是"要不要依赖它"的正原料。本机 cc-switch 运行实例/配置/数据全程未碰。
+
 ## 附：cc-switch 源码关键证据
 - `provider.rs:11` `struct Provider { settings_config: Value, ... }` — provider 是异构 JSON
 - `provider.rs:122` `claude_base_url_contains` → 读 `settings_config.env.ANTHROPIC_BASE_URL` — Claude 靠改这个切 provider
