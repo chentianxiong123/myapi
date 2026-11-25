@@ -43,6 +43,10 @@ pub struct RetryConfig {
     /// 是否尊重上游 retry-after 响应头
     #[serde(default = "def_respect_retry_after")]
     pub respect_retry_after: bool,
+    /// 关键词熔断（学 new-api AutomaticDisableKeywords）：上游错误响应体含这些词 →
+    /// 一次命中即强制熔断该通道 + failover（不等连续失败次数）。针对欠费/封号等"重试也没用"的错误。
+    #[serde(default)]
+    pub disable_keywords: Vec<String>,
 }
 
 fn def_retry_max() -> usize { 3 }
@@ -52,6 +56,20 @@ fn def_backoff_initial() -> u64 { 500 }
 fn def_backoff_max() -> u64 { 8000 }
 fn def_jitter() -> f64 { 0.75 }
 fn def_respect_retry_after() -> bool { true }
+/// 关键词熔断默认词表（学 new-api，覆盖常见欠费/封号/配额耗尽表述）
+fn def_disable_keywords() -> Vec<String> {
+    vec![
+        "insufficient quota".into(),
+        "insufficient_quota".into(),
+        "credit balance is too low".into(),
+        "exceeded your current quota".into(),
+        "organization has been disabled".into(),
+        "account has been disabled".into(),
+        "billing".into(),
+        "余额不足".into(),
+        "配额已用尽".into(),
+    ]
+}
 
 impl Default for RetryConfig {
     fn default() -> Self {
@@ -63,6 +81,7 @@ impl Default for RetryConfig {
             backoff_max_ms: def_backoff_max(),
             jitter: def_jitter(),
             respect_retry_after: def_respect_retry_after(),
+            disable_keywords: def_disable_keywords(),
         }
     }
 }
@@ -620,6 +639,7 @@ pub async fn record_outcome(
     ttft_ms: u64,
     cb: &CircuitBreakerConfig,
     is_single_healthy: bool,
+    force_open: bool,
 ) {
     let mut map = health.write().await;
     let h = map.entry(channel_id.to_string()).or_default();
@@ -662,12 +682,13 @@ pub async fn record_outcome(
         match h.state {
             CircuitState::Closed => {
                 // 连续失败达阈值 OR 错误率超阈值（且非唯一通道）→ open
+                // force_open（关键词熔断命中）：跳过阈值，一次即 open
                 let error_rate = h.failed_requests as f64 / h.total_requests as f64 * 100.0;
                 let rate_cools = h.total_requests >= cb.min_requests
                     && error_rate > cb.error_rate_threshold as f64
                     && !is_single_healthy;
                 let consecutive_cools = h.consecutive_failures >= cb.failure_threshold;
-                if (consecutive_cools || rate_cools) && !is_single_healthy {
+                if (consecutive_cools || rate_cools || force_open) && !is_single_healthy {
                     h.state = CircuitState::Open;
                 }
             }
@@ -683,7 +704,13 @@ pub async fn record_outcome(
     }
 }
 
-/// 通道当前是否可用（open 状态且未到恢复超时 → 不可用）
+/// 关键词熔断：错误响应体含配置关键词（欠费/封号等"重试也没用"的错误）→ true。
+/// 学 new-api AutomaticDisableKeywords。只在失败时调，body 文本小写化后匹配。
+pub(crate) fn hit_disable_keyword(body: &[u8], keywords: &[String]) -> Option<String> {
+    if keywords.is_empty() { return None; }
+    let text = String::from_utf8_lossy(body).to_lowercase();
+    keywords.iter().find(|k| !k.is_empty() && text.contains(&k.to_lowercase())).cloned()
+}
 pub fn is_available(h: &ChannelHealth, cb: &CircuitBreakerConfig) -> bool {
     match h.state {
         CircuitState::Closed => true,
@@ -1398,14 +1425,14 @@ async fn forward_one(
     let resp = match req.json(&upstream_payload).send().await {
         Ok(r) => r,
         Err(e) => {
-            record_outcome(health, &selected.channel.id, false, 0, cb, false).await;
+            record_outcome(health, &selected.channel.id, false, 0, cb, false, false).await;
             return Err(ForwardError::Retryable { status: None, retry_after: None, msg: format!("上游请求失败: {}", e) });
         }
     };
     let ttft = start.elapsed().as_millis() as u64;
     let status = resp.status();
     let ok = status.is_success();
-    record_outcome(health, &selected.channel.id, ok, ttft, cb, false).await;
+    record_outcome(health, &selected.channel.id, ok, ttft, cb, false, false).await;
 
     // 错误分类（学 LiteLLM，可配置）：致命 4xx（鉴权/参数）直接透传；可重试状态码返 Err 触发 failover
     let code = status.as_u16();
@@ -1417,7 +1444,28 @@ async fn forward_one(
         return Err(ForwardError::Fatal { status: Some(code), msg: format!("上游客户端错误 {}", code) });
     }
     if status.is_server_error() || (status.is_client_error() && policy.is_retryable(code)) {
-        // 先记日志（failover 早返回跳过了后面的日志分支）
+        // 关键词熔断（学 new-api）：先读错误响应体，含欠费/封号等关键词 → 强制 open + Retryable 切通道。
+        // 必须在 5xx 早返回之前做，否则 5xx 直接 return 到不了后面的关键词分支。
+        let retry_after = parse_retry_after(&resp); // 只读 headers，在消耗 body 前取
+        let body_bytes = resp.bytes().await.unwrap_or_default();
+        if let Some(kw) = hit_disable_keyword(&body_bytes, &policy.disable_keywords) {
+            record_outcome(health, &selected.channel.id, false, ttft, cb, false, true).await;
+            crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
+                model: requested_model.into(),
+                provider: selected.provider.name.clone(),
+                channel: selected.channel.name.clone(),
+                status: status.as_u16(),
+                latency_ms: start.elapsed().as_millis() as u64,
+                ttft_ms: ttft,
+                input_tokens: None, output_tokens: None,
+                cache_read_tokens: None, cache_creation_tokens: None,
+                downstream_key: dkey.map(|s| s.to_string()),
+                error: Some(format!("关键词熔断命中 '{}'：{}", kw, String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(200)]))),
+            }).await;
+            return Err(ForwardError::Retryable { status: Some(status.as_u16()), retry_after: None,
+                msg: format!("关键词熔断：响应体命中 '{}'，切通道", kw) });
+        }
+        // 普通错误（无关键词）：记日志 + 早返回触发 failover
         crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
             model: requested_model.into(),
             provider: selected.provider.name.clone(),
@@ -1432,7 +1480,7 @@ async fn forward_one(
             downstream_key: dkey.map(|s| s.to_string()),
             error: Some(format!("HTTP {}", status.as_u16())),
         }).await;
-        return Err(ForwardError::Retryable { status: Some(status.as_u16()), retry_after: parse_retry_after(&resp), msg: format!("上游服务端错误 {}", status.as_u16()) });
+        return Err(ForwardError::Retryable { status: Some(status.as_u16()), retry_after, msg: format!("上游服务端错误 {}", status.as_u16()) });
     }
 
     // 回传（真流式：SSE 逐 chunk 透传；非流式回整包）
@@ -1497,6 +1545,7 @@ async fn forward_one(
         out.body(body).map_err(|e| ForwardError::Retryable { status: None, retry_after: None, msg: format!("流式回传失败: {}", e) })
     } else {
         // 非流式：整包 + 解析 usage token 入日志
+        // （关键词熔断已在前面 5xx/可重试早返回块统一处理，这里只处理成功/非重试响应）
         let body_bytes = resp.bytes().await.unwrap_or_default();
         let (in_tok, out_tok, cache_read, cache_creation) = parse_usage(&body_bytes);
         crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
@@ -1896,8 +1945,8 @@ mod tests {
     async fn closed_on_success() {
         let h = health_map();
         let c = cb();
-        record_outcome(&h, "ch1", true, 100, &c, false).await;
-        record_outcome(&h, "ch1", true, 100, &c, false).await;
+        record_outcome(&h, "ch1", true, 100, &c, false, false).await;
+        record_outcome(&h, "ch1", true, 100, &c, false, false).await;
         let m = h.read().await;
         let hc = m.get("ch1").unwrap();
         assert_eq!(hc.state, CircuitState::Closed);
@@ -1911,7 +1960,7 @@ mod tests {
         let c = cb();
         // 连续失败 5 次（failure_threshold）→ open
         for _ in 0..5 {
-            record_outcome(&h, "ch1", false, 0, &c, false).await;
+            record_outcome(&h, "ch1", false, 0, &c, false, false).await;
         }
         let m = h.read().await;
         let hc = m.get("ch1").unwrap();
@@ -1923,9 +1972,9 @@ mod tests {
         let h = health_map();
         let c = cb();
         // 5 次里 4 失败（80% > 50%，请求数≥5）→ open
-        record_outcome(&h, "ch1", true, 0, &c, false).await;
+        record_outcome(&h, "ch1", true, 0, &c, false, false).await;
         for _ in 0..4 {
-            record_outcome(&h, "ch1", false, 0, &c, false).await;
+            record_outcome(&h, "ch1", false, 0, &c, false, false).await;
         }
         let m = h.read().await;
         let hc = m.get("ch1").unwrap();
@@ -1938,7 +1987,7 @@ mod tests {
         let c = cb();
         // 唯一通道连续失败 10 次，也不 open（单部署保护）
         for _ in 0..10 {
-            record_outcome(&h, "ch1", false, 0, &c, true).await;
+            record_outcome(&h, "ch1", false, 0, &c, true, false).await;
         }
         let m = h.read().await;
         let hc = m.get("ch1").unwrap();
@@ -1951,7 +2000,7 @@ mod tests {
         let c = cb();
         // 先打(open: 连续失败5)
         for _ in 0..5 {
-            record_outcome(&h, "ch1", false, 0, &c, false).await;
+            record_outcome(&h, "ch1", false, 0, &c, false, false).await;
         }
         // 模拟时间流逝（把 last_failure_at 拨回 31 秒前）
         {
@@ -1965,7 +2014,7 @@ mod tests {
         }
         // half_open 下连续成功 3 次 → closed
         for _ in 0..3 {
-            record_outcome(&h, "ch1", true, 0, &c, false).await;
+            record_outcome(&h, "ch1", true, 0, &c, false, false).await;
         }
         let m = h.read().await;
         assert_eq!(m.get("ch1").unwrap().state, CircuitState::Closed, "half_open 恢复后 closed");
@@ -1977,7 +2026,7 @@ mod tests {
         let c = cb();
         // 打开
         for _ in 0..5 {
-            record_outcome(&h, "ch1", false, 0, &c, false).await;
+            record_outcome(&h, "ch1", false, 0, &c, false, false).await;
         }
         // 时间流逝
         {
@@ -1985,10 +2034,10 @@ mod tests {
             m.get_mut("ch1").unwrap().last_failure_at = now_secs() - 31;
         }
         // 试探成功 2 次（不到 3）
-        record_outcome(&h, "ch1", true, 0, &c, false).await;
-        record_outcome(&h, "ch1", true, 0, &c, false).await;
+        record_outcome(&h, "ch1", true, 0, &c, false, false).await;
+        record_outcome(&h, "ch1", true, 0, &c, false, false).await;
         // 第 3 次失败 → 重新 open
-        record_outcome(&h, "ch1", false, 0, &c, false).await;
+        record_outcome(&h, "ch1", false, 0, &c, false, false).await;
         let m = h.read().await;
         assert_eq!(m.get("ch1").unwrap().state, CircuitState::Open, "half_open 失败应重新 open");
     }
@@ -2015,7 +2064,7 @@ mod tests {
         let h = health_map();
         // ch1 打开 + 未超恢复超时 → select_channel 应回退到它（KeepAll，全熔断兼底）
         for _ in 0..5 {
-            record_outcome(&h, "ch1", false, 0, &cb(), false).await;
+            record_outcome(&h, "ch1", false, 0, &cb(), false, false).await;
         }
         let sel = select_channel(&cfg, "my-model", &h);
         assert!(sel.is_some(), "全熔断时 KeepAll 仍应返回通道");
@@ -2073,7 +2122,7 @@ mod tests {
         assert_eq!(ch1, "ch1");
         // ch1 连续失败 5 次 → open（但 ch2 健康，非单部署）
         for _ in 0..5 {
-            record_outcome(&h, "ch1", false, 0, &cfg.circuit_breaker, false).await;
+            record_outcome(&h, "ch1", false, 0, &cfg.circuit_breaker, false, false).await;
         }
         // 同 session 再选 → ch1 熔断，应重新 pin 到 ch2
         let s2 = select_channel_sticky(&cfg, "my-model", &h, &pins, Some("sess:xyz"));
@@ -2148,8 +2197,8 @@ mod tests {
         let h = health_map();
         // slow 通道平均 TTFT 800ms，fast 通道 200ms
         for _ in 0..5 {
-            record_outcome(&h, "slow", true, 800, &cfg.circuit_breaker, false).await;
-            record_outcome(&h, "fast", true, 200, &cfg.circuit_breaker, false).await;
+            record_outcome(&h, "slow", true, 800, &cfg.circuit_breaker, false, false).await;
+            record_outcome(&h, "fast", true, 200, &cfg.circuit_breaker, false, false).await;
         }
         // 延迟感知应选 fast 通道
         let sel = select_channel(&cfg, "my-model", &h);
@@ -2162,7 +2211,7 @@ mod tests {
         let c = cb();
         // 记录 20 次成功，TTFT 递增
         for i in 0..20 {
-            record_outcome(&h, "ch1", true, (i as u64) * 10, &c, false).await;
+            record_outcome(&h, "ch1", true, (i as u64) * 10, &c, false, false).await;
         }
         let m = h.read().await;
         let hc = m.get("ch1").unwrap();
@@ -2197,8 +2246,8 @@ mod tests {
         let cfg = two_chan_cfg(RoutingStrategy::LeastBusy);
         let h = health_map();
         // ch1 已经接了 100 单，ch2 只有 1 单
-        for _ in 0..100 { record_outcome(&h, "ch1", true, 0, &cfg.circuit_breaker, false).await; }
-        record_outcome(&h, "ch2", true, 0, &cfg.circuit_breaker, false).await;
+        for _ in 0..100 { record_outcome(&h, "ch1", true, 0, &cfg.circuit_breaker, false, false).await; }
+        record_outcome(&h, "ch2", true, 0, &cfg.circuit_breaker, false, false).await;
         // 最闲策略应选 ch2
         let sel = select_channel(&cfg, "my-model", &h);
         assert_eq!(sel.unwrap().channel.id, "ch2", "最闲应选请求数最低的");
@@ -2275,8 +2324,8 @@ mod tests {
         let h = health_map();
         // fast 200ms, slow 800ms
         for _ in 0..5 {
-            record_outcome(&h, "ch-slow", true, 800, &cfg.circuit_breaker, false).await;
-            record_outcome(&h, "ch-fast", true, 200, &cfg.circuit_breaker, false).await;
+            record_outcome(&h, "ch-slow", true, 800, &cfg.circuit_breaker, false, false).await;
+            record_outcome(&h, "ch-fast", true, 200, &cfg.circuit_breaker, false, false).await;
         }
         // 带图请求 → 两个都有 vision，按延迟排 fast 优先
         let payload = serde_json::json!({"messages":[{"role":"user","content":[
@@ -2302,7 +2351,7 @@ mod tests {
         let h = health_map();
         // ch-open 连续失败 5 次 → open（未超恢复时间）
         for _ in 0..5 {
-            record_outcome(&h, "ch-open", false, 0, &cfg.circuit_breaker, false).await;
+            record_outcome(&h, "ch-open", false, 0, &cfg.circuit_breaker, false, false).await;
         }
         // auto 应跳过熔断通道
         let payload = serde_json::json!({"messages":[{"role":"user","content":"hi"}]});

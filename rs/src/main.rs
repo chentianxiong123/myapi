@@ -517,6 +517,7 @@ mod tests {
     use http_body_util::BodyExt; // collect 读 body
     use tower::ServiceExt; // oneshot
     use tempfile::TempDir;
+    use crate::gateway::{hit_disable_keyword, record_outcome, HealthMap, CircuitState};
 
     /// 构造隔离测试 Router：tempdir 做 root（gateway.yaml / SQLite 都写临时目录，不污染真实配置）
     async fn test_router() -> (Router, TempDir) {
@@ -1975,6 +1976,155 @@ mod tests {
         let summary = gateway_logs::query_summary(&dir.path()).unwrap();
         assert_eq!(summary["total_input_tokens"].as_i64(), Some(25), "Gemini 流式 input");
         assert_eq!(summary["total_output_tokens"].as_i64(), Some(9), "Gemini 流式 output");
+    }
+
+
+    // ==================== 关键词熔断对照测试（学 new-api AutomaticDisableKeywords）====================
+
+    #[tokio::test]
+    async fn keyword_disable_trips_immediately_and_fails_over() {
+        // 主通道返 500 + "Insufficient Quota"（欠费，重试也没用）→ 关键词命中 →
+        // 一次即熔断主通道 + failover 到备用通道。对照错误码熔断（要攒 N 次），
+        // 关键词熔断一次命中立即切。
+        // 两个独立 mock server：主返 500+欠费，备返 200。各一个 provider（channel 用 provider base_url）
+        let main_up = MockServer::start().await;
+        let backup_up = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(
+                "{\"error\":{\"message\":\"Insufficient Quota: your credit balance is too low\"}}"))
+            .mount(&main_up).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices":[{"message":{"role":"assistant","content":"ok"}}],
+                "usage":{"prompt_tokens":5,"completion_tokens":2}})))
+            .mount(&backup_up).await;
+
+        let dir = TempDir::new().unwrap();
+        let cfg = json!({
+            "listen": 0, "sticky": {"enabled": false},
+            "retry": {"max_retries": 3, "retry_on_status": [500],
+                      "disable_keywords": ["insufficient quota", "credit balance"]},
+            "providers": [
+                {"name": "main-co", "base_url": format!("{}/v1", main_up.uri()),
+                 "disabled": false, "headers": {}, "keys": [{"name": "主", "api-key": "sk"}],
+                 "channels": [{"id": "ch-main", "name": "主通道", "key_name": "主", "weight": 1,
+                               "models": [{"name": "m", "alias": "my-model"}]}]},
+                {"name": "backup-co", "base_url": format!("{}/v1", backup_up.uri()),
+                 "disabled": false, "headers": {}, "keys": [{"name": "主", "api-key": "sk"}],
+                 "channels": [{"id": "ch-backup", "name": "备用", "key_name": "主", "weight": 1,
+                               "models": [{"name": "m", "alias": "my-model"}]}]},
+            ],
+        });
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+        let state = S::new(dir.path().to_path_buf());
+
+        // 单次请求：主通道关键词命中熔断 → 切备用 → 备用成功
+        let payload = json!({"model": "my-model", "chan": "main", "messages": [{"role": "user", "content": "hi"}]});
+        let r = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        // 备用通道接住 → 200（若关键词熔断没生效，会重试主通道或全失败）
+        assert_eq!(r.status(), StatusCode::OK, "关键词熔断后应切到备用通道成功");
+
+        // 核对主通道被熔断（health open）：再打一次应直接走备用（主不再被选）
+        let h = state.health.read().await;
+        let main_health = h.get("ch-main").expect("主通道应有健康记录");
+        assert_eq!(main_health.state, gateway::CircuitState::Open, "关键词命中一次即熔断主通道");
+        drop(h);
+
+        // 日志应记关键词熔断命中
+        let logs = gateway_logs::query_recent(&dir.path(), 10).unwrap();
+        let arr = logs["data"].as_array().unwrap();
+        let kw_log = arr.iter().find(|e| e["error"].as_str().map_or(false, |s| s.contains("关键词熔断")));
+        assert!(kw_log.is_some(), "应记关键词熔断日志");
+    }
+
+    #[tokio::test]
+    async fn keyword_disable_no_false_positive_on_normal_500() {
+        // 对照：普通 500（无欠费关键词）→ 不触发关键词熔断，只走正常错误码重试。
+        // 验证关键词熔断不误伤普通错误。
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("{\"error\":\"internal error\"}"))
+            .mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        let cfg = json!({
+            "listen": 0, "sticky": {"enabled": false},
+            "retry": {"max_retries": 1, "retry_on_status": [],
+                      "disable_keywords": ["insufficient quota"]},
+            "providers": [{
+                "name": "co", "base_url": format!("{}/v1", upstream.uri()),
+                "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk"}],
+                "channels": [{"id": "ch1", "name": "主", "key_name": "主",
+                              "models": [{"name": "m", "alias": "my-model"}]}],
+            }],
+        });
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
+        let _ = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+
+        // 普通 500 无关键词 → 不强制熔断（error_count 正常，不出现"关键词熔断"日志）
+        let logs = gateway_logs::query_recent(&dir.path(), 10).unwrap();
+        let arr = logs["data"].as_array().unwrap();
+        let kw_log = arr.iter().find(|e| e["error"].as_str().map_or(false, |s| s.contains("关键词熔断")));
+        assert!(kw_log.is_none(), "普通 500 不应触发关键词熔断");
+    }
+
+
+    #[test]
+    fn hit_disable_keyword_matches_case_insensitive() {
+        let kws = vec!["insufficient quota".to_string(), "余额不足".to_string()];
+        // 命中（大小写不敏感）
+        assert!(hit_disable_keyword(b"{\"error\":\"Insufficient Quota\"}", &kws).is_some());
+        assert!(hit_disable_keyword(b"your CREDIT BALANCE is too low", &["credit balance".to_string()]).is_some());
+        assert!(hit_disable_keyword("账户余额不足".as_bytes(), &kws).is_some());
+        // 不命中
+        assert!(hit_disable_keyword(b"{\"error\":\"internal server error\"}", &kws).is_none());
+        // 空词表
+        assert!(hit_disable_keyword(b"insufficient quota", &[]).is_none());
+    }
+
+    #[tokio::test]
+    async fn record_outcome_force_open_bypasses_threshold() {
+        // force_open=true 一次即 open，无需攒够 failure_threshold
+        let h: HealthMap = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let c = gateway::CircuitBreakerConfig { failure_threshold: 5, error_rate_threshold: 50, min_requests: 5, recovery_timeout_seconds: 30, recovery_success_threshold: 3 };
+        // 单次失败 + force_open → 立即 Open
+        record_outcome(&h, "chX", false, 0, &c, false, true).await;
+        let map = h.read().await;
+        let st = map.get("chX").unwrap().state.clone();
+        assert_eq!(st, CircuitState::Open, "force_open 一次即 Open");
+    }
+
+    #[tokio::test]
+    async fn record_outcome_normal_failure_below_threshold_stays_closed() {
+        // 对照：普通失败（force_open=false）单次不熔断（低于阈值）
+        let h: HealthMap = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let c = gateway::CircuitBreakerConfig { failure_threshold: 5, error_rate_threshold: 50, min_requests: 5, recovery_timeout_seconds: 30, recovery_success_threshold: 3 };
+        record_outcome(&h, "chY", false, 0, &c, false, false).await;
+        let map = h.read().await;
+        let st = map.get("chY").unwrap().state.clone();
+        assert_eq!(st, CircuitState::Closed, "普通单次失败不熔断");
+    }
+
+
+    #[tokio::test]
+    async fn keyword_double_record_outcome_opens() {
+        // 精确复刻 keyword 分支：先正常记一次失败（force_open=false），
+        // 再 keyword 命中记第二次（force_open=true）→ 应 Open
+        let h: HealthMap = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let c = gateway::CircuitBreakerConfig { failure_threshold: 5, error_rate_threshold: 50, min_requests: 5, recovery_timeout_seconds: 30, recovery_success_threshold: 3 };
+        // 第一次：正常失败（非流式分支开头 record_outcome）
+        record_outcome(&h, "ch-main", false, 10, &c, false, false).await;
+        // 第二次：keyword 命中强制 open
+        record_outcome(&h, "ch-main", false, 10, &c, false, true).await;
+        let map = h.read().await;
+        let st = map.get("ch-main").unwrap().state.clone();
+        assert_eq!(st, CircuitState::Open, "两次 record_outcome（第二次 force_open）应 Open");
     }
 
 }

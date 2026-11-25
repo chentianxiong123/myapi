@@ -105,13 +105,24 @@ new-api 为计费合并（PromptTokens 要算钱）；myapi 为观测拆开存�
 | 图像 token | 各协议精算 | ⚪ 不补（粗筛够用） |
 | 重试状态码 | AutomaticRetryStatusCodes 细范围 | ✅ 可配 |
 | 熔断 | 按次数一次性禁用 | ✅ 三态（更好，能恢复） |
-| 关键词熔断 | AutomaticDisableKeywords（按错误文本禁渠道） | ❌ 无，可借鉴 |
+| 关键词熔断 | AutomaticDisableKeywords（按错误文本禁渠道） | ✅ **已实现**（`retry.disable_keywords`，学 new-api） |
 
-### 可借鉴：关键词熔断
-new-api `AutomaticDisableKeywords`（默认含"Your credit balance is too low"/
-"This organization has been disabled"等）：匹配上游错误文本直接禁渠道。
-比等连续 N 次失败更快，对上游欠费/封禁场景实用。myapi 可考虑加：
-错误响应体匹配关键词 → 立即标记渠道不健康（进熔断 open）。
+### 关键词熔断（已实现，学 new-api）
+myapi 新增 `retry.disable_keywords` 配置（默认词表含 insufficient quota /
+credit balance is too low / organization disabled / 余额不足 等）。
+
+**机制**：失败响应体匹配关键词 → 一次命中即强制熔断该通道（`record_outcome`
+force_open，绕过失败次数阈值）+ 返 Retryable 触发 failover 切下一个通道。
+
+**vs 错误码熔断**：错误码（500）分不清"临时过载"还是"欠费废了"；关键词直接
+看错误文本，欠费/封号一次识别立即切，不浪费时间重试。
+
+**实现要点（踩坑）**：关键词检查必须放在 **5xx 早返回块之前**——原来 5xx 走
+`status.is_server_error()` 早返回，永远到不了后面的非流式分支关键词检查（debug
+发现 ch-main total_requests=1，分支没执行）。提到早返回前先读 body 检查。
+
+**测试 6 个**：hit_disable_keyword 匹配（大小写/中英）、force_open 绕过阈值、
+普通失败不熔断、双 record_outcome 置 Open、e2e 一次命中切通道、普通 500 不误判。
 
 ### 流式 SSE usage 适配（跨 chunk 累积）
 各协议流式 usage 位置不同，myapi 已全覆盖（对照 new-api）：
