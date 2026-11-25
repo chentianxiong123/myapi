@@ -6,6 +6,7 @@ mod ccswitch_import;
 mod gateway;
 mod gateway_logs;
 mod protocol;
+mod protocol_stream;
 pub mod core {
     pub mod ir;
     pub mod config;
