@@ -386,11 +386,25 @@ pub struct AutoCandidate {
     pub score: f64, // 排序分（延迟，越低越优先）
 }
 
-/// 检测请求需要的硬能力（vision：messages 里带 image_url；pdf：file）
+/// 当前 user turn = 最后一条 assistant/model 之后到末尾的消息（学 9router `trailingUserItems`）。
+/// 这是「本轮硬需求」的边界：只有这里的媒体代表客户端此刻真的要模型看。
+/// 最后一个 assistant 之后的所有消息都是当前 user turn（可跨多条，如 text + image 分块）。
+fn trailing_user_turn(msgs: &[serde_json::Value]) -> &[serde_json::Value] {
+    let mut i = msgs.len();
+    while i > 0 {
+        let role = msgs[i - 1].get("role").and_then(|v| v.as_str());
+        if role == Some("assistant") || role == Some("model") { break; }
+        i -= 1;
+    }
+    &msgs[i..]
+}
+
+/// 检测请求需要的硬能力（vision：带 image_url；pdf：file）。
+/// **只扫当前 user turn**（历史轮的媒体属软需求，走 strip，不 pin 住能力选择）。
 fn detect_required_caps(payload: &serde_json::Value) -> Vec<String> {
     let mut caps = Vec::new();
     if let Some(msgs) = payload.get("messages").and_then(|v| v.as_array()) {
-        for msg in msgs {
+        for msg in trailing_user_turn(msgs) {
             if let Some(content) = msg.get("content").and_then(|v| v.as_array()) {
                 for part in content {
                     match part.get("type").and_then(|v| v.as_str()) {
@@ -404,6 +418,63 @@ fn detect_required_caps(payload: &serde_json::Value) -> Vec<String> {
     }
     caps
 }
+
+/// 历史轮的媒体块 → 占位符文本（软降级，不报错也不丢语义）。
+/// 当前 user turn 的媒体**不动**（硬需求，由能力过滤/409 处理）。
+/// 返回实际替换的块数（便于测试/日志）。
+fn strip_history_media(messages: &mut Vec<serde_json::Value>, cap: &str) -> usize {
+    const IMAGE_OMITTED: &str = "[image omitted: model does not support vision]";
+    const FILE_OMITTED: &str = "[file omitted: model does not support pdf]";
+    let boundary = if messages.is_empty() { 0 } else { (messages.len() - trailing_user_turn(messages).len()) };
+    let mut replaced = 0usize;
+    for msg in messages.iter_mut().take(boundary) {
+        let is_array = msg.get("content").map(|v| v.is_array()).unwrap_or(false);
+        if !is_array { continue; }
+        let Some(content) = msg.get_mut("content").and_then(|v| v.as_array_mut()) else { continue; };
+        let mut out = Vec::with_capacity(content.len());
+        for part in content.drain(..) {
+            let is_media = matches!(part.get("type").and_then(|v| v.as_str()),
+                Some("image_url") | Some("image") | Some("file"));
+            if is_media {
+                let placeholder = if cap == "pdf" { FILE_OMITTED } else { IMAGE_OMITTED };
+                out.push(serde_json::json!({ "type": "text", "text": placeholder }));
+                replaced += 1;
+            } else {
+                out.push(part);
+            }
+        }
+        if out.is_empty() { msg["content"] = serde_json::Value::String(String::new()); } else { *content = out; }
+    }
+    replaced
+}
+
+/// 该模型名是否存在于任一未禁用通道的 models 里（不滤能力）。
+/// 用于区分「模型不存在（404）」和「模型存在但无一个满足当前轮硬能力（409）」。
+fn model_exists(config: &GatewayConfig, requested_model: &str) -> bool {
+    config.providers.iter().any(|p| !p.disabled && p.channels.iter().any(|c| {
+        c.models.iter().any(|m| {
+            let external = m.alias.as_deref().unwrap_or(&m.name);
+            external == requested_model || m.name == requested_model
+        })
+    }))
+}
+/// 选中通道模型的能力清单（上游模型名 → 找模型定义取 capabilities）。
+/// 找不到时返回空（视为不支持任何硬能力 → 历史轮媒体一律降级）。
+fn upstream_caps_of(config: &GatewayConfig, selected: &SelectedChannel) -> Vec<String> {
+    for provider in &config.providers {
+        for channel in &provider.channels {
+            if channel.id != selected.channel.id { continue; }
+            for m in &channel.models {
+                if m.name == selected.upstream_model {
+                    return m.capabilities.clone();
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
+
 
 /// Auto 模式：聚合所有可用通道的模型，硬能力匹配（缺 vision 不接带图请求），
 /// 按延迟升序排成 fallback 链（跳过熔断通道）。
@@ -859,6 +930,7 @@ pub fn ordered_candidates(
     health: &HealthMap,
     pin_channel_id: Option<&str>,
     input_tokens: i64,
+    required: &[String],
 ) -> Vec<SelectedChannel> {
     let hs = health.try_read().ok();
     let hs = hs.as_deref();
@@ -886,8 +958,15 @@ pub fn ordered_candidates(
         if candidates.is_empty() { return Vec::new(); }
     }
 
-    let first = apply_strategy(&candidates, hs, cb, strategy);
+    // 硬能力过滤（学 9router HARD_CAPS）：当前轮需要的能力模型必须都有，缺则不接
+    if !required.is_empty() {
+        candidates.retain(|(_, _, m)| {
+            required.iter().all(|c| m.capabilities.iter().any(|mc| mc == c))
+        });
+        if candidates.is_empty() { return Vec::new(); }
+    }
 
+    let first = apply_strategy(&candidates, hs, cb, strategy);
     // 构造 SelectedChannel 列表：首选在前，其余按原序在后
     let mut ordered: Vec<SelectedChannel> = Vec::new();
     let mut used = vec![false; candidates.len()];
@@ -1045,6 +1124,16 @@ pub async fn forward_generic(
     if requested_model == "auto" && config.routing.auto_mode_enabled {
         let candidates = auto_candidates(&config, &payload, health); // Auto 已按能力过滤
         if candidates.is_empty() {
+            // 带硬需求（当前轮带图）但无满足能力的模型 → 409 显式失败，不静默降级
+            let req = detect_required_caps(&payload);
+            if !req.is_empty() {
+                return (
+                    axum::http::StatusCode::CONFLICT,
+                    axum::Json(serde_json::json!({"error": {"type": "capability_unavailable",
+                        "message": format!("无满足能力的模型可用（需要 {}）", req.join("/")),
+                        "required": req}})),
+                ).into_response();
+            }
             return error_response(404, "auto: 无可用模型");
         }
         let mut last_err = String::new();
@@ -1098,8 +1187,18 @@ pub async fn forward_generic(
         None => None,
     };
     let input_tokens = estimate_input_tokens(&payload);
-    let candidates = ordered_candidates(&config, &requested_model, health, pinned_id.as_deref(), input_tokens);
+    let required = detect_required_caps(&payload); // 当前轮硬需求（vision/pdf）
+    let candidates = ordered_candidates(&config, &requested_model, health, pinned_id.as_deref(), input_tokens, &required);
     if candidates.is_empty() {
+        // 模型存在但无一个满足当前轮硬能力 → 显式 409，不静默降级（静默=客户端失守）
+        if !required.is_empty() && model_exists(&config, &requested_model) {
+            return (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(serde_json::json!({"error": {"type": "capability_unavailable",
+                    "message": format!("模型 {} 无满足能力的通道（需要 {}）", requested_model, required.join("/")),
+                    "required": required}})),
+            ).into_response();
+        }
         return (
             axum::http::StatusCode::NOT_FOUND,
             axum::Json(serde_json::json!({
@@ -1156,7 +1255,7 @@ pub async fn forward_generic(
     if config.model_fallback.enabled {
         if let Some(chain) = config.model_fallback.chains.get(&requested_model) {
             for fb_model in chain {
-                let fb_candidates = ordered_candidates(&config, fb_model, health, None, input_tokens);
+                let fb_candidates = ordered_candidates(&config, fb_model, health, None, input_tokens, &required);
                 if fb_candidates.is_empty() { continue; }
                 let fb_max = config.retry.max_retries.min(fb_candidates.len());
                 for cand in fb_candidates.iter().take(fb_max.max(1)) {
@@ -1401,6 +1500,14 @@ async fn forward_one(
     let mut upstream_payload = payload.clone();
     if let Some(obj) = upstream_payload.as_object_mut() {
         obj.insert("model".into(), serde_json::Value::String(selected.upstream_model.clone()));
+        // 历史轮媒体降级：上游模型不支持 vision → 历史轮的图换占位符（当前轮不动）
+        if let Some(msgs) = obj.get_mut("messages").and_then(|v| v.as_array_mut()) {
+            let supports_vision = upstream_caps_of(config, selected).iter().any(|c| c == "vision");
+            if !supports_vision {
+                strip_history_media(msgs, "vision");
+            }
+        }
+    }
     }
     let is_stream = payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -2304,6 +2411,69 @@ mod tests {
         assert!(cands.is_empty(), "无 vision 能力应被过滤");
     }
 
+    // ---- Vision 能力硬约束：当前轮 vs 历史轮（用户确认的方案）----
+
+    #[test]
+    fn trailing_user_turn_stops_at_last_assistant() {
+        let msgs = vec![
+            serde_json::json!({"role":"user","content":[
+                {"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"x"}}]}),
+            serde_json::json!({"role":"assistant","content":"ok"}),
+            serde_json::json!({"role":"user","content":"hi"}),
+            serde_json::json!({"role":"user","content":[{"type":"image_url","image_url":{"url":"y"}}]}),
+        ];
+        let cur = trailing_user_turn(&msgs);
+        assert_eq!(cur.len(), 2, "当前轮=最后 assistant 之后全部 user 消息");
+        // 历史轮的图不该被当成硬需求
+        assert!(detect_required_caps(&serde_json::json!({"messages": msgs.clone()})).is_empty(),
+            "历史轮带图、当前轮不带图 → 无硬需求");
+        // 当前轮带图 → 有 vision 硬需求
+        let msgs2 = vec![msgs[1].clone(), serde_json::json!({"role":"user","content":[
+            {"type":"text","text":"看这图"},{"type":"image_url","image_url":{"url":"y"}}]})];
+        assert_eq!(detect_required_caps(&serde_json::json!({"messages": msgs2})), vec!["vision"]);
+    }
+
+    #[test]
+    fn strip_history_media_only_touches_history() {
+        let mut msgs = vec![
+            serde_json::json!({"role":"user","content":[
+                {"type":"text","text":"旧图"},{"type":"image_url","image_url":{"url":"x"}}]}),
+            serde_json::json!({"role":"assistant","content":"已看"}),
+            serde_json::json!({"role":"user","content":[
+                {"type":"text","text":"当前"},{"type":"image_url","image_url":{"url":"y"}}]}),
+        ];
+        let n = strip_history_media(&mut msgs, "vision");
+        assert_eq!(n, 1, "只替换历史轮那张图");
+        let hist = msgs[0].get("content").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(hist[0].get("text").and_then(|v| v.as_str()), Some("旧图"));
+        assert_eq!(hist[1].get("text").and_then(|v| v.as_str()),
+            Some("[image omitted: model does not support vision]"));
+        // 当前轮原样不动
+        let cur = msgs[2].get("content").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(cur.len(), 2);
+        assert_eq!(cur[1].get("type").and_then(|v| v.as_str()), Some("image_url"));
+    }
+
+    #[test]
+    fn ordered_candidates_filters_by_capability() {
+        let mut cfg = GatewayConfig::default();
+        cfg.providers.push(Provider {
+            name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "k".into(), api_key: "k".into() }],
+            channels: vec![Channel {
+                id: "ch-text".into(), name: "t".into(), path: None, key_name: None,
+                models: vec![ChannelModel { name: "my-model".into(), alias: None, capabilities: vec![] }],
+                weight: 1, rpm: None, retry: None, max_input_tokens: None }],
+            proxy: String::new(),
+        });
+        let h = health_map();
+        // 模型存在但缺 vision 能力 → 能力过滤后空（调用点据此返回 409，不静默降级）
+        assert!(ordered_candidates(&cfg, "my-model", &h, None, 0, &["vision".into()]).is_empty());
+        // 无硬需求 → 正常命中
+        assert!(!ordered_candidates(&cfg, "my-model", &h, None, 0, &[]).is_empty());
+    }
+
     #[tokio::test]
     async fn auto_matches_vision_and_sorts_by_latency() {
         let mut cfg = GatewayConfig::default();
@@ -2379,10 +2549,10 @@ mod tests {
         });
         let h = health_map();
         // 无 pin：应返回两条候选（failover 链完整）
-        let cands = ordered_candidates(&cfg, "my-model", &h, None, 0);
+        let cands = ordered_candidates(&cfg, "my-model", &h, None, 0, &[]);
         assert_eq!(cands.len(), 2, "应返回完整 failover 链");
         // pin chB：应提到链首
-        let cands2 = ordered_candidates(&cfg, "my-model", &h, Some("chB"), 0);
+        let cands2 = ordered_candidates(&cfg, "my-model", &h, Some("chB"), 0, &[]);
         assert_eq!(cands2[0].channel.id, "chB", "pin 通道应优先");
     }
 
@@ -2406,7 +2576,7 @@ mod tests {
             proxy: String::new(),
         });
         let h = health_map();
-        let cands = ordered_candidates(&cfg, "my-model", &h, None, 0);
+        let cands = ordered_candidates(&cfg, "my-model", &h, None, 0, &[]);
         assert_eq!(cands.len(), 1, "disabled provider 应被跳过");
         assert_eq!(cands[0].channel.id, "chOn");
     }
