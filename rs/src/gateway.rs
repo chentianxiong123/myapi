@@ -2334,6 +2334,66 @@ mod tests {
         assert!(sel.is_some(), "全熔断时 KeepAll 仍应返回通道");
     }
 
+
+    #[tokio::test]
+    async fn sticky_multi_client_independent() {
+        // 两个不同 session → 各自独立 pin（互不干扰）
+        let mut cfg = GatewayConfig::default();
+        cfg.sticky = StickyConfig { enabled: true, ttl_seconds: 300 };
+        cfg.providers.push(Provider {
+            name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![
+                Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
+                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] , ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None },
+                Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
+                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] , ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None },
+            ],
+            proxy: String::new(), ..Default::default()});
+        let h = health_map();
+        let pins = new_pin_store();
+        // session A 第一次 → pin 到某通道
+        let a1 = select_channel_sticky(&cfg, "my-model", &h, &pins, Some("sess:a")).unwrap().channel.id;
+        // session B 第一次 → 独立选择
+        let b1 = select_channel_sticky(&cfg, "my-model", &h, &pins, Some("sess:b")).unwrap().channel.id;
+        // A 再选 → 仍黏 A 的 pin（B 的选择不影响 A）
+        let a2 = select_channel_sticky(&cfg, "my-model", &h, &pins, Some("sess:a")).unwrap().channel.id;
+        assert_eq!(a2, a1, "session A 应持续黏 A 的 pin");
+        // B 再选 → 仍黏 B 的 pin（A 的重复选择不影响 B）
+        let b2 = select_channel_sticky(&cfg, "my-model", &h, &pins, Some("sess:b")).unwrap().channel.id;
+        assert_eq!(b2, b1, "session B 应持续黏 B 的 pin");
+    }
+
+    #[tokio::test]
+    async fn sticky_ttl_expires_repins_fresh() {
+        // TTL 过期 → pin 失效 → 重新选（不再强制黏旧通道）
+        let mut cfg = GatewayConfig::default();
+        cfg.sticky = StickyConfig { enabled: true, ttl_seconds: 60 };
+        cfg.providers.push(Provider {
+            name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![
+                Channel { id: "ch1".into(), name: "c1".into(), path: None, key_name: None,
+                    models: vec![ChannelModel { name: "real".into(), alias: Some("my-model".into()), capabilities: vec![] , ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None },
+                Channel { id: "ch2".into(), name: "c2".into(), path: None, key_name: None,
+                    models: vec![ChannelModel { name: "real2".into(), alias: Some("my-model".into()), capabilities: vec![] , ..Default::default()}], weight: 1, rpm: None, retry: None, max_input_tokens: None },
+            ],
+            proxy: String::new(), ..Default::default()});
+        let h = health_map();
+        let pins = new_pin_store();
+        let s1 = select_channel_sticky(&cfg, "my-model", &h, &pins, Some("sess:a")).unwrap().channel.id;
+        // 手动把 pinned_at 拨回很久以前（TTL 过期）
+        {
+            let mut p = pins.write().await;
+            if let Some(e) = p.get_mut("sess:a") { e.pinned_at = 1; }
+        }
+        // TTL 过期后：不再强制黏旧（重新选，可能换通道）
+        let s2 = select_channel_sticky(&cfg, "my-model", &h, &pins, Some("sess:a")).unwrap().channel.id;
+        assert!(["ch1", "ch2"].contains(&s2.as_str()), "TTL 过期后应可重新选: {s2}");
+    }
+
     #[tokio::test]
     async fn sticky_reuses_same_channel() {
         let mut cfg = GatewayConfig::default();

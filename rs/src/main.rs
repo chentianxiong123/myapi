@@ -1027,6 +1027,54 @@ mod tests {
         assert_eq!(n, 100, "100 连续应记 100 条日志");
     }
 
+
+    #[tokio::test]
+    async fn failing_suppliers_all_fail_returns_502() {
+        // 3 个供应商全失败（500/404/500）→ 全候选废 → 502（不透传成功）
+        let upstream = MockServer::start().await;
+        // 全 retryable（500），避免 404 fatal 透传（不透传 failover）
+        for (mid, st) in [("up-1", 500), ("up-2", 500), ("up-3", 500)] {
+            Mock::given(method("POST")).and(path("/v1/chat/completions"))
+                .and(wiremock::matchers::body_partial_json(json!({"model": mid})))
+                .respond_with(ResponseTemplate::new(st).set_body_json(json!({"error": {"message": "fail"}})))
+                .mount(&upstream).await;
+        }
+        let dir = TempDir::new().unwrap();
+        let channels = json!([
+            {"id": "ch1", "name": "a", "key_name": "主", "models": [{"name": "up-1", "alias": "my-model"}]},
+            {"id": "ch2", "name": "b", "key_name": "主", "models": [{"name": "up-2", "alias": "my-model"}]},
+            {"id": "ch3", "name": "c", "key_name": "主", "models": [{"name": "up-3", "alias": "my-model"}]},
+        ]);
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), channels);
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert!(resp.status().is_server_error(), "全候选失败应透传 5xx（不透传成功）: {}", resp.status());
+    }
+
+    #[tokio::test]
+    async fn long_conversation_1000_messages() {
+        // 长对话：1000 条消息（500 轮 user/assistant）→ 上游收到完整 1000 条
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x", "model": "up-model",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": {"prompt_tokens": 3, "completion_tokens": 2}})))
+            .expect(1).mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+        let state = S::new(dir.path().to_path_buf());
+        let mut msgs = Vec::new();
+        for i in 0..1000 {
+            msgs.push(json!({"role": if i % 2 == 0 {"user"} else {"assistant"}, "content": format!("第{}轮消息", i)}));
+        }
+        let payload = json!({"model": "up-model", "messages": msgs});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let reqs = upstream.received_requests().await.unwrap();
+        let v: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(v["messages"].as_array().unwrap().len(), 1000, "长对话 1000 条完整转发");
+    }
+
     #[tokio::test]
     async fn concurrent_50_requests_all_ok() {
         // 50 并发 → 全 200 + 日志 50 条（稳定性/无丢）
