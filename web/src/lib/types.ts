@@ -30,6 +30,8 @@ export interface ChannelModel {
   capabilities?: string[]
   // 模型级上下文窗口（token）：上下文错误反馈时跳过装不下的（配置时填，运行时零成本）
   context_window?: number
+  // 档位标注（对标 Gemini pro/flash）：pro=质量型、flash=速度型；空=auto 专属
+  class?: 'pro' | 'flash'
 }
 
 // 通道级重试覆盖（学 LiteLLM RetryPolicy；空=继承全局 retry）

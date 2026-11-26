@@ -241,7 +241,7 @@ export default function Providers() {
     ps[pidx].channels[cidx].models.splice(midx, 1)
     setProviders(ps)
   }
-  function updateChannelModel(pidx: number, cidx: number, midx: number, field: 'name' | 'alias' | 'protocol' | 'kind' | 'capabilities' | 'context_window', value: any) {
+  function updateChannelModel(pidx: number, cidx: number, midx: number, field: 'name' | 'alias' | 'protocol' | 'kind' | 'capabilities' | 'context_window' | 'class', value: any) {
     const ps = [...providers]
     const m = { ...ps[pidx].channels[cidx].models[midx] } as any
     m[field] = value
@@ -560,6 +560,7 @@ export default function Providers() {
                                   <th className="pb-1 font-medium text-gray-500">类型</th>
                                   <th className="pb-1 font-medium text-gray-500">能力</th>
                                   <th className="pb-1 font-medium text-gray-500">上下文窗口</th>
+                                  <th className="pb-1 font-medium text-gray-500">档位</th>
                                   <th className="pb-1 w-8"></th>
                                 </tr>
                               </thead>
@@ -627,6 +628,18 @@ export default function Providers() {
                                         title="模型级上下文窗口：上下文错误反馈时跳过装不下的"
                                         className="w-full rounded border border-gray-300 px-2 py-1 font-mono dark:border-gray-600 dark:bg-gray-700"
                                       />
+                                    </td>
+                                    <td className="py-1 pr-2">
+                                      <select
+                                        value={m.class ?? ''}
+                                        onChange={e => updateChannelModel(idx, cidx, midx, 'class', e.target.value || undefined)}
+                                        title="档位标注（对标 pro/flash）：pro=质量型、flash=速度型；空=auto 专属"
+                                        className="w-full rounded border border-gray-300 px-2 py-1 text-sm dark:border-gray-600 dark:bg-gray-700"
+                                      >
+                                        <option value="">auto（默认）</option>
+                                        <option value="pro">pro（质量型）</option>
+                                        <option value="flash">flash（速度型）</option>
+                                      </select>
                                     </td>
                                     <td className="py-1">
                                       <button onClick={() => removeChannelModel(idx, cidx, midx)} className="text-red-500 hover:text-red-700">

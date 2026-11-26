@@ -181,6 +181,9 @@ pub struct ChannelModel {
     /// 模型级上下文窗口（token）：上下文错误反馈时跳过装不下的（配置时填，运行时零成本）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<i64>,
+    /// 档位标注（对标 Gemini pro/flash）：pro=质量型、flash=速度型；空=auto 专属
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
 }
 
 /// 供应商：上游一个厂商（含密钥池 + 多条通道）
@@ -514,6 +517,7 @@ pub fn auto_candidates(
     config: &GatewayConfig,
     payload: &serde_json::Value,
     health: &HealthMap,
+    class_filter: Option<&str>,
 ) -> Vec<AutoCandidate> {
     let required = detect_required_caps(payload);
     let hs = health.try_read().ok();
@@ -524,6 +528,10 @@ pub fn auto_candidates(
         if provider.disabled { continue; }
         for channel in &provider.channels {
             for m in &channel.models {
+                // 档位过滤：pro/flash 请求只收对应 class 的模型（空=不过滤，全部）
+                if let Some(cf) = class_filter {
+                    if m.class.as_deref() != Some(cf) { continue; }
+                }
                 // 硬能力匹配：请求需要的能力模型必须都有
                 let has_all = required.iter().all(|c| m.capabilities.iter().any(|mc| mc == c));
                 if !has_all { continue; }
@@ -1159,9 +1167,16 @@ pub async fn forward_generic(
     let pin_key = session_key(&payload, auth_header);
     let dkey = downstream_key(auth_header); // 传给 forward_one 记账（用量限额按 key）
 
-    // Auto 模式：model=auto 且开启 auto_mode → 聚合所有可用模型按 capability+延迟排序，逐个试，失败 fallback 下一个
-    if requested_model == "auto" && config.routing.auto_mode_enabled {
-        let candidates = auto_candidates(&config, &payload, health); // Auto 已按能力过滤
+    // 档位（auto/pro/flash 是客户端配置的 model 名，保留字）：网关按档位过滤候选
+    //   auto → 全部（网关随意，不偏）；pro → 只 class:pro；flash → 只 class:flash
+    let is_tier = requested_model == "auto" || requested_model == "pro" || requested_model == "flash";
+    if is_tier && (requested_model != "auto" || config.routing.auto_mode_enabled) {
+        let class_filter = match requested_model.as_str() {
+            "pro" => Some("pro"),
+            "flash" => Some("flash"),
+            _ => None, // auto：全部
+        };
+        let candidates = auto_candidates(&config, &payload, health, class_filter);
         if candidates.is_empty() {
             // 带硬需求（当前轮带图）但无满足能力的模型 → 409 显式失败，不静默降级
             let req = detect_required_caps(&payload);
@@ -1173,7 +1188,7 @@ pub async fn forward_generic(
                         "required": req}})),
                 ).into_response();
             }
-            return error_response(404, "auto: 无可用模型");
+            return error_response(404, &format!("{}: 无可用模型", requested_model));
         }
         let mut last_err = String::new();
         let mut attempted: u32 = 0; // 已重试次数（退避指数用）
@@ -2523,6 +2538,43 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn auto_candidates_filters_by_tier_class() {
+        let mut cfg = GatewayConfig::default();
+        cfg.providers.push(Provider {
+            name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![Channel {
+                id: "ch1".into(), name: "ch1".into(), path: None, key_name: None,
+                models: vec![
+                    ChannelModel { name: "pro-model".into(), alias: None, capabilities: vec![],
+                        class: Some("pro".into()), ..Default::default() },
+                    ChannelModel { name: "flash-model".into(), alias: None, capabilities: vec![],
+                        class: Some("flash".into()), ..Default::default() },
+                    ChannelModel { name: "plain-model".into(), alias: None, capabilities: vec![],
+                        class: None, ..Default::default() },
+                ],
+                weight: 1, rpm: None, retry: None, max_input_tokens: None }],
+            proxy: String::new(),
+            ..Default::default()
+        });
+        let h = health_map();
+        let payload = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
+        // auto → 全部（含无标注）
+        let auto = auto_candidates(&cfg, &payload, &h, None);
+        assert_eq!(auto.len(), 3, "auto 应含全部 3 个模型");
+        // pro → 只 class:pro
+        let pro = auto_candidates(&cfg, &payload, &h, Some("pro"));
+        assert_eq!(pro.len(), 1, "pro 只应含 pro-model");
+        assert_eq!(pro[0].upstream_model, "pro-model");
+        // flash → 只 class:flash
+        let flash = auto_candidates(&cfg, &payload, &h, Some("flash"));
+        assert_eq!(flash.len(), 1, "flash 只应含 flash-model");
+        assert_eq!(flash[0].upstream_model, "flash-model");
+    }
+
     // ---- Auto 模式测试（capability 匹配 + fallback 链）----
 
     #[tokio::test]
@@ -2544,7 +2596,7 @@ mod tests {
         // 带图请求需要 vision，text-only 没该能力 → 应过滤掉
         let payload = serde_json::json!({"messages":[{"role":"user","content":[
             {"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"x"}}]}]});
-        let cands = auto_candidates(&cfg, &payload, &h);
+        let cands = auto_candidates(&cfg, &payload, &h, None);
         assert!(cands.is_empty(), "无 vision 能力应被过滤");
     }
 
@@ -2642,7 +2694,7 @@ mod tests {
         // 带图请求 → 两个都有 vision，按延迟排 fast 优先
         let payload = serde_json::json!({"messages":[{"role":"user","content":[
             {"type":"image_url","image_url":{"url":"x"}}]}]});
-        let cands = auto_candidates(&cfg, &payload, &h);
+        let cands = auto_candidates(&cfg, &payload, &h, None);
         assert_eq!(cands.len(), 2);
         assert_eq!(cands[0].channel.id, "ch-fast", "延迟最低应排第一");
     }
@@ -2669,7 +2721,7 @@ mod tests {
         }
         // auto 应跳过熔断通道
         let payload = serde_json::json!({"messages":[{"role":"user","content":"hi"}]});
-        let cands = auto_candidates(&cfg, &payload, &h);
+        let cands = auto_candidates(&cfg, &payload, &h, None);
         assert!(cands.is_empty(), "熔断通道应被跳过");
     }
 
