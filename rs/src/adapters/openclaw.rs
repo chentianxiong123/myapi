@@ -103,10 +103,17 @@ impl OpenclawAdapter {
         c.insert("api".into(), Value::String(if ir.api.is_empty() { "openai-completions".into() } else { ir.api.clone() }));
         c.insert("auth".into(), Value::String("api-key".into()));
         if !c.contains_key("timeoutSeconds") { c.insert("timeoutSeconds".into(), json!(300)); }
-        let models: Vec<Value> = ir.models.iter().map(|m| json!({
-            "id": m.id, "name": m.id, "reasoning": m.reasoning,
-            "input": m.input_modes, "contextWindow": m.context_window, "maxTokens": m.max_tokens
-        })).collect();
+        // 档位化：openclaw models 下发档位名（auto/pro/flash），客户端从档位选 → 网关档位路由
+        // 不下发具体模型 id（真实模型由网关按档位选择）；contextWindow/maxTokens 用 IR 首个模型或默认值
+        let ctx = ir.models.first().map(|m| m.context_window).unwrap_or(200000);
+        let maxt = ir.models.first().map(|m| m.max_tokens).unwrap_or(8192);
+        let mut models: Vec<Value> = Vec::new();
+        for t in ["auto", "pro", "flash"] {
+            models.push(json!({
+                "id": t, "name": t, "reasoning": false,
+                "input": ["text"], "contextWindow": ctx, "maxTokens": maxt
+            }));
+        }
         c.insert("models".into(), Value::Array(models));
         data
     }
