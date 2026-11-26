@@ -880,6 +880,97 @@ mod tests {
         }])
     }
 
+
+    /// 档位通道：两个模型（pro 质量型 / flash 速度型）
+    fn tier_channels() -> Value {
+        json!([{
+            "id": "ch1", "name": "ch1", "key_name": "主",
+            "models": [
+                {"name": "pro-model", "class": "pro"},
+                {"name": "flash-model", "class": "flash"},
+            ],
+        }])
+    }
+
+    #[tokio::test]
+    async fn tier_pro_request_only_selects_pro_model() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-1", "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "hi"}}]
+            }))).expect(1).mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), tier_channels());
+        let state = S::new(dir.path().to_path_buf());
+        // 档位名 "pro" 不是模型名：网关应路由到 pro 标注的真实模型
+        let payload = json!({"model": "pro", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let reqs = upstream.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 1);
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["model"], "pro-model", "档位 pro 应路由到 pro 模型的真实名");
+    }
+
+    #[tokio::test]
+    async fn tier_flash_request_only_selects_flash_model() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-2", "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "hi"}}]
+            }))).expect(1).mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), tier_channels());
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "flash", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let reqs = upstream.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["model"], "flash-model", "档位 flash 应路由到 flash 模型的真实名");
+    }
+
+    #[tokio::test]
+    async fn tier_auto_request_selects_any_model() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-3", "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "hi"}}]
+            }))).expect(1).mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        // auto 需要 auto_mode_enabled：自定义 gateway.yaml（带 routing 段）
+        let cfg = json!({
+            "listen": 0,
+            "routing": {"auto_mode_enabled": true},
+            "providers": [{
+                "name": "mock-provider", "base_url": format!("{}/v1", upstream.uri()),
+                "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk-upstream-test"}],
+                "channels": tier_channels(),
+            }],
+        });
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let reqs = upstream.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        // auto = 全部候选（pro/flash 之一）
+        let m = body["model"].as_str().unwrap();
+        assert!((m == "pro-model" || m == "flash-model"), "auto 应选全部候选之一，实际: {m}");
+    }
     #[tokio::test]
     async fn forward_forwards_to_upstream_with_auth_and_model_mapping() {
         let upstream = MockServer::start().await;
