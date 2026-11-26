@@ -1167,6 +1167,68 @@ mod tests {
         assert!(resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+
+    #[tokio::test]
+    async fn logs_failover_records_upstream_status() {
+        // ch1 上游 500 → 日志记真实 500 → failover ch2 200 → 最终 200
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "up-bad"})))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({"error": {"message": "boom"}})))
+            .mount(&upstream).await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "up-good"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "ok", "model": "up-good",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}})))
+            .mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        gateway_logs::init_table(dir.path()).unwrap();
+        let channels = json!([
+            {"id": "ch1", "name": "bad", "key_name": "主", "models": [{"name": "up-bad", "alias": "my-model"}]},
+            {"id": "ch2", "name": "good", "key_name": "主", "models": [{"name": "up-good", "alias": "my-model"}]},
+        ]);
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), channels);
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(resp.status(), StatusCode::OK, "failover 后应 200");
+        let con = rusqlite::Connection::open(dir.path().join("config").join("gateway-logs.db")).unwrap();
+        let mut stmt = con.prepare("SELECT model, status FROM request_logs").unwrap();
+        let rows: Vec<(String, i64)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<Result<_,_>>().unwrap();
+        assert!(rows.iter().any(|(m, s)| m == "up-bad" && *s == 500), "ch1 日志记真实 500: {rows:?}");
+        assert!(rows.iter().any(|(m, s)| m == "up-good" && *s == 200), "ch2 日志记 200: {rows:?}");
+    }
+
+    #[tokio::test]
+    async fn multi_turn_stream_history() {
+        // 流式多轮：user/assistant/user → 上游收到完整 3 条
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"回复\"},\"index\":0}],\"model\":\"up-model\"}\n\n",
+                    "data: {\"choices\":[{\"delta\":{},\"index\":0}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n",
+                    "data: [DONE]\n\n")))
+            .expect(1).mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "up-model", "stream": true, "messages": [
+            {"role": "user", "content": "第一轮"},
+            {"role": "assistant", "content": "第一轮回复"},
+            {"role": "user", "content": "第二轮"},
+        ]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let reqs = upstream.received_requests().await.unwrap();
+        let mbody: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(mbody["messages"].as_array().unwrap().len(), 3, "流式多轮历史完整");
+        assert_eq!(mbody["messages"][1]["content"], "第一轮回复", "assistant 轮保留");
+    }
+
     #[tokio::test]
     async fn forward_no_upstream_reachable_returns_error() {
         // 指向一个没服务的端口 → 连接失败 → 502

@@ -1661,7 +1661,7 @@ async fn forward_one(
             if let Some(kw) = hit_disable_keyword(&body_bytes, &policy.context_keywords) {
                 record_outcome(health, &selected.channel.id, false, ttft, cb, false, false).await;
                 crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
-                    model: requested_model.into(),
+                    model: selected.upstream_model.clone(),
                     provider: selected.provider.name.clone(),
                     channel: selected.channel.name.clone(),
                     status: status.as_u16(),
@@ -1686,7 +1686,7 @@ async fn forward_one(
             if let Some(kw) = hit_disable_keyword(&body_bytes, &policy.disable_keywords) {
                 record_outcome(health, &selected.channel.id, false, ttft, cb, false, true).await;
                 crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
-                    model: requested_model.into(),
+                    model: selected.upstream_model.clone(),
                     provider: selected.provider.name.clone(),
                     channel: selected.channel.name.clone(),
                     status: status.as_u16(),
@@ -1702,7 +1702,7 @@ async fn forward_one(
             }
             // 普通错误（无关键词）：记日志 + 早返回触发 failover
             crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
-                model: requested_model.into(),
+                model: selected.upstream_model.clone(),
                 provider: selected.provider.name.clone(),
                 channel: selected.channel.name.clone(),
                 status: status.as_u16(),
