@@ -2570,6 +2570,46 @@ mod tests {
         assert_eq!(cands.len(), 2, "两个 provider 候选应合并");
     }
 
+
+    #[test]
+    fn disabled_provider_excluded_from_candidates() {
+        let mut cfg = GatewayConfig::default();
+        cfg.routing = RoutingConfig { strategy: RoutingStrategy::LatencyBased, auto_mode_enabled: true, max_retries: 3 };
+        for (name, mid, dis) in [("p-on", "on-model", false), ("p-off", "off-model", true)] {
+            cfg.providers.push(Provider {
+                name: name.into(), base_url: format!("http://{name}/v1"), disabled: dis,
+                headers: HashMap::new(), keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+                channels: vec![Channel { id: format!("ch-{name}"), name: format!("ch-{name}"), path: None, key_name: None,
+                    models: vec![ChannelModel { name: mid.into(), alias: None, capabilities: vec![], ..Default::default() }],
+                    weight: 1, rpm: None, retry: None, max_input_tokens: None }],
+                proxy: String::new(), ..Default::default()
+            });
+        }
+        let h = health_map();
+        let payload = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
+        let cands = auto_candidates(&cfg, &payload, &h, None);
+        assert_eq!(cands.len(), 1, "disabled provider 应排除");
+        assert_eq!(cands[0].upstream_model, "on-model");
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_recovers_after_timeout() {
+        // ch1 熔断 Open → 超过恢复超时 → half_open 可试探（不再被排除）
+        let cfg = two_chan_cfg(RoutingStrategy::SimpleShuffle);
+        let h = health_map();
+        for _ in 0..10 { record_outcome(&h, "ch1", false, 0, &cfg.circuit_breaker, false, false).await; }
+        {
+            let mut hm = h.write().await;
+            if let Some(e) = hm.get_mut("ch1") {
+                e.last_failure_at = now_secs() - cfg.circuit_breaker.recovery_timeout_seconds - 1;
+            }
+        }
+        for _ in 0..50 {
+            let sel = select_channel(&cfg, "my-model", &h);
+            assert!(sel.is_some(), "恢复后应仍有候选");
+        }
+    }
+
     #[test]
     fn tier_pro_filters_to_pro_with_vision() {
         // pro 档 + 当前轮带图（硬需求 vision）→ 只 class:pro 且带 vision 能力
