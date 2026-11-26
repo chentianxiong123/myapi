@@ -676,28 +676,45 @@ impl Default for TimeoutConfig {
 /// 下游鉴权配置（agent 调网关时校验 Bearer key，防裸奍）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
-    /// 允许的下游 key 列表（空=不鉴权，本机内网可用；配了=严格校验 Bearer）
+    /// 允许的下游 key 列表（空=不鉴权，本机内网可用；配了=严格校验 Bearer）。
+    /// 支持两种形态：字符串 `sk-xxx`（无设备名）或对象 `{name: "手机", key: "sk-xxx"}`（多设备身份区分）。
     #[serde(default)]
-    pub api_keys: Vec<String>,
+    pub api_keys: Vec<AuthKey>,
     /// 每个 key 每日 token 上限（input+output+cache；None/0=不限）。超限返 429。学 LiteLLM max_budget
     #[serde(default)]
     pub daily_token_budget: Option<i64>,
 }
 
-/// 提取下游 Bearer token（用量限额按 key 记账用）
-fn downstream_key(auth_header: Option<&str>) -> Option<String> {
-    auth_header.and_then(|h| h.strip_prefix("Bearer ").map(|t| t.to_string()))
+/// 下游 key：裸字符串（无设备名）或带设备名对象。untagged 向后兼容 `api_keys: ["sk-1"]`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AuthKey {
+    Plain(String),
+    Named { name: String, key: String },
 }
+
+impl AuthKey {
+    fn key(&self) -> &str {
+        match self { AuthKey::Plain(k) => k, AuthKey::Named { key, .. } => key }
+    }
+    fn device_name(&self) -> &str {
+        match self { AuthKey::Plain(k) => k, AuthKey::Named { name, .. } => name }
+    }
+    fn matches(&self, token: &str) -> bool { self.key() == token }
+}
+
+
 impl Default for AuthConfig {
     fn default() -> Self {
         Self { api_keys: Vec::new(), daily_token_budget: None }
     }
 }
 
-/// 校验下游 Bearer key（api_keys 空=不鉴权内网可用；配了=严格校验）
-pub fn validate_auth(auth: &AuthConfig, auth_header: Option<&str>) -> Result<(), String> {
+/// 校验下游 Bearer key（api_keys 空=不鉴权内网可用；配了=严格校验）。
+/// 返回设备名（多设备身份区分：Named 的 name；Plain 用 key 本身）；未配返回 None。
+pub fn validate_auth(auth: &AuthConfig, auth_header: Option<&str>) -> Result<Option<String>, String> {
     if auth.api_keys.is_empty() {
-        return Ok(()); // 未配 key → 不鉴权（本机/内网）
+        return Ok(None); // 未配 key → 不鉴权（本机/内网）
     }
     let token = auth_header
         .and_then(|h| h.strip_prefix("Bearer "))
@@ -705,11 +722,23 @@ pub fn validate_auth(auth: &AuthConfig, auth_header: Option<&str>) -> Result<(),
     if token.is_empty() {
         return Err("缺少 Authorization Bearer key".into());
     }
-    if auth.api_keys.iter().any(|k| k == token) {
-        Ok(())
-    } else {
-        Err("无效的 API key".into())
+    for k in &auth.api_keys {
+        if k.matches(token) {
+            return Ok(Some(k.device_name().to_string()));
+        }
     }
+    Err("无效的 API key".into())
+}
+
+/// 取下游设备名（多设备身份区分：Named→name；Plain→key 本身；未配→原始 key 兜底）
+fn downstream_key(auth: &AuthConfig, auth_header: Option<&str>) -> Option<String> {
+    let token = auth_header.and_then(|h| h.strip_prefix("Bearer "))?;
+    for k in &auth.api_keys {
+        if k.matches(token) {
+            return Some(k.device_name().to_string());
+        }
+    }
+    Some(token.to_string())
 }
 
 // ==================== 健康度（被动统计，学 LiteLLM cooldown，先留接口）====================
@@ -1159,17 +1188,21 @@ pub async fn forward_generic(
     cache: &ResponseCacheStore,
 ) -> axum::response::Response {
     let config = load_config(root);
-    // 下游鉴权：校验 Bearer key（api_keys 配了才校验，空=内网不鉴权）
-    if let Err(e) = validate_auth(&config.auth, auth_header) {
-        return (
-            axum::http::StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": {"message": e, "type": "authentication_error"}})),
-        ).into_response();
-    }
+    // 下游鉴权：校验 Bearer key（api_keys 配了才校验，空=内网不鉴权）。
+    // 成功时返回设备名（多设备身份区分：Named→name，日志/统计按设备聚合）。
+    let device_name = match validate_auth(&config.auth, auth_header) {
+        Ok(n) => n,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({"error": {"message": e, "type": "authentication_error"}})),
+            ).into_response();
+        }
+    };
     // 用量限额（学 LiteLLM max_budget）：配了 daily_token_budget → 查今日该 key 已用 token，超限返 429
     if let Some(budget) = config.auth.daily_token_budget {
         if budget > 0 {
-            if let Some(dkey) = downstream_key(auth_header) {
+            if let Some(dkey) = downstream_key(&config.auth, auth_header) {
                 let used = crate::gateway_logs::today_tokens_for_key(root, &dkey).unwrap_or(0);
                 if used >= budget {
                     return (
@@ -1188,7 +1221,7 @@ pub async fn forward_generic(
     // 客户端发 model=auto[1M]，网关剥离后识别档位 auto（黑盒调度），真实模型名由网关选
     let requested_model = strip_1m_suffix(&requested_model);
     let pin_key = session_key(&payload, auth_header);
-    let dkey = downstream_key(auth_header); // 传给 forward_one 记账（用量限额按 key）
+    let dkey = device_name.or_else(|| downstream_key(&config.auth, auth_header)); // 多设备身份：日志/记账按设备名
 
     // 档位（auto/pro/flash 是客户端配置的 model 名，保留字）：网关按档位过滤候选
     //   auto → 全部（网关随意，不偏）；pro → 只 class:pro；flash → 只 class:flash
@@ -1766,6 +1799,13 @@ async fn forward_one(
                 usage_tx: Some(usage_tx),
             })
         };
+        // 流式 model 回显档位名（对齐非流式）：档位请求时把 SSE data chunk 的 model 字段改成客户端配的档位名
+        let tap: std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send>> =
+            if requested_model == "pro" || requested_model == "flash" || requested_model == "auto" {
+                Box::pin(ModelRewriteStream { inner: tap, model: requested_model.to_string() })
+            } else {
+                tap
+            };
         // 后台任务：等流结束后拿 usage token，补一条带 token 的完整日志
         let log_root = root.to_path_buf();
         // 日志记真实上游模型名（用户要求：档位请求也记实际模型，不记档位别名）
@@ -1879,6 +1919,49 @@ pub(crate) fn parse_usage_json(v: &serde_json::Value) -> (Option<i64>, Option<i6
 /// SSE 流式 usage 捕获：包装字节流，逐 chunk 透传客户端的同时累积缓冲，
 /// 扫描 `data:` 行里的 usage token（OpenAI 最后 chunk / Anthropic message_delta）。
 /// 流结束后把 (input_tokens, output_tokens) 通过 oneshot channel 发给后台任务补记日志。
+/// 流式 SSE 的 model 字段改写为档位名（客户端配的 model 名，对齐非流式回显）。
+struct ModelRewriteStream {
+    inner: std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send>>,
+    model: String,
+}
+
+impl futures_core::Stream for ModelRewriteStream {
+    type Item = Result<bytes::Bytes, std::io::Error>;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        match this.inner.as_mut().poll_next(cx) {
+            std::task::Poll::Ready(Some(Ok(chunk))) => {
+                let replaced = rewrite_chunk_model(&chunk, &this.model);
+                std::task::Poll::Ready(Some(Ok(bytes::Bytes::from(replaced))))
+            }
+            other => other,
+        }
+    }
+}
+
+/// 把 chunk 内所有 `"model":"..."` / `"model": "..."` 的值改成档位名。
+fn rewrite_chunk_model(chunk: &[u8], model: &str) -> Vec<u8> {
+    let s = String::from_utf8_lossy(chunk);
+    if !s.contains("\"model\":") { return chunk.to_vec(); }
+    let mut out = s.to_string();
+    // 支持 serde_json（无空格）与上游透传（有空格）两种格式
+    for needle in ["\"model\":\"", "\"model\": \""] {
+        let mut idx = 0;
+        while let Some(pos) = out[idx..].find(needle) {
+            let start = idx + pos + needle.len();
+            if let Some(end_rel) = out[start..].find('"') {
+                let end = start + end_rel;
+                out.replace_range(start..end, model);
+                idx = end + model.len();
+            } else { break; }
+        }
+    }
+    out.into_bytes()
+}
+
 struct SseUsageTap {
     inner: std::pin::Pin<Box<dyn futures_core::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
     buf: Vec<u8>,
@@ -2401,6 +2484,33 @@ mod tests {
         // TTL 过期后：不再强制黏旧（重新选，可能换通道）
         let s2 = select_channel_sticky(&cfg, "my-model", &h, &pins, Some("sess:a")).unwrap().channel.id;
         assert!(["ch1", "ch2"].contains(&s2.as_str()), "TTL 过期后应可重新选: {s2}");
+    }
+
+    #[test]
+    fn stream_chunk_model_rewritten_to_tier() {
+        // 流式 SSE chunk 的 model 字段改写为档位名（对齐非流式回显）
+        let chunk = br#"data: {"id":"x","model":"up-real","choices":[{"delta":{"content":"hi"}}]}"#;
+        let out = rewrite_chunk_model(chunk, "pro");
+        let s = String::from_utf8_lossy(&out);
+        assert!(s.contains("\"model\":\"pro\""), "chunk model 应改为档位名: {s}");
+        assert!(s.contains("up-real") == false, "不应残留真实模型名: {s}");
+    }
+
+    #[test]
+    fn stream_chunk_model_with_space_rewritten() {
+        // 上游透传带空格格式也改写
+        let chunk = br#"data: {"model": "up-real", "choices": []}"#;
+        let out = rewrite_chunk_model(chunk, "flash");
+        let s = String::from_utf8_lossy(&out);
+        assert!(s.contains("\"model\": \"flash\""), "带空格 model 应改写: {s}");
+    }
+
+    #[test]
+    fn stream_chunk_without_model_untouched() {
+        // 无 model 字段的 chunk 原样保留
+        let chunk = br#"data: {"choices":[{"delta":{"content":"hi"}}]}"#;
+        let out = rewrite_chunk_model(chunk, "pro");
+        assert_eq!(out, chunk.to_vec());
     }
 
     #[tokio::test]
@@ -3009,21 +3119,41 @@ mod tests {
 
     #[test]
     fn auth_no_keys_allows_all() {
-        // api_keys 空 → 不鉴权（内网可用），任意 header 都放行
+        // api_keys 空 → 不鉴权（内网可用），任意 header 都放行，无设备名
         let auth = AuthConfig { api_keys: vec![] , daily_token_budget: None };
-        assert!(validate_auth(&auth, None).is_ok());
-        assert!(validate_auth(&auth, Some("Bearer anything")).is_ok());
+        assert_eq!(validate_auth(&auth, None).unwrap(), None);
+        assert_eq!(validate_auth(&auth, Some("Bearer anything")).unwrap(), None);
     }
 
     #[test]
     fn auth_configured_requires_valid_key() {
-        let auth = AuthConfig { api_keys: vec!["sk-secret".into()] , daily_token_budget: None };
+        let auth = AuthConfig { api_keys: vec![AuthKey::Plain("sk-secret".into())] , daily_token_budget: None };
         // 无 header → 401
         assert!(validate_auth(&auth, None).is_err());
         // 错 key → 401
         assert!(validate_auth(&auth, Some("Bearer wrong")).is_err());
-        // 对 key → 放行
-        assert!(validate_auth(&auth, Some("Bearer sk-secret")).is_ok());
+        // 对 key → 放行（Plain 设备名=key 本身）
+        assert_eq!(validate_auth(&auth, Some("Bearer sk-secret")).unwrap(), Some("sk-secret".into()));
+    }
+
+    #[test]
+    fn auth_device_name_distinguishes_multi_device() {
+        // 多设备身份区分：Named {name,key} → 鉴权返回设备名（日志/统计按设备聚合）
+        let auth = AuthConfig {
+            api_keys: vec![
+                AuthKey::Named { name: "手机".into(), key: "sk-phone".into() },
+                AuthKey::Named { name: "笔记本".into(), key: "sk-laptop".into() },
+            ],
+            daily_token_budget: None,
+        };
+        // 每设备独立 key → 识别出对应设备名
+        assert_eq!(validate_auth(&auth, Some("Bearer sk-phone")).unwrap(), Some("手机".into()));
+        assert_eq!(validate_auth(&auth, Some("Bearer sk-laptop")).unwrap(), Some("笔记本".into()));
+        // 未知 key → 401
+        assert!(validate_auth(&auth, Some("Bearer sk-evil")).is_err());
+        // downstream_key 同样返回设备名
+        assert_eq!(downstream_key(&auth, Some("Bearer sk-phone")), Some("手机".into()));
+        assert_eq!(downstream_key(&auth, Some("Bearer sk-laptop")), Some("笔记本".into()));
     }
 
     // ---- 限流测试（防打爆上游）----
