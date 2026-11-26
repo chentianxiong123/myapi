@@ -107,13 +107,16 @@ impl DshAdapter {
             c.insert(YV::String("displayName".into()), YV::String(DEFAULT_PROVIDER_ID.into()));
         }
         c.entry(YV::String("apiKeyEnv".into())).or_insert(YV::String("DSH_MYAPI_API_KEY".into()));
+        // 统一只下发 3 个档位名（auto/pro/flash），调度在网关黑盒
         let mut models: Vec<YV> = Vec::new();
-        for m in &ir.models {
+        let ctx = ir.models.first().map(|m| m.context_window).unwrap_or(200000);
+        let maxt = ir.models.first().map(|m| m.max_tokens).unwrap_or(8192);
+        for t in ["auto", "pro", "flash"] {
             let mut mm = Mapping::new();
-            mm.insert(YV::String("id".into()), YV::String(m.id.clone()));
-            mm.insert(YV::String("contextWindow".into()), YV::from(m.context_window));
-            mm.insert(YV::String("maxTokens".into()), YV::from(m.max_tokens));
-            mm.insert(YV::String("input".into()), YV::Sequence(m.input_modes.iter().map(|s| YV::String(s.clone())).collect()));
+            mm.insert(YV::String("id".into()), YV::String(t.to_string()));
+            mm.insert(YV::String("contextWindow".into()), YV::from(ctx));
+            mm.insert(YV::String("maxTokens".into()), YV::from(maxt));
+            mm.insert(YV::String("input".into()), YV::Sequence(vec![YV::String("text".into())]));
             models.push(YV::Mapping(mm));
         }
         c.insert(YV::String("models".into()), YV::Sequence(models));

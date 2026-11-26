@@ -109,7 +109,8 @@ impl HermesAdapter {
             c.insert(YV::String("base_url".into()), YV::String(ir.base_url.clone()));
             c.insert(YV::String("api_key".into()), YV::String(ir.api_key.clone()));
             let mut models_map = Mapping::new();
-            for m in &ir.models { models_map.insert(YV::String(m.id.clone()), YV::Mapping(Default::default())); }
+            // 统一只下发 3 个档位名（auto/pro/flash），调度在网关黑盒
+            for t in ["auto", "pro", "flash"] { models_map.insert(YV::String(t.to_string()), YV::Mapping(Default::default())); }
             c.insert(YV::String("models".into()), YV::Mapping(models_map));
         }
         // 3) model.default（保留原值，若不在 myapi 清单内则取第一个）
@@ -118,9 +119,10 @@ impl HermesAdapter {
             let mk = YV::String("model".into());
             let mc = d.get_mut(&mk).unwrap().as_mapping_mut().unwrap();
             let default = mc.get(&YV::String("default".into())).and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let has = ir.models.iter().any(|m| m.id == default);
-            if !has && !ir.models.is_empty() {
-                mc.insert(YV::String("default".into()), YV::String(ir.models[0].id.clone()));
+            // 默认档位：不在档位清单（auto/pro/flash）内则设 auto
+            let has = ["auto", "pro", "flash"].contains(&default.as_str());
+            if !has {
+                mc.insert(YV::String("default".into()), YV::String("auto".into()));
             }
         }
         data

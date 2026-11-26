@@ -78,11 +78,12 @@ impl PicoclawAdapter {
             m.get("provider").and_then(|v| v.as_str()) != Some(MYAPI_PROVIDER)
         }).collect();
         let mut model_list = kept;
-        for m in &ir.models {
+        // 统一只下发 3 个档位名（auto/pro/flash），调度在网关黑盒
+        for t in ["auto", "pro", "flash"] {
             model_list.push(json!({
-                "model_name": m.id,
+                "model_name": t,
                 "provider": MYAPI_PROVIDER,
-                "model": m.id,
+                "model": t,
                 "api_base": ir.base_url,
                 "api_keys": [ir.api_key],
             }));

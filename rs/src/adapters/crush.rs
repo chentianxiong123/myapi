@@ -123,17 +123,17 @@ impl Adapter for CrushAdapter {
         lines.push(format!(
             "provider add {} --type {} --base-url \"{}\" --api-key \"{}\"",
             MYAPI_ID, MYAPI_TYPE, Self::loopback_url(&ir.base_url), ir.api_key));
-        for m in &ir.models {
-            let cw = if m.context_window > 0 { m.context_window } else { 256000 };
-            let mt = if m.max_tokens > 0 { m.max_tokens } else { 16384 };
+        // 统一只下发 3 个档位名（auto/pro/flash），调度在网关黑盒
+        let cw = 200000;
+        let mt = 8192;
+        for t in ["auto", "pro", "flash"] {
             lines.push(format!(
                 "model add {}/{} --name \"{}\" --context-window {} --default-max-tokens {}",
-                MYAPI_ID, m.id, m.id, cw, mt));
+                MYAPI_ID, t, t, cw, mt));
         }
-        if !ir.models.is_empty() {
-            lines.push(format!("model large {}/{}", MYAPI_ID, ir.models[0].id));
-            lines.push(format!("model small {}/{}", MYAPI_ID, ir.models[ir.models.len() - 1].id));
-        }
+        // crush 的 large/small（大/小任务）映射档位：large→pro（质量）、small→flash（速度）
+        lines.push(format!("model large {}/pro", MYAPI_ID));
+        lines.push(format!("model small {}/flash", MYAPI_ID));
         lines.push(END_MARK.to_string());
         Rendered::Text(lines.join("\n"))
     }
@@ -217,10 +217,11 @@ mod tests {
         let out = adapter().render(&ir("http://x:8317/v1", &["m1", "m2", "m3"]));
         match out {
             Rendered::Text(t) => {
-                assert!(t.contains("model add myapi/m1"));
-                assert!(t.contains("model add myapi/m3"));
-                assert!(t.contains("model large myapi/m1"), "首模型=large");
-                assert!(t.contains("model small myapi/m3"), "末模型=small");
+                assert!(t.contains("model add myapi/auto"));
+                assert!(t.contains("model add myapi/pro"));
+                assert!(t.contains("model add myapi/flash"));
+                assert!(t.contains("model large myapi/pro"), "large→pro（质量）");
+                assert!(t.contains("model small myapi/flash"), "small→flash（速度）");
             }
             _ => panic!(),
         }

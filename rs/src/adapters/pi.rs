@@ -114,10 +114,14 @@ impl Adapter for PiAdapter {
             c.insert("baseUrl".into(), Value::String(ir.base_url.clone()));
             c.insert("api".into(), Value::String(if ir.api.is_empty() { "openai-completions".into() } else { ir.api.clone() }));
             c.insert("apiKey".into(), Value::String(ir.api_key.clone()));
-            let models: Vec<Value> = ir.models.iter().map(|m| json!({
-                "id": m.id, "name": m.id, "reasoning": m.reasoning,
-                "input": m.input_modes, "contextWindow": m.context_window, "maxTokens": m.max_tokens
-            })).collect();
+            // 统一只下发 3 个档位名（auto/pro/flash），调度在网关黑盒
+            let ctx = ir.models.first().map(|m| m.context_window).unwrap_or(200000);
+            let maxt = ir.models.first().map(|m| m.max_tokens).unwrap_or(8192);
+            let mut models: Vec<Value> = Vec::new();
+            for t in ["auto", "pro", "flash"] {
+                models.push(json!({"id": t, "name": t, "reasoning": false,
+                    "input": ["text"], "contextWindow": ctx, "maxTokens": maxt}));
+            }
             c.insert("models".into(), Value::Array(models));
         }
         let mut out = data;

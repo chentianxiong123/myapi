@@ -85,7 +85,11 @@ impl Adapter for CodexAdapter {
             "settings_config": {
                 "auth": { "OPENAI_API_KEY": ir.api_key },
                 "config": config,
-                "modelCatalog": { "models": [{ "model": "auto", "displayName": "auto" }] }
+                "modelCatalog": { "models": [
+                    {"model": "auto", "displayName": "auto"},
+                    {"model": "pro", "displayName": "pro"},
+                    {"model": "flash", "displayName": "flash"}
+                ] }
             },
                 "meta": {
                     "commonConfigEnabled": false,

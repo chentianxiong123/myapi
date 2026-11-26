@@ -127,13 +127,16 @@ impl Adapter for OpencodeAdapter {
         o.insert("baseURL".into(), Value::String(ir.base_url.clone()));
         o.insert("apiKey".into(), Value::String(ir.api_key.clone()));
         if !o.contains_key("setCacheKey") { o.insert("setCacheKey".into(), Value::Bool(true)); }
+        // 统一只下发 3 个档位名（auto/pro/flash），调度在网关黑盒
         let mut models = serde_json::Map::new();
-        for m in &ir.models {
-            models.insert(m.id.clone(), json!({
-                "name": m.id,
-                "capabilities": { "tools": true, "input": m.input_modes, "output": ["text"],
-                                  "reasoning": { "supported": m.reasoning } },
-                "limit": { "context": m.context_window, "output": m.max_tokens }
+        let ctx = ir.models.first().map(|m| m.context_window).unwrap_or(200000);
+        let maxt = ir.models.first().map(|m| m.max_tokens).unwrap_or(8192);
+        for t in ["auto", "pro", "flash"] {
+            models.insert(t.to_string(), json!({
+                "name": t,
+                "capabilities": { "tools": true, "input": ["text"], "output": ["text"],
+                                  "reasoning": { "supported": false } },
+                "limit": { "context": ctx, "output": maxt }
             }));
         }
         c.insert("models".into(), Value::Object(models));
