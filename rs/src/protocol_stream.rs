@@ -229,6 +229,10 @@ pub struct ResponsesSseState {
     finished: bool,
     input_tokens: u64,
     output_tokens: u64,
+    // 思考模式（reasoning_content → reasoning 项）
+    reasoning_started: bool,
+    reasoning_id: String,
+    reasoning_text: String,
 }
 
 impl ResponsesSseState {
@@ -244,6 +248,9 @@ impl ResponsesSseState {
             finished: false,
             input_tokens: 0,
             output_tokens: 0,
+            reasoning_started: false,
+            reasoning_id: format!("rs_{}", now_secs()),
+            reasoning_text: String::new(),
         }
     }
 
@@ -261,6 +268,17 @@ impl ResponsesSseState {
         }
         let Some(choice) = chunk.get("choices").and_then(|v| v.as_array()).and_then(|a| a.first()) else { return out; };
         let Some(delta) = choice.get("delta") else { return out; };
+        // 思考模式：reasoning_content → reasoning 项（流式）
+        if let Some(rc) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+            if !rc.is_empty() {
+                if !self.reasoning_started { self.emit_reasoning_start(&mut out); }
+                self.reasoning_text.push_str(rc);
+                out.push(sse("response.reasoning_summary_text.delta", &json!({
+                    "type": "response.reasoning_summary_text.delta", "item_id": self.reasoning_id,
+                    "output_index": self.output_index, "summary_index": 0, "delta": rc
+                })));
+            }
+        }
         if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
             if !text.is_empty() {
                 if !self.started { self.emit_start(&mut out); }
@@ -300,12 +318,39 @@ impl ResponsesSseState {
         })));
     }
 
+    fn emit_reasoning_start(&mut self, out: &mut Vec<String>) {
+        if self.reasoning_started { return; }
+        self.reasoning_started = true;
+        out.push(sse("response.output_item.added", &json!({
+            "type": "response.output_item.added", "output_index": self.output_index,
+            "item": {"type": "reasoning", "id": self.reasoning_id, "summary": []}
+        })));
+        out.push(sse("response.reasoning_summary_text.added", &json!({
+            "type": "response.reasoning_summary_text.added", "item_id": self.reasoning_id,
+            "output_index": self.output_index, "summary_index": 0,
+            "summary_text": {"type": "summary_text", "text": ""}
+        })));
+    }
+
     pub fn finish(&mut self) -> Vec<String> {
         let mut out = Vec::new();
         if !self.started {
             self.emit_start(&mut out);
         }
         let model = if self.model.is_empty() { "unknown".to_string() } else { self.model.clone() };
+        // 思考模式收尾：reasoning_summary_text.done + reasoning item done
+        if self.reasoning_started {
+            out.push(sse("response.reasoning_summary_text.done", &json!({
+                "type": "response.reasoning_summary_text.done", "item_id": self.reasoning_id,
+                "output_index": self.output_index, "summary_index": 0,
+                "summary_text": {"type": "summary_text", "text": self.reasoning_text}
+            })));
+            out.push(sse("response.output_item.done", &json!({
+                "type": "response.output_item.done", "output_index": self.output_index,
+                "item": {"type": "reasoning", "id": self.reasoning_id,
+                    "summary": [{"type": "summary_text", "text": self.reasoning_text}]}
+            })));
+        }
         // 关消息项
         out.push(sse("response.output_text.done", &json!({
             "type": "response.output_text.done", "item_id": self.message_id,
@@ -601,5 +646,25 @@ mod tests {
         assert!(joined.contains("response.output_text.done"));
         assert!(joined.contains("response.completed"));
         assert!(joined.contains("\"status\":\"completed\""));
+    }
+
+    #[test]
+    fn chat_sse_to_responses_reasoning_not_lost() {
+        // 思考模式：上游 chat 流式 reasoning_content → responses 流式 reasoning 项（不丢）
+        let mut st = ResponsesSseState::new();
+        let mut out = Vec::new();
+        out.extend(st.push(r#"{"choices":[{"delta":{"reasoning_content":"思考中"},"index":0}],"model":"m"}"#));
+        out.extend(st.push(r#"{"choices":[{"delta":{"content":"答案"},"index":0}]}"#));
+        out.extend(st.finish());
+        let joined = out.join("\n");
+        // reasoning 项事件齐全：added + delta + done
+        assert!(joined.contains("response.output_item.added"), "缺 output_item.added");
+        assert!(joined.contains("response.reasoning_summary_text.added"), "缺 reasoning_summary_text.added");
+        assert!(joined.contains("response.reasoning_summary_text.delta"), "缺 reasoning_summary_text.delta");
+        assert!(joined.contains("\"delta\":\"思考中\""), "思考内容丢失");
+        assert!(joined.contains("response.reasoning_summary_text.done"), "缺 reasoning_summary_text.done");
+        assert!(joined.contains("response.output_item.done"), "缺 reasoning item done");
+        // 正文仍完整
+        assert!(joined.contains("\"delta\":\"答案\""), "正文丢失");
     }
 }

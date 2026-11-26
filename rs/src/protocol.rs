@@ -310,22 +310,85 @@ fn canonical_json_string(v: &Value) -> String {
 }
 
 fn resolve_reasoning_effort(body: &Value) -> Option<&'static str> {
-    // Anthropic thinking 块 → reasoning_effort。学 cc-switch：budget_tokens 映射 high/medium/low。
-    if let Some(arr) = body.get("thinking").and_then(|v| v.as_array()) {
-        for t in arr {
-            if t.get("type").and_then(|v| v.as_str()) == Some("enabled") {
-                if let Some(budget) = t.get("budget_tokens").and_then(|v| v.as_u64()) {
-                    return Some(match budget {
-                        b if b > 32000 => "high",
-                        b if b > 16000 => "medium",
-                        _ => "low",
-                    });
-                }
-                return Some("medium");
+    // 学 cc-switch resolve_reasoning_effort：模型感知的精细映射。
+    let model = body.get("model").and_then(|m| m.as_str()).unwrap_or_default();
+    resolve_requested_reasoning_effort(body, model)
+        .map(|effort| clamp_reasoning_effort_for_model(model, effort))
+}
+
+/// 优先级：
+/// 1. 显式 `output_config.effort`（low/medium/high/xhigh/max；max 仅模型支持保留，否则回退 xhigh；thinking off 时 floor 到 low）
+/// 2. `thinking.type` + `budget_tokens`（adaptive→xhigh；enabled+<4000→low/<16000→medium/其余→high；无 budget→high；disabled/缺→None）
+fn resolve_requested_reasoning_effort(body: &Value, model: &str) -> Option<&'static str> {
+    if let Some(effort) = body.pointer("/output_config/effort").and_then(|v| v.as_str()) {
+        let mapped = match effort {
+            "low" => Some("low"),
+            "medium" => Some("medium"),
+            "high" => Some("high"),
+            "xhigh" => Some("xhigh"),
+            "max" if supports_max_reasoning_effort(model) => Some("max"),
+            "max" => Some("xhigh"),
+            _ => None, // 未知值不注入
+        };
+        // 学 cc-switch make_default_adaptive_thinking_explicit：Claude 5.x 省略 thinking = adaptive 默认（不算 off）；
+        // 否则省略或显式 disabled 都视为 off → effort floor 到 low。
+        let thinking_omitted = body.get("thinking").is_none_or(|t| t.is_null());
+        let thinking_off = if thinking_omitted {
+            !adaptive_thinking_is_default(model)
+        } else {
+            matches!(
+                body.pointer("/thinking/type").and_then(|t| t.as_str()),
+                Some("disabled")
+            )
+        };
+        return if thinking_off {
+            mapped.map(|_| "low")
+        } else {
+            mapped
+        };
+    }
+    let thinking = body.get("thinking")?;
+    match thinking.get("type").and_then(|t| t.as_str()) {
+        Some("adaptive") => Some("xhigh"),
+        Some("enabled") => {
+            let budget = thinking.get("budget_tokens").and_then(|b| b.as_u64());
+            match budget {
+                Some(b) if b < 4_000 => Some("low"),
+                Some(b) if b < 16_000 => Some("medium"),
+                Some(_) => Some("high"),
+                None => Some("high"), // enabled 无 budget — 假设强推理
             }
         }
+        _ => None, // disabled 或缺失
     }
-    None
+}
+
+/// Claude 5.x 系模型省略 thinking 时默认 adaptive（学 cc-switch adaptive_thinking_is_default）
+fn adaptive_thinking_is_default(model: &str) -> bool {
+    let n = model.to_ascii_lowercase();
+    ["fable-5", "mythos-5", "mythos-preview", "opus-5", "sonnet-5"]
+        .iter()
+        .any(|needle| n.contains(needle))
+}
+
+/// 模型是否支持独立的 max 推理档（学 cc-switch supports_max_reasoning_effort）
+fn supports_max_reasoning_effort(model: &str) -> bool {
+    let n = model.to_ascii_lowercase();
+    matches!(n.as_str(), "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna")
+        || matches!(n.as_str(), "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna")
+}
+
+/// 模型感知钳制（学 cc-switch clamp_reasoning_effort_for_model）
+fn clamp_reasoning_effort_for_model(model: &str, effort: &'static str) -> &'static str {
+    let n = model.to_ascii_lowercase();
+    if n == "gpt-5-pro" || n.starts_with("gpt-5-pro-") {
+        return "high";
+    }
+    let is_gpt_pro = n.starts_with("gpt-") && (n.ends_with("-pro") || n.contains("-pro-"));
+    if is_gpt_pro && effort == "low" {
+        return "medium";
+    }
+    effort
 }
 
 /// 拆分正文开头的 </think> 内联块（DeepSeek 系）。返回 (thinking, answer)。
@@ -360,6 +423,10 @@ pub fn responses_to_chat(body: &Value) -> Result<Value, String> {
 
     for (src, dst) in [("max_output_tokens", "max_tokens"), ("temperature", "temperature"), ("top_p", "top_p"), ("stream", "stream")] {
         if let Some(v) = body.get(src) { result[dst] = v.clone(); }
+    }
+    // 思考模式：responses `reasoning: {effort}` → chat `reasoning_effort`（学 anthropic thinking 映射）
+    if let Some(effort) = body.get("reasoning").and_then(|v| v.get("effort")).and_then(|v| v.as_str()) {
+        result["reasoning_effort"] = json!(effort);
     }
     Ok(result)
 }
@@ -584,9 +651,15 @@ pub fn chat_to_anthropic_request(chat: &Value) -> Result<Value, String> {
     if let Some(v) = chat.get("stop") { result["stop_sequences"] = v.clone(); }
     if let Some(v) = chat.get("stream") { result["stream"] = v.clone(); }
 
-    // reasoning_effort → thinking 块（学 resolve_reasoning_effort 的反向映射）
+    // reasoning_effort → thinking 块（学 cc-switch effort_to_thinking_budget：2048/8192/16384/24576）
     if let Some(effort) = chat.get("reasoning_effort").and_then(|v| v.as_str()) {
-        let budget = match effort { "high" => 32000, "medium" => 16000, _ => 4000 };
+        let budget = match effort.trim().to_ascii_lowercase().as_str() {
+            "minimal" | "low" => 2048,
+            "medium" => 8192,
+            "high" => 16384,
+            "xhigh" | "max" | "ultra" => 24576,
+            _ => 8192, // 未知默认 medium 档
+        };
         result["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
     }
 
@@ -906,6 +979,19 @@ mod tests {
     }
 
     #[test]
+    fn responses_reasoning_to_chat() {
+        // 思考模式：responses `reasoning: {effort}` → chat `reasoning_effort`
+        let body = json!({
+            "model": "gpt-5",
+            "reasoning": {"effort": "high"},
+            "input": [{"type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "hi"}]}],
+        });
+        let out = responses_to_chat(&body).unwrap();
+        assert_eq!(out["reasoning_effort"], "high", "responses reasoning.effort 应转 chat reasoning_effort");
+    }
+
+    #[test]
     fn responses_function_call_to_chat() {
         let body = json!({
             "model": "gpt-5",
@@ -1008,5 +1094,63 @@ mod tests {
         });
         let out = anthropic_to_openai_response(&body).unwrap();
         assert_eq!(out["choices"][0]["message"]["reasoning_content"], "思考中");
+    }
+
+    #[test]
+    fn thinking_object_enabled_maps_by_budget() {
+        // 学 cc-switch：Anthropic thinking 是**对象**（{type, budget_tokens}），不是数组。
+        // enabled + budget 分段：<4000 low / <16000 medium / 其余 high。
+        assert_eq!(resolve_reasoning_effort(&json!({"thinking": {"type": "enabled", "budget_tokens": 2048}})), Some("low"));
+        assert_eq!(resolve_reasoning_effort(&json!({"thinking": {"type": "enabled", "budget_tokens": 8192}})), Some("medium"));
+        assert_eq!(resolve_reasoning_effort(&json!({"thinking": {"type": "enabled", "budget_tokens": 24576}})), Some("high"));
+    }
+
+    #[test]
+    fn thinking_adaptive_maps_xhigh() {
+        // adaptive（Claude 5.x 默认）→ xhigh（最大推理）
+        assert_eq!(resolve_reasoning_effort(&json!({"thinking": {"type": "adaptive"}})), Some("xhigh"));
+    }
+
+    #[test]
+    fn thinking_disabled_or_missing_is_none() {
+        assert_eq!(resolve_reasoning_effort(&json!({"thinking": {"type": "disabled"}})), None);
+        assert_eq!(resolve_reasoning_effort(&json!({})), None);
+    }
+
+    #[test]
+    fn output_config_effort_wins_and_floor_when_thinking_off() {
+        // Priority 1：output_config.effort 优先（thinking on 时原样保留）
+        assert_eq!(resolve_reasoning_effort(&json!({"thinking": {"type": "enabled"}, "output_config": {"effort": "high"}})), Some("high"));
+        assert_eq!(resolve_reasoning_effort(&json!({"thinking": {"type": "enabled"}, "output_config": {"effort": "xhigh"}})), Some("xhigh"));
+        // Claude 5.x 省略 thinking = adaptive 默认（不 floor）
+        assert_eq!(resolve_reasoning_effort(&json!({"model": "claude-opus-5", "output_config": {"effort": "high"}})), Some("high"));
+        // 显式 thinking: disabled + effort → floor low
+        assert_eq!(resolve_reasoning_effort(&json!({"thinking": {"type": "disabled"}, "output_config": {"effort": "high"}})), Some("low"));
+        // 非 Claude 模型省略 thinking（=off）+ effort → floor low
+        assert_eq!(resolve_reasoning_effort(&json!({"model": "gpt-5", "output_config": {"effort": "high"}})), Some("low"));
+    }
+
+    #[test]
+    fn effort_max_clamped_by_model() {
+        // max 仅支持模型的模型保留，否则回退 xhigh（均带 thinking on）
+        assert_eq!(resolve_reasoning_effort(&json!({"model": "gpt-5.6", "thinking": {"type": "enabled"}, "output_config": {"effort": "max"}})), Some("max"));
+        assert_eq!(resolve_reasoning_effort(&json!({"model": "gpt-5", "thinking": {"type": "enabled"}, "output_config": {"effort": "max"}})), Some("xhigh"));
+    }
+
+    #[test]
+    fn gpt_pro_effort_clamped() {
+        // gpt-5-pro 强制 high；其他 gpt-pro 最低 medium（带 thinking on）
+        assert_eq!(resolve_reasoning_effort(&json!({"model": "gpt-5-pro", "thinking": {"type": "enabled"}, "output_config": {"effort": "low"}})), Some("high"));
+        assert_eq!(resolve_reasoning_effort(&json!({"model": "gpt-4-pro", "thinking": {"type": "enabled"}, "output_config": {"effort": "low"}})), Some("medium"));
+    }
+
+    #[test]
+    fn chat_effort_to_anthropic_thinking_budget() {
+        // 学 cc-switch effort_to_thinking_budget：2048/8192/16384/24576
+        let out = chat_to_anthropic_request(&json!({"model": "m", "reasoning_effort": "high"})).unwrap();
+        assert_eq!(out["thinking"]["type"], "enabled");
+        assert_eq!(out["thinking"]["budget_tokens"], 16384);
+        let out2 = chat_to_anthropic_request(&json!({"model": "m", "reasoning_effort": "xhigh"})).unwrap();
+        assert_eq!(out2["thinking"]["budget_tokens"], 24576);
     }
 }
