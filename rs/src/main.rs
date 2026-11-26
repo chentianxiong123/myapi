@@ -3480,8 +3480,8 @@ mod tests {
         assert!(s.contains("[DONE]"), "应含 [DONE]，实际: {s}");
         assert!(s.contains("prompt_tokens"), "应含 usage chunk，实际: {s}");
 
-        // 流式 usage 抓取：日志应记 input=10 output=5
-        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        // 流式 usage 抓取：日志应记 input=10 output=5（poll 等入库，避免固定 sleep flaky）
+        assert!(wait_summary(&dir.path(), Some(10), Some(5)).await, "流式 usage 应入库");
         let logs = gateway_logs::query_recent(&dir.path(), 5).unwrap();
         let data = logs.get("data").and_then(|v| v.as_array()).unwrap();
         assert!(!data.is_empty(), "流式请求应记日志");

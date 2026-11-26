@@ -248,6 +248,21 @@ pub struct GatewayConfig {
     pub test: TestConfig,
 }
 
+impl GatewayConfig {
+    /// 熔断器配置：routing.circuit_breaker 优先（前端保存路径），回退顶层 circuit_breaker
+    pub fn cb(&self) -> &CircuitBreakerConfig {
+        self.routing.circuit_breaker.as_ref().unwrap_or(&self.circuit_breaker)
+    }
+    /// 黏性配置：routing.sticky 优先，回退顶层 sticky
+    pub fn sticky_cfg(&self) -> &StickyConfig {
+        self.routing.sticky.as_ref().unwrap_or(&self.sticky)
+    }
+    /// 超时配置：routing.timeout 优先，回退顶层 timeout
+    pub fn timeout_cfg(&self) -> &TimeoutConfig {
+        self.routing.timeout.as_ref().unwrap_or(&self.timeout)
+    }
+}
+
 /// 通道测试配置（用户可编辑，放 gateway.yaml，学 new-api TestChannel 的可配置测试内容）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestConfig {
@@ -530,7 +545,7 @@ pub fn auto_candidates(
 ) -> Vec<AutoCandidate> {
     let required = detect_required_caps(payload);
     let hs = health.try_read().ok();
-    let cb = &config.circuit_breaker;
+    let cb = config.cb();
     let mut out: Vec<AutoCandidate> = Vec::new();
 
     for provider in &config.providers {
@@ -643,12 +658,28 @@ pub struct RoutingConfig {
     /// 最大重试数（failover 尝试多少条通道）
     #[serde(default = "def_max_retries")]
     pub max_retries: usize,
+    /// 前端保存路径：熔断器在 routing 段下（嵌套）；读时优先，回退顶层 circuit_breaker（向后兼容）
+    #[serde(default)]
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
+    /// 前端保存路径：黏性在 routing 段下；优先，回退顶层 sticky
+    #[serde(default)]
+    pub sticky: Option<StickyConfig>,
+    /// 前端保存路径：超时在 routing 段下；优先，回退顶层 timeout
+    #[serde(default)]
+    pub timeout: Option<TimeoutConfig>,
+    /// 延迟滑动窗口秒（TTFT 统计窗口，前端可配）
+    #[serde(default)]
+    pub latency_window_seconds: Option<u64>,
+    /// 全熔断兜底策略（keep-all/fail，前端可配）
+    #[serde(default)]
+    pub when_all_unhealthy: Option<String>,
 }
 fn def_max_retries() -> usize { 3 }
 fn def_auto_enabled() -> bool { true }
 impl Default for RoutingConfig {
     fn default() -> Self {
-        Self { strategy: RoutingStrategy::default(), auto_mode_enabled: def_auto_enabled(), max_retries: def_max_retries() }
+        Self { strategy: RoutingStrategy::default(), auto_mode_enabled: def_auto_enabled(), max_retries: def_max_retries(),
+            circuit_breaker: None, sticky: None, timeout: None, latency_window_seconds: None, when_all_unhealthy: None }
     }
 }
 
@@ -895,7 +926,7 @@ pub fn select_channel(
     health: &HealthMap,
 ) -> Option<SelectedChannel> {
     let health_snapshot = health.try_read().ok();
-    let cb = &config.circuit_breaker;
+    let cb = config.cb();
     // 先收集所有能服务该模型的候选通道（含健康度）
     let mut candidates: Vec<(&Provider, &Channel, &ChannelModel)> = Vec::new();
     for provider in &config.providers {
@@ -1017,7 +1048,7 @@ pub fn ordered_candidates(
 ) -> Vec<SelectedChannel> {
     let hs = health.try_read().ok();
     let hs = hs.as_deref();
-    let cb = &config.circuit_breaker;
+    let cb = config.cb();
     let strategy = &config.routing.strategy;
 
     // 收集能服务该模型的候选
@@ -1085,14 +1116,14 @@ pub fn select_channel_sticky(
     pins: &PinStore,
     pin_key: Option<&str>,
 ) -> Option<SelectedChannel> {
-    let cb = &config.circuit_breaker;
+    let cb = config.cb();
     // 1. 查有效 pin（TTL 内 + 通道仍健康）
     if let Some(key) = pin_key {
-        if config.sticky.enabled {
+        if config.sticky_cfg().enabled {
             if let Ok(map) = pins.try_read() {
                 if let Some(entry) = map.get(key) {
                     let age = now_secs().saturating_sub(entry.pinned_at);
-                    if age < config.sticky.ttl_seconds {
+                    if age < config.sticky_cfg().ttl_seconds {
                         // pin 有效，验证通道仍可用
                         let channel_ok = {
                             let hm_guard = health.try_read().ok();
@@ -1117,7 +1148,7 @@ pub fn select_channel_sticky(
 
     // 3. 打 pin（供下次复用）
     if let Some(key) = pin_key {
-        if config.sticky.enabled {
+        if config.sticky_cfg().enabled {
             if let Ok(mut map) = pins.try_write() {
                 map.insert(key.to_string(), PinEntry {
                     channel_id: selected.channel.id.clone(),
@@ -1341,7 +1372,7 @@ pub async fn forward_generic(
             Ok(resp) => {
                 // 成功：更新黏性 pin 到这条通道（供后续复用）
                 if let Some(k) = pin_key.as_deref() {
-                    if config.sticky.enabled {
+                    if config.sticky_cfg().enabled {
                         pins.write().await.insert(k.to_string(), PinEntry { channel_id: cand.channel.id.clone(), pinned_at: now_secs() });
                     }
                 }
@@ -1659,8 +1690,8 @@ async fn forward_one(
     };
 
     let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(config.timeout.streaming_first_byte))
-        .timeout(std::time::Duration::from_secs(config.timeout.non_streaming))
+        .connect_timeout(std::time::Duration::from_secs(config.timeout_cfg().streaming_first_byte))
+        .timeout(std::time::Duration::from_secs(config.timeout_cfg().non_streaming))
         .build()
         .map_err(|e| ForwardError::Retryable { status: None, retry_after: None, msg: format!("client 构造失败: {}", e) })?;
     let mut req = if is_anthropic {
@@ -1679,7 +1710,7 @@ async fn forward_one(
     }
 
     let start = std::time::Instant::now();
-    let cb = &config.circuit_breaker;
+    let cb = config.cb();
     let resp = match req.json(&send_payload).send().await {
         Ok(r) => r,
         Err(e) => {
@@ -2680,7 +2711,7 @@ mod tests {
 
     fn two_chan_cfg(strategy: RoutingStrategy) -> GatewayConfig {
         let mut cfg = GatewayConfig::default();
-        cfg.routing = RoutingConfig { strategy, auto_mode_enabled: true, max_retries: 3 };
+        cfg.routing = RoutingConfig { strategy, auto_mode_enabled: true, max_retries: 3, ..Default::default() };
         cfg.sticky = StickyConfig { enabled: false, ttl_seconds: 300 };
         cfg.providers.push(Provider {
             name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
@@ -2729,7 +2760,7 @@ mod tests {
     fn multi_provider_candidates_merged() {
         // 2 个 provider 各 1 通道 → auto_candidates 合并候选
         let mut cfg = GatewayConfig::default();
-        cfg.routing = RoutingConfig { strategy: RoutingStrategy::LatencyBased, auto_mode_enabled: true, max_retries: 3 };
+        cfg.routing = RoutingConfig { strategy: RoutingStrategy::LatencyBased, auto_mode_enabled: true, max_retries: 3, ..Default::default() };
         for (name, mid) in [("p1", "a-model"), ("p2", "b-model")] {
             cfg.providers.push(Provider {
                 name: name.into(), base_url: format!("http://{name}/v1"), disabled: false,
@@ -2753,7 +2784,7 @@ mod tests {
     #[test]
     fn disabled_provider_excluded_from_candidates() {
         let mut cfg = GatewayConfig::default();
-        cfg.routing = RoutingConfig { strategy: RoutingStrategy::LatencyBased, auto_mode_enabled: true, max_retries: 3 };
+        cfg.routing = RoutingConfig { strategy: RoutingStrategy::LatencyBased, auto_mode_enabled: true, max_retries: 3, ..Default::default() };
         for (name, mid, dis) in [("p-on", "on-model", false), ("p-off", "off-model", true)] {
             cfg.providers.push(Provider {
                 name: name.into(), base_url: format!("http://{name}/v1"), disabled: dis,
@@ -2793,7 +2824,7 @@ mod tests {
     fn tier_pro_filters_to_pro_with_vision() {
         // pro 档 + 当前轮带图（硬需求 vision）→ 只 class:pro 且带 vision 能力
         let mut cfg = GatewayConfig::default();
-        cfg.routing = RoutingConfig { strategy: RoutingStrategy::LatencyBased, auto_mode_enabled: true, max_retries: 3 };
+        cfg.routing = RoutingConfig { strategy: RoutingStrategy::LatencyBased, auto_mode_enabled: true, max_retries: 3, ..Default::default() };
         cfg.providers.push(Provider {
             name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
             headers: HashMap::new(),
