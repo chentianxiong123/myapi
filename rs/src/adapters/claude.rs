@@ -71,10 +71,20 @@ impl Adapter for ClaudeAdapter {
             env.insert("ANTHROPIC_BASE_URL".into(), Value::String(root.to_string()));
             env.insert("ANTHROPIC_AUTH_TOKEN".into(), Value::String(ir.api_key.clone()));
             for k in CLAUDE_MODEL_KEYS {
-                env.insert(k.into(), Value::String(m.id.clone()));
+                // 档位分开映射：Claude Code 任务分档（opus/sonnet/haiku）→ myapi 档位名
+                //   opus/fable（质量档）→ pro；sonnet（默认档）→ auto；haiku（轻量档）→ flash
+                //   客户端发 model=档位名 → 网关档位路由（不再塔缩成同一个模型）
+                let tier = match k {
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL" | "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"
+                    | "ANTHROPIC_DEFAULT_FABLE_MODEL" | "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME" => "pro",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL" | "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME" => "flash",
+                    _ => "auto", // SONNET + ANTHROPIC_MODEL（默认档）
+                };
+                env.insert(k.into(), Value::String(tier.to_string()));
             }
             env.insert("DISABLE_AUTOUPDATER".into(), Value::String("1".into()));
-            env.insert("CLAUDE_CODE_SUBAGENT_MODEL".into(), Value::String(m.id.clone()));
+            // 子代理任务轻量 → flash（速度型）
+            env.insert("CLAUDE_CODE_SUBAGENT_MODEL".into(), Value::String("flash".into()));
             providers.push(json!({
                 "name": m.id,
                 "notes": DEFAULT_PROVIDER_ID,
@@ -165,7 +175,13 @@ mod tests {
             Rendered::Json(v) => {
                 let env = v.as_array().unwrap()[0].pointer("/settings_config/env").unwrap();
                 assert_eq!(env.get("ANTHROPIC_AUTH_TOKEN").and_then(|x| x.as_str()), Some("sk-ant"));
-                assert_eq!(env.get("ANTHROPIC_MODEL").and_then(|x| x.as_str()), Some("claude-3"));
+                // 档位分开映射：不再塔缩成同一个模型，按 Claude Code 任务分档映射 myapi 档位名
+                assert_eq!(env.get("ANTHROPIC_MODEL").and_then(|x| x.as_str()), Some("auto"), "默认档 → auto");
+                assert_eq!(env.get("ANTHROPIC_DEFAULT_OPUS_MODEL").and_then(|x| x.as_str()), Some("pro"), "opus 质量档 → pro");
+                assert_eq!(env.get("ANTHROPIC_DEFAULT_SONNET_MODEL").and_then(|x| x.as_str()), Some("auto"), "sonnet 默认档 → auto");
+                assert_eq!(env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL").and_then(|x| x.as_str()), Some("flash"), "haiku 轻量档 → flash");
+                assert_eq!(env.get("ANTHROPIC_DEFAULT_FABLE_MODEL").and_then(|x| x.as_str()), Some("pro"), "fable 质量档 → pro");
+                assert_eq!(env.get("CLAUDE_CODE_SUBAGENT_MODEL").and_then(|x| x.as_str()), Some("flash"), "子代理 → flash");
             }
             _ => panic!(),
         }
