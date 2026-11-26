@@ -25,3 +25,6 @@ config/gateway.yaml
 # 备份
 *.bak
 *.bak.*
+
+# 本机实测残留（假上游配置 + 日志 db，不提交）
+rs/config/
