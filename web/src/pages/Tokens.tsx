@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Plus, Key, Copy, Trash2, Pencil, Ban, Power, Activity, User, Check, RefreshCw,
 } from 'lucide-react'
@@ -23,11 +23,27 @@ function genKey() {
 
 export default function Tokens() {
   const [master, setMaster] = useState<ApiToken>(DEFAULT_MASTER)
-  const [friends, setFriends] = useState<ApiToken[]>(DEFAULT_FRIENDS)
+  const [friends, setFriends] = useState<ApiToken[]>([])
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState<ApiToken | null>(null)
   const [showKey, setShowKey] = useState(false)
   const [showFriendKeys, setShowFriendKeys] = useState<Set<string>>(new Set())
+
+  // 多设备身份区分：从网关读设备 keys（auth.api_keys），增删改写回
+  async function loadTokens() {
+    try {
+      const r = await fetch('/api/tokens')
+      const d = await r.json()
+      if (d.ok && Array.isArray(d.tokens)) {
+        setFriends(d.tokens.map((t: any, i: number) => ({
+          id: t.name || `t-${i}`, name: t.name || '', key: t.key || '', status: 'enabled' as const,
+          unlimited_quota: false, remain_quota: 0, expired_time: '', models: [], ip_limit: '',
+          created_at: '', last_used_at: '', total_requests: 0,
+        })))
+      }
+    } catch { /* 后端未起/网络错，保持空列表 */ }
+  }
+  useEffect(() => { loadTokens() }, [])
 
   async function copyKey(key: string) {
     try { await navigator.clipboard.writeText(key); toast('密钥已复制') }
@@ -48,23 +64,38 @@ export default function Tokens() {
     setEditing(t)
   }
 
-  function saveFriend() {
+  async function saveFriend() {
     if (!editing) return
-    if (!editing.name.trim()) { toast('请填好友名'); return }
+    if (!editing.name.trim()) { toast('请填设备名'); return }
     const exists = friends.some(t => t.id === editing.id)
-    setFriends(exists ? friends.map(t => t.id === editing.id ? editing : t) : [...friends, editing])
-    setEditing(null)
-    toast(exists ? '好友密钥已更新' : '好友密钥已创建')
+    try {
+      const r = await fetch('/api/tokens', {
+        method: exists ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: editing.name, key: editing.key }),
+      })
+      const d = await r.json()
+      if (!d.ok) { toast(d.error || '保存失败'); return }
+      setEditing(null)
+      await loadTokens()
+      toast(exists ? '设备密钥已更新' : '设备密钥已创建')
+    } catch { toast('网络错误') }
   }
 
   function toggleStatus(t: ApiToken) {
     setFriends(friends.map(x => x.id === t.id ? { ...x, status: x.status === 'enabled' ? 'disabled' : 'enabled' } : x))
   }
 
-  function removeFriend(t: ApiToken) {
-    if (!confirm(`删除好友「${t.name}」的密钥？`)) return
-    setFriends(friends.filter(x => x.id !== t.id))
-    toast('已删除')
+  async function removeFriend(t: ApiToken) {
+    if (!confirm(`删除设备「${t.name}」的密钥？`)) return
+    try {
+      await fetch('/api/tokens', {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: t.name }),
+      })
+      await loadTokens()
+      toast('已删除')
+    } catch { toast('网络错误') }
   }
 
   const friendEnabled = friends.filter(f => f.status === 'enabled').length

@@ -16,7 +16,7 @@ pub mod core {
 }
 
 use axum::{extract::{Query, State}, response::IntoResponse, routing::{get, post}, Json, Router};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tower_http::services::ServeDir;
@@ -215,6 +215,94 @@ async fn post_config(State(s): State<S>, Json(payload): Json<Value>) -> axum::re
     match api::write_yaml_json(&path, &cfg) {
         Ok(_) => axum::Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => axum::Json(serde_json::json!({"ok": false, "error": e.to_string()})).into_response(),
+    }
+}
+
+// ---- 多设备身份区分：tokens 增删改查（gateway.yaml auth.api_keys，支持 {name,key}）----
+fn gateway_yaml_path(root: &PathBuf) -> PathBuf { root.join("config").join("gateway.yaml") }
+
+/// 读 auth.api_keys（AuthKey Plain/Named → [{name, key}]）
+fn read_auth_keys(root: &PathBuf) -> Vec<Value> {
+    let path = gateway_yaml_path(root);
+    let doc = api::read_yaml_json(&path);
+    let arr = doc.pointer("/auth/api_keys").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    arr.iter().map(|k| {
+        if let Some(name) = k.get("name").and_then(|v| v.as_str()) {
+            let key = k.get("key").and_then(|v| v.as_str()).unwrap_or("");
+            json!({"name": name, "key": key})
+        } else {
+            let key = k.as_str().unwrap_or("");
+            json!({"name": key, "key": key})
+        }
+    }).collect()
+}
+
+/// 写 auth.api_keys 回 gateway.yaml（保留其他段）
+fn write_auth_keys(root: &PathBuf, keys: &[Value]) -> std::io::Result<()> {
+    let path = gateway_yaml_path(root);
+    let mut doc = api::read_yaml_json(&path);
+    if !doc.is_object() { doc = json!({}); }
+    if let Some(obj) = doc.as_object_mut() {
+        let arr: Vec<Value> = keys.iter().map(|k| {
+            json!({"name": k.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                   "key": k.get("key").and_then(|v| v.as_str()).unwrap_or("")})
+        }).collect();
+        let auth = obj.entry("auth").or_insert_with(|| json!({}));
+        if let Some(a) = auth.as_object_mut() {
+            a.insert("api_keys".into(), json!(arr));
+        }
+    }
+    api::write_yaml_json(&path, &doc)
+}
+
+async fn get_tokens(State(s): State<S>) -> axum::response::Response {
+    axum::Json(json!({"ok": true, "tokens": read_auth_keys(&s.root)})).into_response()
+}
+
+async fn post_token(State(s): State<S>, Json(p): Json<Value>) -> axum::response::Response {
+    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let key = p.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    if name.is_empty() || key.is_empty() {
+        return axum::Json(json!({"ok": false, "error": "name 和 key 必填"})).into_response();
+    }
+    let mut keys = read_auth_keys(&s.root);
+    if keys.iter().any(|k| k.get("name").and_then(|v| v.as_str()) == Some(name)) {
+        return axum::Json(json!({"ok": false, "error": format!("设备 {} 已存在", name)})).into_response();
+    }
+    keys.push(json!({"name": name, "key": key}));
+    match write_auth_keys(&s.root, &keys) {
+        Ok(_) => axum::Json(json!({"ok": true})).into_response(),
+        Err(e) => axum::Json(json!({"ok": false, "error": e.to_string()})).into_response(),
+    }
+}
+
+async fn put_token(State(s): State<S>, Json(p): Json<Value>) -> axum::response::Response {
+    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let key = p.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let mut keys = read_auth_keys(&s.root);
+    let mut found = false;
+    for k in keys.iter_mut() {
+        if k.get("name").and_then(|v| v.as_str()) == Some(name) {
+            k["key"] = json!(key);
+            found = true;
+        }
+    }
+    if !found {
+        return axum::Json(json!({"ok": false, "error": format!("设备 {} 不存在", name)})).into_response();
+    }
+    match write_auth_keys(&s.root, &keys) {
+        Ok(_) => axum::Json(json!({"ok": true})).into_response(),
+        Err(e) => axum::Json(json!({"ok": false, "error": e.to_string()})).into_response(),
+    }
+}
+
+async fn delete_token(State(s): State<S>, Json(p): Json<Value>) -> axum::response::Response {
+    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let keys: Vec<Value> = read_auth_keys(&s.root).into_iter()
+        .filter(|k| k.get("name").and_then(|v| v.as_str()) != Some(name)).collect();
+    match write_auth_keys(&s.root, &keys) {
+        Ok(_) => axum::Json(json!({"ok": true})).into_response(),
+        Err(e) => axum::Json(json!({"ok": false, "error": e.to_string()})).into_response(),
     }
 }
 // ---- POST 节点管理 handlers（对照 Handler.do_POST）----
@@ -599,6 +687,7 @@ async fn test_channel_handler(
 pub fn build_router(state: S) -> Router {
     Router::new()
         .route("/api/config", get(get_config).post(post_config))
+        .route("/api/tokens", get(get_tokens).post(post_token).put(put_token).delete(delete_token))
         // ---- 网关配置：读写 gateway.yaml（热加载即时生效）----
         .route("/api/providers", get(get_providers).post(post_providers))
         .route("/api/providers/fetch-models", post(fetch_upstream_models_handler))
@@ -2943,6 +3032,79 @@ mod tests {
             {"type": "text", "text": "hi"}, {"type": "image_url", "image_url": {"url": "x"}}]}]});
         let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         assert_eq!(resp.status(), StatusCode::CONFLICT, "pro + 带图无 vision → 409");
+    }
+
+    #[tokio::test]
+    async fn tokens_crud_end_to_end() {
+        use serde_json::json;
+        // 多设备身份区分：tokens 增删改查（写 gateway.yaml auth.api_keys）
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        // 初始无 auth
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &json!({"listen": 0})).unwrap();
+        let router = build_router(S::new(dir.path().to_path_buf()));
+
+        // GET 空
+        let resp = router.clone().oneshot(Request::get("/api/tokens").body(Body::empty()).unwrap()).await.unwrap();
+        let j: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(j["tokens"].as_array().unwrap().len(), 0, "初始无 token");
+
+        // POST 加设备
+        let add = json!({"name": "手机", "key": "sk-phone"});
+        let resp = router.clone().oneshot(Request::post("/api/tokens").header("content-type", "application/json")
+            .body(Body::from(add.to_string())).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // GET 回读（设备名+key 落 gateway.yaml）
+        let resp = router.clone().oneshot(Request::get("/api/tokens").body(Body::empty()).unwrap()).await.unwrap();
+        let j: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(j["tokens"][0]["name"], "手机");
+        assert_eq!(j["tokens"][0]["key"], "sk-phone");
+
+        // PUT 改 key
+        let upd = json!({"name": "手机", "key": "sk-phone-v2"});
+        let resp = router.clone().oneshot(Request::put("/api/tokens").header("content-type", "application/json")
+            .body(Body::from(upd.to_string())).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = router.clone().oneshot(Request::get("/api/tokens").body(Body::empty()).unwrap()).await.unwrap();
+        let j: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(j["tokens"][0]["key"], "sk-phone-v2", "PUT 应更新 key");
+
+        // DELETE 删
+        let del = json!({"name": "手机"});
+        let resp = router.clone().oneshot(Request::delete("/api/tokens").header("content-type", "application/json")
+            .body(Body::from(del.to_string())).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = router.clone().oneshot(Request::get("/api/tokens").body(Body::empty()).unwrap()).await.unwrap();
+        let j: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(j["tokens"].as_array().unwrap().len(), 0, "DELETE 应删空");
+    }
+
+    #[tokio::test]
+    async fn tokens_auth_uses_device_key_end_to_end() {
+        use serde_json::json;
+        // 配置 auth.api_keys 设备 key → 该设备 Bearer 鉴权通过（多设备身份区分）
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x", "choices": []})))
+            .mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        let cfg = json!({"listen": 0,
+            "auth": {"api_keys": [{"name": "手机", "key": "sk-phone"}]},
+            "providers": [{"name": "p", "base_url": format!("{}/v1", upstream.uri()), "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk"}],
+                "channels": [{"id": "ch1", "name": "c", "key_name": "主",
+                              "models": [{"name": "m", "alias": "my-model"}]}]}]});
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
+        // 设备 key → 200
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, Some("Bearer sk-phone"), payload.clone(), &state.cache).await;
+        assert_eq!(resp.status(), StatusCode::OK, "设备 key 应通过");
+        // 错 key → 401
+        let resp2 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, Some("Bearer sk-evil"), payload.clone(), &state.cache).await;
+        assert_eq!(resp2.status(), StatusCode::UNAUTHORIZED, "错 key 应 401");
     }
 
     #[tokio::test]
