@@ -135,14 +135,18 @@ impl Adapter for OmpAdapter {
             c.insert(YV::String("api".into()), YV::String(if ir.api.is_empty() { "openai-completions".into() } else { ir.api.clone() }));
             c.insert(YV::String("apiKey".into()), YV::String(ir.api_key.clone()));
             let mut models: Vec<YV> = Vec::new();
-            for m in &ir.models {
+            // 档位化：下发档位名（auto/pro/flash），客户端从档位选 → 网关档位路由
+            // 不下发具体模型 id（真实模型由网关按档位选择）
+            let ctx = ir.models.first().map(|m| m.context_window).unwrap_or(200000);
+            let maxt = ir.models.first().map(|m| m.max_tokens).unwrap_or(8192);
+            for t in ["auto", "pro", "flash"] {
                 let mut mm = Mapping::new();
-                mm.insert(YV::String("id".into()), YV::String(m.id.clone()));
-                mm.insert(YV::String("name".into()), YV::String(m.id.clone()));
-                mm.insert(YV::String("reasoning".into()), YV::from(m.reasoning));
-                mm.insert(YV::String("input".into()), YV::Sequence(m.input_modes.iter().map(|s| YV::String(s.clone())).collect()));
-                mm.insert(YV::String("contextWindow".into()), YV::from(m.context_window));
-                mm.insert(YV::String("maxTokens".into()), YV::from(m.max_tokens));
+                mm.insert(YV::String("id".into()), YV::String(t.to_string()));
+                mm.insert(YV::String("name".into()), YV::String(t.to_string()));
+                mm.insert(YV::String("reasoning".into()), YV::from(false));
+                mm.insert(YV::String("input".into()), YV::Sequence(vec![YV::String("text".into())]));
+                mm.insert(YV::String("contextWindow".into()), YV::from(ctx));
+                mm.insert(YV::String("maxTokens".into()), YV::from(maxt));
                 models.push(YV::Mapping(mm));
             }
             c.insert(YV::String("models".into()), YV::Sequence(models));
