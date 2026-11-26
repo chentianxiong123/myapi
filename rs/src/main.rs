@@ -2521,6 +2521,101 @@ mod tests {
         assert_eq!(j["usage"]["output_tokens"], 5);
     }
 
+
+    #[tokio::test]
+    async fn messages_endpoint_multi_turn_history() {
+        // anthropic /v1/messages 多轮（user/assistant/user）→ 网关转 chat → 上游收到完整 3 条
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "cmpl", "model": "up-model",
+                "choices": [{"message": {"role": "assistant", "content": "回复"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5}})))
+            .expect(1).mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+        let router = build_router(S::new(dir.path().to_path_buf()));
+        let body = json!({"model": "auto", "max_tokens": 100, "messages": [
+            {"role": "user", "content": "第一轮"},
+            {"role": "assistant", "content": "第一轮回复"},
+            {"role": "user", "content": "第二轮"},
+        ]});
+        let resp = router.oneshot(Request::post("/v1/messages")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let reqs = upstream.received_requests().await.unwrap();
+        let mbody: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(mbody["messages"].as_array().unwrap().len(), 3, "messages 多轮历史完整");
+        assert_eq!(mbody["messages"][1]["content"], "第一轮回复", "assistant 轮保留");
+    }
+
+    #[tokio::test]
+    async fn responses_endpoint_multi_turn_history() {
+        // responses /v1/responses 多轮（message user/assistant/user）→ 转 chat → 上游完整 3 条
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "cmpl", "model": "up-model",
+                "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2}})))
+            .expect(1).mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+        let router = build_router(S::new(dir.path().to_path_buf()));
+        let body = json!({"model": "auto", "instructions": "you are helper",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "第一轮"}]},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "第一轮回复"}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "第二轮"}]},
+            ]});
+        let resp = router.oneshot(Request::post("/v1/responses")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let reqs = upstream.received_requests().await.unwrap();
+        let mbody: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(mbody["messages"].as_array().unwrap().len(), 4, "responses 多轮历史完整（system + 3 message）");
+        assert_eq!(mbody["messages"][1]["content"], "第一轮", "第一轮 user 保留");
+        assert_eq!(mbody["messages"][2]["content"], "第一轮回复", "assistant 轮保留");
+        assert_eq!(mbody["messages"][3]["content"], "第二轮");
+    }
+
+    #[tokio::test]
+    async fn logs_usage_aligned_nonstream_three_protocols() {
+        // 非流式三协议（chat/messages/responses）→ 日志 usage 对齐（input/output 记录，无 0 填充假值）
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "cmpl", "model": "up-model",
+                "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 4}})))
+            .expect(3).mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        gateway_logs::init_table(dir.path()).unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+        let router = build_router(S::new(dir.path().to_path_buf()));
+        // chat
+        let _ = router.clone().oneshot(Request::post("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"model": "up-model", "messages": [{"role": "user", "content": "hi"}]}).to_string())).unwrap()).await.unwrap();
+        // messages
+        let _ = router.clone().oneshot(Request::post("/v1/messages")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"model": "up-model", "max_tokens": 50, "messages": [{"role": "user", "content": "hi"}]}).to_string())).unwrap()).await.unwrap();
+        // responses
+        let _ = router.clone().oneshot(Request::post("/v1/responses")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"model": "up-model", "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]}).to_string())).unwrap()).await.unwrap();
+        // 日志：3 条，usage 对齐（input=7, output=4）
+        let con = rusqlite::Connection::open(dir.path().join("config").join("gateway-logs.db")).unwrap();
+        let mut stmt = con.prepare("SELECT input_tokens, output_tokens FROM request_logs").unwrap();
+        let rows: Vec<(Option<i64>, Option<i64>)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<Result<_,_>>().unwrap();
+        assert_eq!(rows.len(), 3, "三协议各记 1 条日志");
+        assert!(rows.iter().all(|(i, o)| *i == Some(7) && *o == Some(4)), "三协议日志 usage 对齐（input=7/output=4）: {rows:?}");
+    }
+
     #[tokio::test]
     async fn messages_endpoint_anthropic_stream() {
         let upstream = MockServer::start().await;
