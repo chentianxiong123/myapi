@@ -940,6 +940,28 @@ mod tests {
         assert_eq!(body["model"], "flash-model", "档位 flash 应路由到 flash 模型的真实名");
     }
 
+
+    #[tokio::test]
+    async fn tier_1m_suffix_stripped_to_tier_end_to_end() {
+        // 学 cc-switch：客户端发 model=auto[1M]（Claude Code 的 1M 上下文标记）
+        // → 网关剥离 [1M] → 识别档位 auto（黑盒调度）→ 响应回显档位名 auto
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "cmpl-1", "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "hi"}}]
+            }))).expect(1).mount(&upstream).await;
+
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), tier_channels());
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "auto[1M]", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["model"], "auto", "[1M] 剥离后应识别档位 auto，响应回显 auto");
+    }
     #[tokio::test]
     async fn tier_auto_request_selects_any_model() {
         let upstream = MockServer::start().await;
