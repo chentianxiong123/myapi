@@ -941,6 +941,88 @@ mod tests {
     }
 
 
+
+    #[tokio::test]
+    async fn multi_turn_history_preserved() {
+        // 多轮：user/assistant/user → 上游收到完整历史（3 条，assistant 消息保留）
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "cmpl", "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "回复"}}]})))
+            .expect(1).mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "up-model", "messages": [
+            {"role": "user", "content": "第一轮"},
+            {"role": "assistant", "content": "第一轮回复"},
+            {"role": "user", "content": "第二轮"},
+        ]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let reqs = upstream.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["messages"].as_array().unwrap().len(), 3, "多轮历史应完整转发");
+        assert_eq!(body["messages"][1]["content"], "第一轮回复", "assistant 消息保留");
+        assert_eq!(body["messages"][2]["content"], "第二轮");
+    }
+
+    #[tokio::test]
+    async fn multi_turn_tool_round_preserved() {
+        // tool_use（assistant）+ tool_result（user）轮 → 上游收到 chat 格式 tool_calls/tool
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "cmpl", "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}]})))
+            .expect(1).mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "up-model", "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "search", "input": {"q": "x"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "结果"}]},
+        ]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let reqs = upstream.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        // assistant 轮转成 chat tool_calls；user tool_result 转成 tool 消息
+        assert!(msgs[1]["tool_calls"].is_array() || msgs[1]["content"].is_array(), "tool_use 应转 chat");
+        assert!(msgs[2]["tool_calls"].is_null() || msgs[2].get("tool_call_id").is_some() || msgs[2]["content"].is_array(), "tool_result 应转 chat");
+    }
+
+    #[tokio::test]
+    async fn multi_turn_each_round_logged() {
+        // 两次请求（两轮）→ request_logs 记 2 条，真实模型名 up-model
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "cmpl", "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "回复"}}]})))
+            .expect(2).mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        gateway_logs::init_table(dir.path()).unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+        let state = S::new(dir.path().to_path_buf());
+        for _ in 0..2 {
+            let payload = json!({"model": "up-model", "messages": [{"role": "user", "content": "hi"}]});
+            let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        // 查 request_logs：2 条，模型名 up-model（真实）
+        let con = rusqlite::Connection::open(dir.path().join("config").join("gateway-logs.db")).unwrap();
+        let mut stmt = con.prepare("SELECT model, status FROM request_logs").unwrap();
+        let rows: Vec<(String, i64)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<Result<_,_>>().unwrap();
+        assert_eq!(rows.len(), 2, "两轮应记 2 条日志");
+        assert!(rows.iter().all(|(m, _)| m == "up-model"), "日志记真实模型名");
+        assert!(rows.iter().all(|(_, s)| *s == 200));
+    }
+
     #[tokio::test]
     async fn tier_1m_suffix_stripped_to_tier_end_to_end() {
         // 学 cc-switch：客户端发 model=auto[1M]（Claude Code 的 1M 上下文标记）
