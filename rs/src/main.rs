@@ -2771,6 +2771,89 @@ mod tests {
 
     // ==================== 协议端点端到端（/v1/messages + /v1/responses 走 mock 上游）====================
 
+
+    #[tokio::test]
+    async fn tier_switch_continuous_accuracy() {
+        // 同一客户端连续切档位 auto→pro→flash→auto：每次上游收到对应 class 的真实模型
+        let upstream = MockServer::start().await;
+        for mid in ["auto-real", "pro-real", "flash-real"] {
+            Mock::given(method("POST")).and(path("/v1/chat/completions"))
+                .and(wiremock::matchers::body_partial_json(json!({"model": mid})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x", "model": mid,
+                    "choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}})))
+                .mount(&upstream).await;
+        }
+        let dir = TempDir::new().unwrap();
+        let channels = json!([
+            {"id": "ch1", "name": "a", "key_name": "主", "models": [{"name": "auto-real", "alias": "auto"}]},
+            {"id": "ch2", "name": "p", "key_name": "主", "models": [{"name": "pro-real", "alias": "pro", "class": "pro"}]},
+            {"id": "ch3", "name": "f", "key_name": "主", "models": [{"name": "flash-real", "alias": "flash", "class": "flash"}]},
+        ]);
+        // 关 sticky（纯档位切换，不黏上次通道）
+        let cfg = json!({"listen": 0, "sticky": {"enabled": false},
+            "providers": [{"name": "p", "base_url": format!("{}/v1", upstream.uri()), "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk"}], "channels": channels}]});
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+        let state = S::new(dir.path().to_path_buf());
+        // 连续切档位：auto → pro → flash → auto
+        for tier in ["auto", "pro", "flash", "auto"] {
+            let payload = json!({"model": tier, "messages": [{"role": "user", "content": "hi"}]});
+            let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+            assert_eq!(resp.status(), StatusCode::OK, "档位 {} 应 200", tier);
+            // 响应回显档位名（对称客户端配置的 model 名）
+            let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+            let j: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(j["model"], tier, "响应 model 应回显档位名 {}", tier);
+        }
+        // 上游每次收到对应真实模型（4 次请求按序）
+        let reqs = upstream.received_requests().await.unwrap();
+        let models: Vec<String> = reqs.iter().map(|r| {
+            let v: Value = serde_json::from_slice(&r.body).unwrap();
+            v["model"].as_str().unwrap_or("").to_string()
+        }).collect();
+        // pro/flash 硬过滤精确命中对应 class；auto 允许任一候选（不保证顺序/具体模型）
+        assert_eq!(models[1], "pro-real", "pro 档应精确命中 pro 模型: {models:?}");
+        assert_eq!(models[2], "flash-real", "flash 档应精确命中 flash 模型: {models:?}");
+        for m in [&models[0], &models[3]] {
+            assert!(["auto-real", "pro-real", "flash-real"].contains(&m.as_str()),
+                "auto 档允许任一候选（auto 不降级但也不限定具体模型）: {models:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn alias_and_name_matching_accuracy() {
+        // 请求名=alias → 上游收到真实 name；请求名=name → 直接命中（准确性）
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model": "up-real"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x", "model": "up-real",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}})))
+            .expect(2).mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        // 模型 name=up-real, alias=my-model
+        let channels = json!([
+            {"id": "ch1", "name": "c", "key_name": "主", "models": [{"name": "up-real", "alias": "my-model"}]},
+        ]);
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), channels);
+        let state = S::new(dir.path().to_path_buf());
+        // 请求 alias
+        let p1 = json!({"model": "my-model", "messages": [{"role": "user", "content": "hi"}]});
+        let r1 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, p1, &state.cache).await;
+        assert_eq!(r1.status(), StatusCode::OK, "alias 请求应 200");
+        // 请求 name
+        let p2 = json!({"model": "up-real", "messages": [{"role": "user", "content": "hi"}]});
+        let r2 = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, p2, &state.cache).await;
+        assert_eq!(r2.status(), StatusCode::OK, "name 请求应 200");
+        // 上游两次都收到真实 name up-real（alias 与 name 都映射到上游真实名）
+        let reqs = upstream.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 2);
+        for r in reqs.iter() {
+            let v: Value = serde_json::from_slice(&r.body).unwrap();
+            assert_eq!(v["model"], "up-real", "alias/name 请求都应转成上游真实名");
+        }
+    }
+
     #[tokio::test]
     async fn tier_pro_no_candidate_404_end_to_end() {
         // pro 档 → 无 class:pro 候选 → 404（不降级 auto，显式失败）
