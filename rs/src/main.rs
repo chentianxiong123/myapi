@@ -2553,6 +2553,50 @@ mod tests {
 
 
     // ==================== 协议端点端到端（/v1/messages + /v1/responses 走 mock 上游）====================
+
+    #[tokio::test]
+    async fn tier_pro_no_candidate_404_end_to_end() {
+        // pro 档 → 无 class:pro 候选 → 404（不降级 auto，显式失败）
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x", "choices": []})))
+            .mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        let cfg = json!({"listen": 0,
+            "providers": [{"name": "p", "base_url": format!("{}/v1", upstream.uri()), "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk"}],
+                "channels": [{"id": "ch1", "name": "c1", "key_name": "主",
+                              "models": [{"name": "flash-model", "class": "flash"}]}]}]});
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "pro", "messages": [{"role": "user", "content": "hi"}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "pro 档无候选 → 404（不降级 auto）");
+    }
+
+    #[tokio::test]
+    async fn tier_pro_vision_unavailable_409_end_to_end() {
+        // pro 档 + 当前轮带图（硬需求 vision）→ pro 模型无 vision → 409（显式失败，不静默）
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x", "choices": []})))
+            .mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        let cfg = json!({"listen": 0,
+            "providers": [{"name": "p", "base_url": format!("{}/v1", upstream.uri()), "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk"}],
+                "channels": [{"id": "ch1", "name": "c1", "key_name": "主",
+                              "models": [{"name": "pro-model", "class": "pro"}]}]}]});
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+        let state = S::new(dir.path().to_path_buf());
+        let payload = json!({"model": "pro", "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "hi"}, {"type": "image_url", "image_url": {"url": "x"}}]}]});
+        let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "pro + 带图无 vision → 409");
+    }
+
     #[tokio::test]
     async fn messages_endpoint_anthropic_roundtrip() {
         let upstream = MockServer::start().await;
