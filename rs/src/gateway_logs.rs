@@ -26,6 +26,8 @@ fn ensure_ready(root: &std::path::Path) -> Result<(), String> {
         let _ = std::fs::create_dir_all(parent);
     }
     let conn = Connection::open(&p).map_err(|e| e.to_string())?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS request_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,16 +73,26 @@ pub async fn log_request(root: std::path::PathBuf, entry: LogEntry) {
     let res = tokio::task::spawn_blocking(move || -> Result<(), String> {
         ensure_ready(&root)?;
         let conn = Connection::open(db_path(&root)).map_err(|e| e.to_string())?;
+        conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?;
         let ts = chrono_now_secs_iso();
-        conn.execute(
-            "INSERT INTO request_logs (ts, model, provider, channel, status, latency_ms, ttft_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, downstream_key, error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![ts, entry.model, entry.provider, entry.channel, entry.status as i64,
-                    entry.latency_ms as i64, entry.ttft_ms as i64,
-                    entry.input_tokens, entry.output_tokens,
-                    entry.cache_read_tokens, entry.cache_creation_tokens,
-                    entry.downstream_key, entry.error],
-        ).map_err(|e| e.to_string())?;
+        // 并发写：SQLite 单写锁，busy 时重试（WAL + busy_timeout + 重试兜底，防丢日志）
+        let mut last_err: Option<String> = None;
+        let mut inserted = false;
+        for _ in 0..5 {
+            match conn.execute(
+                "INSERT INTO request_logs (ts, model, provider, channel, status, latency_ms, ttft_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, downstream_key, error)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![ts, entry.model, entry.provider, entry.channel, entry.status as i64,
+                        entry.latency_ms as i64, entry.ttft_ms as i64,
+                        entry.input_tokens, entry.output_tokens,
+                        entry.cache_read_tokens, entry.cache_creation_tokens,
+                        entry.downstream_key, entry.error],
+            ) {
+                Ok(_) => { inserted = true; break; }
+                Err(e) => { last_err = Some(e.to_string()); std::thread::sleep(std::time::Duration::from_millis(50)); }
+            }
+        }
+        if !inserted { return Err(last_err.unwrap_or_else(|| "INSERT 未知错误".into())); }
         Ok(())
     }).await;
     match res {
@@ -94,6 +106,7 @@ pub async fn log_request(root: std::path::PathBuf, entry: LogEntry) {
 pub fn query_recent(root: &std::path::Path, limit: usize) -> Result<Value, String> {
     ensure_ready(root)?;
     let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
+    conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT ts, model, provider, channel, status, latency_ms, ttft_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, downstream_key, error
          FROM request_logs ORDER BY id DESC LIMIT ?1"
@@ -156,6 +169,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 pub fn query_stats(root: &std::path::Path) -> Result<Value, String> {
     ensure_ready(root)?;
     let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
+    conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT channel,
                 COUNT(*) AS total,
@@ -205,6 +219,7 @@ pub fn query_stats(root: &std::path::Path) -> Result<Value, String> {
 pub fn query_summary(root: &std::path::Path) -> Result<Value, String> {
     ensure_ready(root)?;
     let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
+    conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?;
     let v = conn.query_row(
         "SELECT COUNT(*),
                 COALESCE(SUM(CASE WHEN status < 400 THEN 1 ELSE 0 END),0),
@@ -254,6 +269,7 @@ pub fn query_summary(root: &std::path::Path) -> Result<Value, String> {
 pub fn query_provider_stats(root: &std::path::Path) -> Result<Value, String> {
     ensure_ready(root)?;
     let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
+    conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT provider,
                 COUNT(*) AS total,
@@ -297,6 +313,7 @@ pub fn query_provider_stats(root: &std::path::Path) -> Result<Value, String> {
 pub fn query_trend(root: &std::path::Path, hours: u32) -> Result<Value, String> {
     ensure_ready(root)?;
     let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
+    conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT substr(ts,1,13) AS hour,
                 COUNT(*) AS total,
@@ -331,6 +348,7 @@ pub fn query_trend(root: &std::path::Path, hours: u32) -> Result<Value, String> 
 pub fn query_daily(root: &std::path::Path, days: u32) -> Result<Value, String> {
     ensure_ready(root)?;
     let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
+    conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT substr(ts,1,10) AS day,
                 COUNT(*) AS total,
@@ -461,6 +479,7 @@ mod tests {
 pub fn today_tokens_for_key(root: &std::path::Path, key: &str) -> Result<i64, String> {
     ensure_ready(root)?;
     let conn = Connection::open(db_path(root)).map_err(|e| e.to_string())?;
+    conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?;
     let today = chrono_now_secs_iso(); // 当前 ISO，取日期前缀
     let today_prefix = &today[..10.min(today.len())];
     let v: i64 = conn.query_row(
