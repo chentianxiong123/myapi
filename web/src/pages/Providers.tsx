@@ -7,7 +7,8 @@ import type { Provider, ModelProtocol, ProxyPool, Channel } from '@/lib/types'
 import { MODEL_PROTOCOLS, PROXY_STRATEGIES, MODEL_KINDS } from '@/lib/types'
 
 // 硬能力（学 9router HARD_CAPS）：模型能处理的输入类型；缺失的按 9router 规则过滤/降级
-const MODEL_CAPS = ['vision', 'pdf', 'audio'] as const
+// thinking = 思考模式（同 vision 硬约束待遇：请求带 thinking/reasoning 且模型无此能力 → 409）
+const MODEL_CAPS = ['vision', 'pdf', 'audio', 'thinking'] as const
 
 export default function Providers() {
   const [providers, setProviders] = useState<Provider[]>([])

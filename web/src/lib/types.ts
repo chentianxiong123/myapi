@@ -26,7 +26,8 @@ export interface ChannelModel {
   alias?: string
   protocol?: ModelProtocol
   kind?: ModelKind
-  // 硬能力（vision/pdf/audio，学 9router HARD_CAPS）：请求需要而模型缺 → 过滤/降级
+  // 硬能力（vision/pdf/audio/thinking，学 9router HARD_CAPS）：请求需要而模型缺 → 过滤/降级
+  // thinking = 思考模式（同 vision 硬约束：请求带 thinking/reasoning 且模型无 → 409）
   capabilities?: string[]
   // 模型级上下文窗口（token）：上下文错误反馈时跳过装不下的（配置时填，运行时零成本）
   context_window?: number

@@ -438,6 +438,15 @@ fn trailing_user_turn(msgs: &[serde_json::Value]) -> &[serde_json::Value] {
 /// **只扫当前 user turn**（历史轮的媒体属软需求，走 strip，不 pin 住能力选择）。
 fn detect_required_caps(payload: &serde_json::Value) -> Vec<String> {
     let mut caps = Vec::new();
+    // 思考模式（同 vision 硬约束待遇）：请求显式开启思考（顶层参数）→ 需要 thinking 能力。
+    // 覆盖三种协议：anthropic `thinking`、responses `reasoning`、chat `reasoning_effort`。
+    // `thinking: {type: "disabled"}` 不算（客户端明确关）。
+    let thinking_requires = payload.get("thinking").is_some_and(|t| {
+        t.get("type").and_then(|v| v.as_str()) != Some("disabled")
+    });
+    if thinking_requires || payload.get("reasoning").is_some() || payload.get("reasoning_effort").is_some() {
+        caps.push("thinking".into());
+    }
     if let Some(msgs) = payload.get("messages").and_then(|v| v.as_array()) {
         for msg in trailing_user_turn(msgs) {
             if let Some(content) = msg.get("content").and_then(|v| v.as_array()) {
