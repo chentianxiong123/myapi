@@ -1128,6 +1128,17 @@ pub fn load_config(root: &std::path::Path) -> GatewayConfig {
 
 /// 选通道 → 构造上游请求 → 转发 → 回传。
 /// 最小版：非流式直接回 JSON；流式透传 SSE 字节流。
+
+/// 学 cc-switch strip_one_m_suffix_for_route_lookup：剥离 Claude Code 的 [1M]/[1m] 1M 上下文标记。
+/// 客户端发 model=auto[1M]，网关剥离后识别档位 auto（黑盒调度），真实模型名由网关选。
+fn strip_1m_suffix(model: &str) -> String {
+    if model.ends_with("[1M]") || model.ends_with("[1m]") {
+        model[..model.len() - 4].to_string()
+    } else {
+        model.to_string()
+    }
+}
+
 pub async fn forward_generic(
     root: &std::path::Path,
     health: &HealthMap,
@@ -1164,6 +1175,9 @@ pub async fn forward_generic(
         }
     }
     let requested_model = payload.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // 学 cc-switch：剥离 [1M]/[1m] 后缀（Claude Code 内置的 1M 上下文标记，大小写不敏感）
+    // 客户端发 model=auto[1M]，网关剥离后识别档位 auto（黑盒调度），真实模型名由网关选
+    let requested_model = strip_1m_suffix(&requested_model);
     let pin_key = session_key(&payload, auth_header);
     let dkey = downstream_key(auth_header); // 传给 forward_one 记账（用量限额按 key）
 
@@ -2547,6 +2561,17 @@ mod tests {
         }
     }
 
+
+
+    #[test]
+    fn strip_1m_suffix_strips_marker() {
+        assert_eq!(strip_1m_suffix("auto[1M]"), "auto");
+        assert_eq!(strip_1m_suffix("auto[1m]"), "auto");
+        assert_eq!(strip_1m_suffix("flash[1M]"), "flash");
+        assert_eq!(strip_1m_suffix("auto"), "auto");
+        assert_eq!(strip_1m_suffix("gpt-5[1M]"), "gpt-5");
+        assert_eq!(strip_1m_suffix(""), "");
+    }
 
     #[test]
     fn auto_candidates_filters_by_tier_class() {
