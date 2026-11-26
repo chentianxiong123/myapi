@@ -943,6 +943,90 @@ mod tests {
 
 
 
+
+    #[tokio::test]
+    async fn concurrent_100_requests_all_ok() {
+        // 100 并发 → 全 200 + 日志 100（更高强度）
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x", "model": "up-model",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2}})))
+            .expect(100).mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        gateway_logs::init_table(dir.path()).unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+        let state = S::new(dir.path().to_path_buf());
+        let mut handles = Vec::new();
+        for _ in 0..100 {
+            let (root, health, pins, rates, cache) = (state.root.clone(), state.health.clone(), state.pins.clone(), state.rates.clone(), state.cache.clone());
+            handles.push(tokio::spawn(async move {
+                let payload = json!({"model": "up-model", "messages": [{"role": "user", "content": "hi"}]});
+                gateway::forward_chat(&root, &health, &pins, &rates, None, payload, &cache).await.status()
+            }));
+        }
+        for h in handles { assert_eq!(h.await.unwrap(), StatusCode::OK); }
+        let con = rusqlite::Connection::open(dir.path().join("config").join("gateway-logs.db")).unwrap();
+        let n: i64 = con.query_row("SELECT COUNT(*) FROM request_logs", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 100, "100 并发应记 100 条日志");
+    }
+
+    #[tokio::test]
+    async fn concurrent_stream_50_all_ok() {
+        // 50 流式并发 → 全 200（SSE 流式并发稳定）
+        let upstream = MockServer::start().await;
+        let body = sse(&[
+            json!({"choices":[{"delta":{"content":"he"}}]}).to_string(),
+            json!({"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":8}}).to_string(),
+        ]);
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body)
+                .insert_header("content-type", "text/event-stream"))
+            .expect(50).mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        gateway_logs::init_table(dir.path()).unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+        let state = S::new(dir.path().to_path_buf());
+        let mut handles = Vec::new();
+        for _ in 0..50 {
+            let (root, health, pins, rates, cache) = (state.root.clone(), state.health.clone(), state.pins.clone(), state.rates.clone(), state.cache.clone());
+            handles.push(tokio::spawn(async move {
+                let payload = json!({"model": "up-model", "stream": true, "messages": [{"role": "user", "content": "hi"}]});
+                let resp = gateway::forward_chat(&root, &health, &pins, &rates, None, payload, &cache).await;
+                let st = resp.status();
+                let _ = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap();
+                st
+            }));
+        }
+        for h in handles { assert_eq!(h.await.unwrap(), StatusCode::OK, "流式并发应全 200"); }
+    }
+
+    #[tokio::test]
+    async fn sequential_100_stress() {
+        // 100 连续请求（串行）→ 全 200 + 日志 100（压力稳定）
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x", "model": "up-model",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2}})))
+            .expect(100).mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        gateway_logs::init_table(dir.path()).unwrap();
+        write_gateway_yaml(dir.path(), &format!("{}/v1", upstream.uri()), one_channel("ch1", "up-model"));
+        let state = S::new(dir.path().to_path_buf());
+        for _ in 0..100 {
+            let payload = json!({"model": "up-model", "messages": [{"role": "user", "content": "hi"}]});
+            let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        let con = rusqlite::Connection::open(dir.path().join("config").join("gateway-logs.db")).unwrap();
+        let n: i64 = con.query_row("SELECT COUNT(*) FROM request_logs", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 100, "100 连续应记 100 条日志");
+    }
+
     #[tokio::test]
     async fn concurrent_50_requests_all_ok() {
         // 50 并发 → 全 200 + 日志 50 条（稳定性/无丢）
