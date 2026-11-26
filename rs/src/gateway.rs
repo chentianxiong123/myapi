@@ -1745,7 +1745,8 @@ async fn forward_one(
         };
         // 后台任务：等流结束后拿 usage token，补一条带 token 的完整日志
         let log_root = root.to_path_buf();
-        let log_model = requested_model.to_string();
+        // 日志记真实上游模型名（用户要求：档位请求也记实际模型，不记档位别名）
+        let log_model = selected.upstream_model.clone();
         let log_provider = selected.provider.name.clone();
         let log_channel = selected.channel.name.clone();
         let log_status = status.as_u16();
@@ -1786,9 +1787,17 @@ async fn forward_one(
                 None => raw_bytes,
             }
         } else { raw_bytes };
+        // 档位请求：响应 model 字段回显档位名（客户端配的 model 名，对称）；
+        // 客户端如 Claude Code 用它配的 model 名做内部判断（上下文窗口），真实模型名已记日志
+        let body_bytes = if requested_model == "pro" || requested_model == "flash" || requested_model == "auto" {
+            let mut v: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
+            if v.is_object() { v["model"] = serde_json::json!(requested_model); }
+            serde_json::to_vec(&v).unwrap_or(body_bytes)
+        } else { body_bytes };
         let (in_tok, out_tok, cache_read, cache_creation) = parse_usage(&body_bytes);
         crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
-            model: requested_model.into(),
+            // 记真实上游模型名（非档位别名）
+            model: selected.upstream_model.clone(),
             provider: selected.provider.name.clone(),
             channel: selected.channel.name.clone(),
             status: status.as_u16(),

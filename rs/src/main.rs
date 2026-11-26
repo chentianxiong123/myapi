@@ -908,6 +908,10 @@ mod tests {
         let payload = json!({"model": "pro", "messages": [{"role": "user", "content": "hi"}]});
         let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         assert_eq!(resp.status(), StatusCode::OK);
+        // 响应 body 的 model 字段应回显档位名（客户端配的 model 名，对称）
+        let resp_bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let resp_body: Value = serde_json::from_slice(&resp_bytes).unwrap();
+        assert_eq!(resp_body["model"], "pro", "响应 model 应回显档位名（客户端配的 model 名）");
 
         let reqs = upstream.received_requests().await.unwrap();
         assert_eq!(reqs.len(), 1);
@@ -1995,7 +1999,7 @@ mod tests {
             assert_eq!(e["output_tokens"].as_i64(), Some(20), "成功日志 output=20");
             assert_eq!(e["provider"], "mock-co", "供应商记录对");
             assert_eq!(e["channel"], "mock通道", "通道记录对");
-            assert_eq!(e["model"], "my-model", "模型记录对（对外别名）");
+            assert_eq!(e["model"], "mock-model", "模型记录对（真实上游模型名，非对外别名）");
         }
         // 失败日志：记上游真实 status=500（观测日志记上游返回，便于排查），有 error
         let bad_logs: Vec<_> = data.iter().filter(|e| e["status"].as_i64() == Some(500)).collect();
