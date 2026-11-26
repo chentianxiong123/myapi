@@ -3035,6 +3035,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn messages_thinking_required_no_capability_409() {
+        // anthropic 协议（/v1/messages）带 thinking → 模型无 thinking 能力 → 409（同 chat 硬约束）
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x", "choices": []})))
+            .mount(&upstream).await;
+        let dir = TempDir::new().unwrap();
+        let cfg = json!({"listen": 0,
+            "providers": [{"name": "p", "base_url": format!("{}/v1", upstream.uri()), "disabled": false, "headers": {},
+                "keys": [{"name": "主", "api-key": "sk"}],
+                "channels": [{"id": "ch1", "name": "c1", "key_name": "主",
+                              "models": [{"name": "up-model", "alias": "my-model", "capabilities": ["vision"]}]}]}]});
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        api::write_yaml_json(&dir.path().join("config").join("gateway.yaml"), &cfg).unwrap();
+        let router = build_router(S::new(dir.path().to_path_buf()));
+        // /v1/messages 带 thinking enabled → 转 chat reasoning_effort → 模型无 thinking → 409
+        let body = json!({"model": "my-model", "max_tokens": 100,
+            "thinking": {"type": "enabled", "budget_tokens": 16000},
+            "messages": [{"role": "user", "content": "hi"}]});
+        let resp = router.oneshot(Request::post("/v1/messages")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "anthropic 带 thinking + 模型无 thinking → 409");
+    }
+
+    #[tokio::test]
     async fn tokens_crud_end_to_end() {
         use serde_json::json;
         // 多设备身份区分：tokens 增删改查（写 gateway.yaml auth.api_keys）
