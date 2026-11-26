@@ -2521,6 +2521,84 @@ mod tests {
         cfg
     }
 
+
+    #[tokio::test]
+    async fn strategy_latency_picks_lowest_ttft() {
+        // smart（LatencyBased）：平均 TTFT 最低优先
+        let cfg = two_chan_cfg(RoutingStrategy::LatencyBased);
+        let h = health_map();
+        for _ in 0..5 { record_outcome(&h, "ch1", true, 200, &cfg.circuit_breaker, false, false).await; }
+        for _ in 0..5 { record_outcome(&h, "ch2", true, 50, &cfg.circuit_breaker, false, false).await; }
+        let sel = select_channel(&cfg, "my-model", &h);
+        assert_eq!(sel.unwrap().channel.id, "ch2", "smart 应选 TTFT 最低的");
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_excludes_open_channel() {
+        // ch1 连续失败（阈值 5）→ Open → 熔断排除，只选 ch2
+        let cfg = two_chan_cfg(RoutingStrategy::SimpleShuffle);
+        let h = health_map();
+        for _ in 0..20 { record_outcome(&h, "ch1", false, 0, &cfg.circuit_breaker, false, false).await; }
+        record_outcome(&h, "ch2", true, 0, &cfg.circuit_breaker, false, false).await;
+        for _ in 0..50 {
+            let sel = select_channel(&cfg, "my-model", &h);
+            assert_eq!(sel.unwrap().channel.id, "ch2", "ch1 open 熔断应排除");
+        }
+    }
+
+    #[test]
+    fn multi_provider_candidates_merged() {
+        // 2 个 provider 各 1 通道 → auto_candidates 合并候选
+        let mut cfg = GatewayConfig::default();
+        cfg.routing = RoutingConfig { strategy: RoutingStrategy::LatencyBased, auto_mode_enabled: true, max_retries: 3 };
+        for (name, mid) in [("p1", "a-model"), ("p2", "b-model")] {
+            cfg.providers.push(Provider {
+                name: name.into(), base_url: format!("http://{name}/v1"), disabled: false,
+                headers: HashMap::new(),
+                keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+                channels: vec![Channel {
+                    id: format!("ch-{name}"), name: format!("ch-{name}"), path: None, key_name: None,
+                    models: vec![ChannelModel { name: mid.into(), alias: None, capabilities: vec![], ..Default::default() }],
+                    weight: 1, rpm: None, retry: None, max_input_tokens: None }],
+                proxy: String::new(),
+                ..Default::default()
+            });
+        }
+        let h = health_map();
+        let payload = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
+        let cands = auto_candidates(&cfg, &payload, &h, None);
+        assert_eq!(cands.len(), 2, "两个 provider 候选应合并");
+    }
+
+    #[test]
+    fn tier_pro_filters_to_pro_with_vision() {
+        // pro 档 + 当前轮带图（硬需求 vision）→ 只 class:pro 且带 vision 能力
+        let mut cfg = GatewayConfig::default();
+        cfg.routing = RoutingConfig { strategy: RoutingStrategy::LatencyBased, auto_mode_enabled: true, max_retries: 3 };
+        cfg.providers.push(Provider {
+            name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
+            headers: HashMap::new(),
+            keys: vec![NamedKey { name: "主".into(), api_key: "k".into() }],
+            channels: vec![Channel {
+                id: "ch1".into(), name: "ch1".into(), path: None, key_name: None,
+                models: vec![
+                    ChannelModel { name: "pro-vision".into(), alias: None, capabilities: vec!["vision".into()], class: Some("pro".into()), ..Default::default() },
+                    ChannelModel { name: "pro-plain".into(), alias: None, capabilities: vec![], class: Some("pro".into()), ..Default::default() },
+                    ChannelModel { name: "flash-vision".into(), alias: None, capabilities: vec!["vision".into()], class: Some("flash".into()), ..Default::default() },
+                ],
+                weight: 1, rpm: None, retry: None, max_input_tokens: None }],
+            proxy: String::new(),
+            ..Default::default()
+        });
+        let h = health_map();
+        // 当前轮带图 → 硬需求 vision
+        let payload = serde_json::json!({"messages": [{"role": "user", "content": [
+            {"type": "text", "text": "hi"}, {"type": "image_url", "image_url": {"url": "x"}}]}]});
+        let cands = auto_candidates(&cfg, &payload, &h, Some("pro"));
+        assert_eq!(cands.len(), 1, "pro 档 + 带图 → 只 pro-vision（pro-plain 无 vision、flash 非 pro 档）");
+        assert_eq!(cands[0].upstream_model, "pro-vision");
+    }
+
     #[tokio::test]
     async fn strategy_least_busy_picks_fewer_requests() {
         let cfg = two_chan_cfg(RoutingStrategy::LeastBusy);
