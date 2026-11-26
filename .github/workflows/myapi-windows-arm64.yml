@@ -1,0 +1,56 @@
+# myapi Windows arm64 单架构构建 + 发布 —— 永远手动触发。
+# ubuntu + zigbuild 交叉（zig 自带 C 编译器，rusqlite bundled 可编）。
+name: myapi Windows arm64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建 windows/arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 zig（交叉链接）
+        run: |
+          curl -fsSL -o zig.tar.xz https://ziglang.org/download/0.14.0/zig-linux-x86_64-0.14.0.tar.xz
+          sudo tar -xf zig.tar.xz -C /opt
+          echo "/opt/zig-linux-x86_64-0.14.0" >> "$GITHUB_PATH"
+
+      - name: 装依赖（rusqlite bundled 要 g++）
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-gnu
+
+      - name: 装 cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+
+      - name: cargo 缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rs/target
+          key: cargo-windows-arm64-${{ hashFiles('rs/Cargo.lock') }}
+          restore-keys: cargo-windows-arm64-
+
+      - name: 构建
+        run: cargo zigbuild --release --target aarch64-pc-windows-gnu --manifest-path rs/Cargo.toml
+
+      - name: 发布（create || upload）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="$(grep -m1 '^version' rs/Cargo.toml | sed 's/.*= *"//;s/".*//')"
+          TAG="v${VER}"
+          BIN=rs/target/aarch64-pc-windows-gnu/release/myapi.exe
+          test -f "$BIN" || { echo '无产物'; exit 1; }
+          gh release create "$TAG" "$BIN" --generate-notes --title "myapi $VER" 2>/dev/null \
+            || gh release upload "$TAG" "$BIN" --clobber

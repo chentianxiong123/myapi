@@ -1,0 +1,47 @@
+# myapi Linux amd64 单架构构建 + 发布 —— 永远手动触发。
+# 每架构独立 workflow（学 mymusic：避免双架构同 workflow 上传同名产物冲突）。
+name: myapi Linux amd64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建 linux/amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: 装依赖（rusqlite bundled 要 g++）
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential
+
+      - name: cargo 缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rs/target
+          key: cargo-linux-amd64-${{ hashFiles('rs/Cargo.lock') }}
+          restore-keys: cargo-linux-amd64-
+
+      - name: 构建
+        run: cargo build --release --target x86_64-unknown-linux-gnu --manifest-path rs/Cargo.toml
+
+      - name: 发布（create || upload）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="$(grep -m1 '^version' rs/Cargo.toml | sed 's/.*= *"//;s/".*//')"
+          TAG="v${VER}"
+          BIN=rs/target/x86_64-unknown-linux-gnu/release/myapi
+          test -x "$BIN" || { echo '无产物'; exit 1; }
+          gh release create "$TAG" "$BIN" --generate-notes --title "myapi $VER" 2>/dev/null \
+            || gh release upload "$TAG" "$BIN" --clobber

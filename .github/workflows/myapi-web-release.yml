@@ -1,0 +1,41 @@
+# myapi 前端 release —— 构建 web/dist 并上传 release。
+# 二进制 ServeDir 读 web/dist（vite outDir 一致），前端包开箱即用。
+name: myapi Web release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建前端静态包
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        run: npm ci --prefix web
+
+      - name: Build
+        run: npm run build --prefix web
+
+      - name: 打包
+        run: tar -czf myapi-web-dist.tar.gz -C web/dist .
+
+      - name: 发布（create || upload）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="$(grep -m1 '^version' rs/Cargo.toml | sed 's/.*= *"//;s/".*//')"
+          TAG="v${VER}"
+          test -f myapi-web-dist.tar.gz || { echo '无产物'; exit 1; }
+          gh release create "$TAG" myapi-web-dist.tar.gz --generate-notes --title "myapi $VER" 2>/dev/null \
+            || gh release upload "$TAG" myapi-web-dist.tar.gz --clobber

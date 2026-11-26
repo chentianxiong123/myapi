@@ -1,0 +1,51 @@
+# myapi Windows amd64 单架构构建 + 发布 —— 永远手动触发。
+# ubuntu 上交叉（mingw-w64），rusqlite bundled 用 mingw gcc/g++。
+name: myapi Windows amd64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建 windows/amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 mingw-w64（x86_64 交叉 + rusqlite bundled C 编译器）
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq mingw-w64 build-essential
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: cargo 缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rs/target
+          key: cargo-windows-amd64-${{ hashFiles('rs/Cargo.lock') }}
+          restore-keys: cargo-windows-amd64-
+
+      - name: 构建
+        env:
+          CC_x86_64_pc_windows_gnu: x86_64-w64-mingw32-gcc
+          CXX_x86_64_pc_windows_gnu: x86_64-w64-mingw32-g++
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+        run: cargo build --release --target x86_64-pc-windows-gnu --manifest-path rs/Cargo.toml
+
+      - name: 发布（create || upload）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="$(grep -m1 '^version' rs/Cargo.toml | sed 's/.*= *"//;s/".*//')"
+          TAG="v${VER}"
+          BIN=rs/target/x86_64-pc-windows-gnu/release/myapi.exe
+          test -f "$BIN" || { echo '无产物'; exit 1; }
+          gh release create "$TAG" "$BIN" --generate-notes --title "myapi $VER" 2>/dev/null \
+            || gh release upload "$TAG" "$BIN" --clobber

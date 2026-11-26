@@ -1,0 +1,83 @@
+# myapi macOS amd64 单架构构建 + 发布 —— 永远手动触发。
+# ubuntu + osxcross 交叉（免费），SDK 来自 joseluisq/macosx-sdks。
+name: myapi macOS amd64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建 darwin/amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 osxcross 构建依赖
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang cmake xz-utils wget build-essential
+
+      - name: 克隆 osxcross
+        run: git clone --depth 1 https://github.com/tpoechtrager/osxcross.git /tmp/osxcross
+
+      - name: 恢复 osxcross 编译缓存（target + SDK，命中则跳过编译）
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/osxcross/target
+            /tmp/osxcross/tarballs
+          key: osxcross-12.3-stable
+          restore-keys: osxcross-12.3-stable-
+
+      - name: 下载 macOS SDK（缓存未命中才下）
+        run: |
+          if [ ! -f /tmp/osxcross/tarballs/MacOSX12.3.sdk.tar.xz ]; then
+            mkdir -p /tmp/osxcross/tarballs
+            wget -q https://github.com/joseluisq/macosx-sdks/releases/download/12.3/MacOSX12.3.sdk.tar.xz -O /tmp/osxcross/tarballs/MacOSX12.3.sdk.tar.xz
+          fi
+
+      - name: 构建 osxcross（非交互，target 已存在则跳过）
+        run: |
+          if [ ! -x /tmp/osxcross/target/bin/o64-clang ]; then
+            cd /tmp/osxcross
+            BUILD_FLAVOR=stable UNATTENDED=1 ./build.sh
+          else
+            echo "osxcross 缓存命中，跳过编译"
+          fi
+
+      - name: 加入 PATH
+        run: echo "/tmp/osxcross/target/bin" >> "$GITHUB_PATH"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: cargo 缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rs/target
+          key: cargo-macos-amd64-${{ hashFiles('rs/Cargo.lock') }}
+          restore-keys: cargo-macos-amd64-
+
+      - name: 构建
+        env:
+          CC_x86_64_apple_darwin: o64-clang
+          CXX_x86_64_apple_darwin: o64-clang++
+          CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER: o64-clang
+          LIBZ_SYS_STATIC: "1"
+        run: cargo build --release --target x86_64-apple-darwin --manifest-path rs/Cargo.toml
+
+      - name: 发布（create || upload）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="$(grep -m1 '^version' rs/Cargo.toml | sed 's/.*= *"//;s/".*//')"
+          TAG="v${VER}"
+          BIN=rs/target/x86_64-apple-darwin/release/myapi
+          test -f "$BIN" || { echo '无产物'; exit 1; }
+          gh release create "$TAG" "$BIN" --generate-notes --title "myapi $VER" 2>/dev/null \
+            || gh release upload "$TAG" "$BIN" --clobber

@@ -651,7 +651,7 @@ pub fn build_router(state: S) -> Router {
         .route("/stats/daily", get(stats_daily))
         .route("/health", get(health))
         .route("/v1/health/upstream", get(gateway_health_upstream))
-        .fallback_service(ServeDir::new(root().join("web").join("static")))
+        .fallback_service(ServeDir::new(root().join("web").join("dist")))
         .layer(CorsLayer::permissive()) // 跨域：前端/浏览器调网关（个人网关内网用，permissive）
         .with_state(state)
 }
