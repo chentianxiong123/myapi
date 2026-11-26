@@ -74,18 +74,19 @@ impl Adapter for CodexAdapter {
         let ctx_win = ir.meta.get("context_window").and_then(|v| v.as_u64()).unwrap_or(512000);
         let auto_compact = ir.meta.get("auto_compact_token_limit").and_then(|v| v.as_u64()).unwrap_or(200000);
         let mut providers: Vec<Value> = Vec::new();
-        for m in &ir.models {
-            let config = format!(
-                "model_provider = \"custom\"\nmodel = \"{}\"\nreview_model = \"{}\"\nmodel_context_window = {}\nmodel_auto_compact_token_limit = {}\n\n[model_providers]\n[model_providers.custom]\nname = \"custom\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nbase_url = \"{}\"\n",
-                m.id, m.id, ctx_win, auto_compact, base);
-            providers.push(json!({
-                "name": m.id,
-                "notes": DEFAULT_PROVIDER_ID,
-                "settings_config": {
-                    "auth": { "OPENAI_API_KEY": ir.api_key },
-                    "config": config,
-                    "modelCatalog": { "models": [{ "model": m.id, "displayName": m.id }] }
-                },
+        // Codex 单档位：model 下发档位名（auto=全部/pro=质量型/flash=速度型）→ 网关档位路由
+        // 不按模型循环：Codex 只有一个 model 配置，档位名由网关解析成真实模型（用户可在 config 改 pro/flash）
+        let config = format!(
+            "model_provider = \"custom\"\nmodel = \"auto\"\nreview_model = \"auto\"\nmodel_context_window = {}\nmodel_auto_compact_token_limit = {}\n\n[model_providers]\n[model_providers.custom]\nname = \"custom\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nbase_url = \"{}\"\n",
+            ctx_win, auto_compact, base);
+        providers.push(json!({
+            "name": "auto",
+            "notes": DEFAULT_PROVIDER_ID,
+            "settings_config": {
+                "auth": { "OPENAI_API_KEY": ir.api_key },
+                "config": config,
+                "modelCatalog": { "models": [{ "model": "auto", "displayName": "auto" }] }
+            },
                 "meta": {
                     "commonConfigEnabled": false,
                     "endpointAutoSelect": true,
@@ -97,7 +98,6 @@ impl Adapter for CodexAdapter {
                     "customUserAgent": "claude-cli/2.1.161 (external, cli)"
                 }
             }));
-        }
         Rendered::Json(Value::Array(providers))
     }
 
@@ -152,8 +152,11 @@ mod tests {
         match out {
             Rendered::Json(v) => {
                 let arr = v.as_array().unwrap();
-                assert_eq!(arr.len(), 2);
-                assert_eq!(arr[0].get("name").and_then(|x| x.as_str()), Some("gpt-x"));
+                assert_eq!(arr.len(), 1, "Codex 单档位：只生成一个 provider（档位名，不按模型循环）");
+                assert_eq!(arr[0].get("name").and_then(|x| x.as_str()), Some("auto"), "provider 名为档位名 auto");
+                // config 里 model 下发档位名（网关档位路由），不是真实模型名
+                let cfg = arr[0].pointer("/settings_config/config").and_then(|x| x.as_str()).unwrap();
+                assert!(cfg.contains("model = \"auto\""), "Codex model 应下发档位名 auto: {cfg}");
                 assert_eq!(arr[0].get("notes").and_then(|x| x.as_str()), Some("myapi"));
                 // settings_config.auth.OPENAI_API_KEY 带上 key
                 let key = arr[0].pointer("/settings_config/auth/OPENAI_API_KEY").and_then(|x| x.as_str());
