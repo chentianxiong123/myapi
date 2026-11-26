@@ -2294,11 +2294,7 @@ mod tests {
         let payload = json!({"model": "gemini-pro", "messages": [{"role": "user", "content": "hi"}]});
         let r = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         assert_eq!(r.status(), StatusCode::OK);
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        let summary = gateway_logs::query_summary(&dir.path()).unwrap();
-        assert_eq!(summary["total_input_tokens"].as_i64(), Some(12), "Gemini promptTokenCount 记进 input");
-        assert_eq!(summary["total_output_tokens"].as_i64(), Some(6), "Gemini candidatesTokenCount 记进 output");
+        assert!(wait_summary(&dir.path(), Some(12), Some(6)).await, "Gemini 非流式 usage 应入库");
     }
 
 
@@ -2321,6 +2317,19 @@ mod tests {
         std::fs::create_dir_all(dir.join("config")).unwrap();
         api::write_yaml_json(&dir.join("config").join("gateway.yaml"), &cfg).unwrap();
         S::new(dir.to_path_buf())
+    }
+
+
+    async fn wait_summary(root: &std::path::Path, expect_in: Option<i64>, expect_out: Option<i64>) -> bool {
+        // 流式 usage 由 SSE 处理后异步写日志，poll 等待入库（避免 sleep 固定值偶发 flaky）
+        for _ in 0..30 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let s = gateway_logs::query_summary(root).unwrap();
+            let ok_in = expect_in.map_or(true, |e| s["total_input_tokens"].as_i64() == Some(e));
+            let ok_out = expect_out.map_or(true, |e| s["total_output_tokens"].as_i64() == Some(e));
+            if ok_in && ok_out { return true; }
+        }
+        false
     }
 
     fn sse(chunks: &[String]) -> String {
@@ -2347,10 +2356,7 @@ mod tests {
         let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         assert_eq!(resp.status().as_u16(), 200);
         let _ = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        let summary = gateway_logs::query_summary(&dir.path()).unwrap();
-        assert_eq!(summary["total_input_tokens"].as_i64(), Some(20), "OpenAI 流式 input");
-        assert_eq!(summary["total_output_tokens"].as_i64(), Some(8), "OpenAI 流式 output");
+        assert!(wait_summary(&dir.path(), Some(20), Some(8)).await, "OpenAI 流式 usage 应入库");
     }
 
     #[tokio::test]
@@ -2372,10 +2378,7 @@ mod tests {
         let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         assert_eq!(resp.status().as_u16(), 200);
         let _ = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        let summary = gateway_logs::query_summary(&dir.path()).unwrap();
-        assert_eq!(summary["total_input_tokens"].as_i64(), Some(30), "Anthropic 分片 input（message_start）");
-        assert_eq!(summary["total_output_tokens"].as_i64(), Some(12), "Anthropic 分片 output（message_delta）");
+        assert!(wait_summary(&dir.path(), Some(30), Some(12)).await, "Anthropic 分片 usage 应入库");
     }
 
     #[tokio::test]
@@ -2396,10 +2399,7 @@ mod tests {
         let resp = gateway::forward_chat(&state.root, &state.health, &state.pins, &state.rates, None, payload, &state.cache).await;
         assert_eq!(resp.status().as_u16(), 200);
         let _ = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        let summary = gateway_logs::query_summary(&dir.path()).unwrap();
-        assert_eq!(summary["total_input_tokens"].as_i64(), Some(25), "Gemini 流式 input");
-        assert_eq!(summary["total_output_tokens"].as_i64(), Some(9), "Gemini 流式 output");
+        assert!(wait_summary(&dir.path(), Some(25), Some(9)).await, "Gemini 流式 usage 应入库");
     }
 
 
