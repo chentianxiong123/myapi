@@ -122,9 +122,12 @@ def build_handler(fu):
             usage = fu.cfg.get("usage", {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
             # 超长上下文 → 400 context（学 new-api / LiteLLM）
             ctx = fu.cfg.get("context")
-            if ctx and body.get("max_tokens") and body["max_tokens"] > ctx.get("max_tokens", 1000):
-                self._json({"error": {"type": "context_length_exceeded", "message": "超长上下文"}}, 400)
-                return
+            if ctx and body.get("max_tokens"):
+                # 按模型限制（model_limits[model] 或默认 max_tokens）；模拟"某通道装不下、某通道装得下"
+                limit = ctx.get("model_limits", {}).get(model, ctx.get("max_tokens", 1000))
+                if body["max_tokens"] > limit:
+                    self._json({"error": {"type": "context_length_exceeded", "message": "超长上下文"}}, 400)
+                    return
             print(f"[fake:{PORT}] {self.path} model={model} stream={stream} "
                   f"msgs={len(body.get('messages', []))}", flush=True)
 

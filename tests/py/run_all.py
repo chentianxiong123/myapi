@@ -201,6 +201,61 @@ def test_upstream_sync(upstream_port, panel_port):
         print("  ✓ 上游嗅探 detect/apply（add 检测 + regex 忽略 + 写回）")
 
 
+
+def test_streaming_matrix(upstream_port, panel_port):
+    """流式 SSE 混协议：chat/responses/messages 流式都收到内容 + [DONE]。"""
+    import requests as _req
+    base = f"http://127.0.0.1:{upstream_port}"
+    prov_openai = provider(base + "/v1", [
+        channel("ch-chat", models("gpt-4o", protocol="openai_chat")),
+        channel("ch-resp", models("gpt-5", protocol="openai_responses")),
+    ], name="mock-openai")
+    prov_anth = provider(base, [channel("ch-msg", models("claude-sonnet-5", protocol="anthropic"))], name="mock-anth")
+    with Harness(providers=[prov_openai, prov_anth], upstream_port=upstream_port, panel_port=panel_port) as h:
+        # chat 流式
+        r = _req.post(h.base_url + "/v1/chat/completions", json=fc.chat_request("auto"), timeout=30)
+        assert "[DONE]" in r.text, f"chat 流式应 [DONE]: {r.text[:200]}"
+        assert ("你好".encode("utf-8") in r.content) or ("\\u4f60\\u597d" in r.text), f"chat 流式应含内容: {r.text[:200]}"
+        # messages 流式（anthropic SSE）
+        r = _req.post(h.base_url + "/v1/messages", json=fc.messages_request("auto"), timeout=30)
+        assert ("你好".encode("utf-8") in r.content) or ("\\u4f60\\u597d" in r.text), f"messages 流式应含内容: {r.text[:200]}"
+        # responses 流式
+        r = _req.post(h.base_url + "/v1/responses", json=fc.responses_request("auto"), timeout=30)
+        assert ("你好".encode("utf-8") in r.content) or ("\\u4f60\\u597d" in r.text), f"responses 流式应含内容: {r.text[:200]}"
+        print("  ✓ 流式混协议（chat/responses/messages SSE + [DONE]）")
+
+
+def test_log_real_model_and_echo(upstream_port, panel_port):
+    """日志记真实模型名 + 响应回显档位名（客户端无感，网关黑盒）。"""
+    import time as _t
+    base = f"http://127.0.0.1:{upstream_port}"
+    prov = provider(base + "/v1", [channel("ch-a", models("gpt-4o", protocol="openai_chat"))])
+    with Harness(providers=[prov], upstream_port=upstream_port, panel_port=panel_port) as h:
+        s, d = h.request("/v1/chat/completions", fc.chat_request("auto", stream=False))
+        assert_ok(s, d, "auto 请求")
+        assert d.get("model") == "auto", f"响应应回显档位名 auto，实际 {d.get('model')}"
+        _t.sleep(0.5)
+        logs = h.query_logs()
+        assert logs, "应有日志"
+        assert logs[0].get("model") == "gpt-4o", f"日志应记真实模型名 gpt-4o，实际 {logs[0].get('model')}"
+        print(f"  ✓ 日志真实模型名（gpt-4o）+ 响应回显档位名（auto）")
+
+
+def test_context_feedback(upstream_port, panel_port):
+    """上下文错误反馈：上游 context 报错，跳过装不下的通道，换能装下的。"""
+    base = f"http://127.0.0.1:{upstream_port}"
+    prov = provider(base + "/v1", [
+        channel("ch-big", models("m-big", context_window=100000, protocol="openai_chat")),
+        channel("ch-small", models("m-small", context_window=1000, protocol="openai_chat")),
+    ])
+    # 假上游 context 限制 1000 token：max_tokens 超 → 400 context_length_exceeded
+    with Harness(upstream_cfg={"context": {"model_limits": {"m-small": 1000, "m-big": 100000}}}, providers=[prov],
+                 upstream_port=upstream_port, panel_port=panel_port) as h:
+        s, d = h.request("/v1/chat/completions", fc.chat_request("auto", max_tokens=5000, stream=False))
+        assert_ok(s, d, "context 超长→跳过装不下通道→ch-big 成功")
+        print("  ✓ context 错误反馈（超长→换大窗口通道）")
+
+
 SCENARIOS = {
     "protocol_matrix": test_protocol_matrix,
     "tier_routing": test_tier_routing,
@@ -209,6 +264,9 @@ SCENARIOS = {
     "failover_circuit": test_failover_and_circuit,
     "sticky_multi_device": test_sticky_and_multi_device,
     "upstream_sync": test_upstream_sync,
+    "streaming_matrix": test_streaming_matrix,
+    "log_real_model": test_log_real_model_and_echo,
+    "context_feedback": test_context_feedback,
 }
 
 
