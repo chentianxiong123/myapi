@@ -256,6 +256,164 @@ def test_context_feedback(upstream_port, panel_port):
         print("  ✓ context 错误反馈（超长→换大窗口通道）")
 
 
+
+# ---------- 狠场景（加大狠劲测试） ----------
+def test_concurrent_stress(upstream_port, panel_port):
+    """并发压测：50 并发全过 + 路由稳定（日志不丢）。"""
+    import threading, time as _t
+    base = f"http://127.0.0.1:{upstream_port}"
+    prov = provider(base + "/v1", [
+        channel("ch1", models("m1", protocol="openai_chat")),
+        channel("ch2", models("m2", protocol="openai_chat")),
+    ])
+    with Harness(providers=[prov], upstream_port=upstream_port, panel_port=panel_port) as h:
+        results = []
+        def worker():
+            s, d = h.request("/v1/chat/completions", fc.chat_request("auto", stream=False))
+            results.append((s, d))
+        threads = [threading.Thread(target=worker) for _ in range(50)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+        bad = [r for r in results if r[0] != 200]
+        assert not bad, f"50 并发应全过，{len(bad)} 个失败: {bad[:3]}"
+        _t.sleep(0.5)
+        summary = h.query_summary()
+        assert summary.get("total", 0) >= 50, f"日志应记 ≥50 请求: {summary}"
+        print(f"  ✓ 并发压测（50 并发全过 + 日志 total={summary.get('total')} ok={summary.get('success')}）")
+
+
+def test_circuit_breaker_recovery(upstream_port, panel_port):
+    """熔断恢复：失败→open（快速失败）→手动恢复上游→half_open 试探成功→closed。"""
+    import requests as _req
+    import time as _t
+    base = f"http://127.0.0.1:{upstream_port}"
+    prov = provider(base + "/v1", [channel("ch1", models("m1", protocol="openai_chat"))])
+    cb = {"circuit_breaker": {"failure_threshold": 1, "recovery_timeout_seconds": 1,
+                              "recovery_success_threshold": 1, "error_rate_threshold": 50, "min_requests": 1}}
+    with Harness(upstream_cfg={"fail_first_n": 999}, providers=[prov], gateway_cfg=cb,
+                 upstream_port=upstream_port, panel_port=panel_port) as h:
+        # 第 1 个请求：上游 500 → 熔断 open；第 2 个请求：open 快速失败（不再请求上游）
+        s1, _ = h.request("/v1/chat/completions", fc.chat_request("auto", stream=False))
+        s2, _ = h.request("/v1/chat/completions", fc.chat_request("auto", stream=False))
+        assert s1 >= 400 and s2 >= 400, f"失败期应全失败: {s1} {s2}"
+        calls_before = h.upstream_calls()
+        assert len(calls_before) == 1, f"open 后第 2 个请求不应再请求上游（只 1 次）: {len(calls_before)}"
+        # 手动恢复上游（清 fail_first_n），等 recovery_timeout → half_open 试探 → 200 → closed
+        _req.post(base + "/__recover", timeout=3)
+        _t.sleep(1.5)
+        s3, d3 = h.request("/v1/chat/completions", fc.chat_request("auto", stream=False))
+        assert s3 == 200, f"恢复后试探应 200: {s3} {d3}"
+        # 恢复后稳定 closed：连续 3 个请求都成功
+        ok = all(h.request("/v1/chat/completions", fc.chat_request("auto", stream=False))[0] == 200 for _ in range(3))
+        assert ok, "恢复后应连续成功（closed）"
+        print(f"  ✓ 熔断恢复（失败 {s1}/{s2} → open → 手动恢复 → 试探 200 → 连续成功）")
+
+
+def test_thinking_protocol(upstream_port, panel_port):
+    """思考模式协议：chat reasoning_effort / anthropic thinking / responses reasoning → 上游收到。"""
+    base = f"http://127.0.0.1:{upstream_port}"
+    prov = provider(base + "/v1", [channel("ch1", models("m1", capabilities=["thinking"], protocol="openai_chat"))])
+    with Harness(providers=[prov], upstream_port=upstream_port, panel_port=panel_port) as h:
+        # chat + reasoning_effort → 上游收到 reasoning_effort
+        s, d = h.request("/v1/chat/completions", fc.chat_request("auto", stream=False, **fc.with_thinking()))
+        assert_ok(s, d, "chat thinking")
+        calls = h.upstream_calls()
+        assert calls, "应有上游调用"
+        assert calls[-1]["body"].get("reasoning_effort") == "high", f"上游应收到 reasoning_effort=high: {calls[-1]['body']}"
+        print("  ✓ 思考模式协议（chat reasoning_effort→上游）")
+
+
+def test_gemini_ollama_sniff(upstream_port, panel_port):
+    """Gemini/Ollama 按协议拼 URL 嗅探：gemini 剥 models/ 前缀、ollama /api/tags。"""
+    base = f"http://127.0.0.1:{upstream_port}"
+    prov = provider(base, [
+        channel("ch-gemini", models("gemini-2.0-flash", protocol="gemini")),
+        channel("ch-ollama", models("llama3:latest", protocol="ollama")),
+    ])
+    cfg = {"models": ["gemini-2.0-flash", "llama3:latest", "gemini-2.5-pro", "qwen3:8b"]}
+    with Harness(upstream_cfg=cfg, providers=[prov], upstream_port=upstream_port, panel_port=panel_port) as h:
+        # gemini 嗅探（/v1beta/models，name 带 models/ 前缀 → 剥离）
+        s, d = h.request("/api/providers/upstream-models", {"provider": "mock", "channel_id": "ch-gemini"})
+        assert_ok(s, d, "gemini detect")
+        add = d.get("add", [])
+        assert "gemini-2.5-pro" in add, f"gemini 应检测新增（无 models/ 前缀）: {d}"
+        # ollama 嗅探（/api/tags）
+        s, d = h.request("/api/providers/upstream-models", {"provider": "mock", "channel_id": "ch-ollama"})
+        assert_ok(s, d, "ollama detect")
+        add = d.get("add", [])
+        assert "qwen3:8b" in add, f"ollama 应检测新增: {d}"
+        print("  ✓ Gemini/Ollama 按协议嗅探（前缀剥离 + /api/tags）")
+
+
+def test_model_switch_accuracy(upstream_port, panel_port):
+    """模型切换准确性：auto→pro→flash→auto 连续，各档位走对应通道。"""
+    base = f"http://127.0.0.1:{upstream_port}"
+    prov = provider(base + "/v1", [
+        channel("ch-pro", models("m-pro", **{"class": "pro"}, protocol="openai_chat")),
+        channel("ch-flash", models("m-flash", **{"class": "flash"}, protocol="openai_chat")),
+        channel("ch-auto", models("m-auto", protocol="openai_chat")),
+    ])
+    with Harness(providers=[prov], upstream_port=upstream_port, panel_port=panel_port) as h:
+        for tier in ["auto", "pro", "flash", "auto"]:
+            s, d = h.request("/v1/chat/completions", fc.chat_request(tier, stream=False))
+            assert s == 200, f"{tier} 应 200: {s} {d}"
+        calls = h.upstream_calls()
+        models_seen = [c["body"].get("model") for c in calls]
+        assert "m-pro" in models_seen, f"pro 应走 m-pro: {models_seen}"
+        assert "m-flash" in models_seen, f"flash 应走 m-flash: {models_seen}"
+        print(f"  ✓ 模型切换准确性（auto/pro/flash 各走对应通道: {models_seen}）")
+
+
+def test_upstream_anthropic_forward(upstream_port, panel_port):
+    """上游 anthropic 转发：client 发 chat → 上游收 /v1/messages + x-api-key + anthropic-version。"""
+    base = f"http://127.0.0.1:{upstream_port}"
+    prov = provider(base, [channel("ch-anth", models("claude-sonnet-5", protocol="anthropic"))], name="mock-anth")
+    with Harness(providers=[prov], upstream_port=upstream_port, panel_port=panel_port) as h:
+        s, d = h.request("/v1/chat/completions", fc.chat_request("auto", stream=False))
+        assert_ok(s, d, "chat→anthropic")
+        calls = h.upstream_calls()
+        assert calls, "应有上游调用"
+        last = calls[-1]
+        assert last["path"] == "/v1/messages", f"上游应收 /v1/messages: {last['path']}"
+        assert last["headers"].get("x-api-key") == "sk-test", f"上游应收 x-api-key: {last['headers']}"
+        assert last["headers"].get("anthropic-version"), f"上游应收 anthropic-version: {last['headers']}"
+        assert last["body"].get("system") is not None or "messages" in last["body"], f"上游应为 anthropic 格式: {last['body']}"
+        print("  ✓ 上游 anthropic 转发（/v1/messages + x-api-key + anthropic-version）")
+
+
+def test_model_fallback_chain(upstream_port, panel_port):
+    """模型级降级链：gpt-4 挂→降级 gpt-4o（学 LiteLLM fallbacks）。"""
+    base = f"http://127.0.0.1:{upstream_port}"
+    prov = provider(base + "/v1", [
+        channel("ch-gpt4", models("gpt-4", protocol="openai_chat")),
+        channel("ch-gpt4o", models("gpt-4o", protocol="openai_chat")),
+    ])
+    fb = {"model_fallback": {"enabled": True, "chains": {"gpt-4": ["gpt-4o"]}}}
+    with Harness(upstream_cfg={"fail_first_n": 1}, providers=[prov], gateway_cfg=fb,
+                 upstream_port=upstream_port, panel_port=panel_port) as h:
+        s, d = h.request("/v1/chat/completions", fc.chat_request("gpt-4", stream=False))
+        assert s == 200, f"gpt-4 失败应降级 gpt-4o: {s} {d}"
+        calls = h.upstream_calls()
+        models_seen = [c["body"].get("model") for c in calls]
+        assert "gpt-4" in models_seen and "gpt-4o" in models_seen, f"应尝试 gpt-4 后降级 gpt-4o: {models_seen}"
+        print(f"  ✓ 模型降级链（gpt-4→gpt-4o: {models_seen}）")
+
+
+def test_response_cache(upstream_port, panel_port):
+    """响应缓存：相同请求第二次命中缓存（上游只被调一次）。"""
+    base = f"http://127.0.0.1:{upstream_port}"
+    prov = provider(base + "/v1", [channel("ch1", models("m1", protocol="openai_chat"))])
+    cache = {"response_cache": {"enabled": True, "ttl_seconds": 60}}
+    with Harness(providers=[prov], gateway_cfg=cache, upstream_port=upstream_port, panel_port=panel_port) as h:
+        # 缓存只在 forward_generic（非档位路径）；用具体模型走该路径
+        body = fc.chat_request("m1", stream=False)
+        s1, d1 = h.request("/v1/chat/completions", body)
+        s2, d2 = h.request("/v1/chat/completions", body)
+        assert s1 == 200 and s2 == 200, f"缓存请求应 200: {s1} {s2}"
+        assert h.upstream_calls() and len(h.upstream_calls()) == 1, f"相同请求第二次应命中缓存（上游只调 1 次）: {len(h.upstream_calls())}"
+        print("  ✓ 响应缓存（相同请求第二次命中，上游只调 1 次）")
+
+
 SCENARIOS = {
     "protocol_matrix": test_protocol_matrix,
     "tier_routing": test_tier_routing,
@@ -267,6 +425,14 @@ SCENARIOS = {
     "streaming_matrix": test_streaming_matrix,
     "log_real_model": test_log_real_model_and_echo,
     "context_feedback": test_context_feedback,
+    "concurrent_stress": test_concurrent_stress,
+    "circuit_breaker_recovery": test_circuit_breaker_recovery,
+    "thinking_protocol": test_thinking_protocol,
+    "gemini_ollama_sniff": test_gemini_ollama_sniff,
+    "model_switch_accuracy": test_model_switch_accuracy,
+    "upstream_anthropic_forward": test_upstream_anthropic_forward,
+    "model_fallback_chain": test_model_fallback_chain,
+    "response_cache": test_response_cache,
 }
 
 

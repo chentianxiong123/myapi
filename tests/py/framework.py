@@ -151,8 +151,12 @@ class Harness:
 
     # ---- 假上游调用记录 ----
     def upstream_calls(self):
-        """读假上游记录的请求（从上游进程内存——通过 /__calls 端点？无。返回空）。"""
-        return []
+        """读假上游收到的请求记录（/__calls 端点）：断言上游收到什么协议/模型/头。"""
+        try:
+            r = requests.get(self.upstream_url + "/__calls", timeout=3)
+            return r.json().get("calls", [])
+        except Exception:
+            return []
 
     # ---- SQLite 日志 ----
     def query_logs(self, limit=20):

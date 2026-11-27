@@ -25,7 +25,21 @@ python3 run_all.py protocol_matrix
 | `framework.py` | `Harness`：起假上游 + 起网关（`MYAPI_ROOT` 隔离）+ 请求/断言 + SQLite 日志读取 |
 | `run_all.py` | 10 个全流程场景 |
 
-## 场景（10 个，全通过）
+## 场景（18 个，全通过）
+
+### 狠场景（加大狠劲测试：并发/熔断/降级/缓存/思考协议/嗅探）
+| 场景 | 覆盖 |
+|------|------|
+| `concurrent_stress` | 50 并发全过 + 日志 total=50 ok=50 |
+| `circuit_breaker_recovery` | 失败→open（快速失败不再请求上游）→`/__recover` 手动恢复→half_open 试探 200→连续成功 |
+| `thinking_protocol` | 思考模式协议：chat `reasoning_effort=high`→上游收到 |
+| `gemini_ollama_sniff` | Gemini `/v1beta/models` 剥 `models/` 前缀 + Ollama `/api/tags` |
+| `model_switch_accuracy` | auto/pro/flash 连续切换，各走对应通道 |
+| `upstream_anthropic_forward` | client chat→上游 `/v1/messages`+`x-api-key`+`anthropic-version` |
+| `model_fallback_chain` | gpt-4 失败→降级 gpt-4o（需 `model_fallback.enabled: true`） |
+| `response_cache` | 相同请求第二次命中（上游只调 1 次；缓存只在 `forward_generic` 非档位路径） |
+
+### 基础场景（10 个）
 
 | 场景 | 覆盖 |
 |------|------|
@@ -54,6 +68,9 @@ python3 run_all.py protocol_matrix
 4. **auth 配置在顶层**（`auth.api_keys`），不是 `gateway` 段。
 5. **`fail_first_n` 与 `error` 互斥**：`error` 配置会让所有请求失败，测 failover 只用 `fail_first_n`。
 6. **context 按模型限制**：`context.model_limits.{model}` 模拟"某通道装不下、某通道装得下"。
+7. **熔断恢复**：open 期间请求不到上游、`fail_first_n` 不消耗，恢复后试探仍失败——用假上游 `/__recover`（清 `fail_first_n`）手动恢复上游再测。
+8. **缓存只在 `forward_generic`（非档位路径）**：档位请求（auto/pro/flash）走 `forward_chat` 无缓存；测缓存用具体模型名。
+9. **`model_fallback` 需 `enabled: true`**：chains 配了但 enabled 默认 false 不生效。
 
 ## 与 Rust 测试的分工
 

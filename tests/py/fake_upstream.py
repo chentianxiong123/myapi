@@ -87,6 +87,10 @@ def build_handler(fu):
 
         def do_GET(self):
             cfg = fu.cfg
+            if self.path == "/__calls":
+                # 测试框架读取假上游收到的请求记录（断言协议/模型/头）
+                self._json({"calls": fu.calls, "count": fu.count})
+                return
             models = cfg.get("models", ["gpt-4o", "gpt-4o-mini"])
             if self.path.startswith("/v1beta/models"):
                 # Gemini 形：{models:[{name:"models/xxx"}]}
@@ -101,6 +105,10 @@ def build_handler(fu):
                 self._json({"error": "not found"}, 404)
 
         def do_POST(self):
+            if self.path == "/__recover":
+                fu.cfg["fail_first_n"] = 0
+                self._json({"ok": True})
+                return
             body = self._read_body()
             model = body.get("model", "mock-model")
             stream = body.get("stream", False)
