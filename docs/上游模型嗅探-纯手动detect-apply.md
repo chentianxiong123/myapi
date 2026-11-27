@@ -12,7 +12,7 @@
 ### 1. 嗅探 `gateway::fetch_upstream_models`（已有）
 - `GET {base}/models`（OpenAI 兼容）；解析 `{data:[{id}]}` / `{models:[{id|name}]}` / 裸数组。
 - 带 `Authorization: Bearer key` + 自定义 headers。
-- 协议扩展（Ollama/Gemini 专门 API）暂未做，后续按 `ChannelModel.protocol` 拼 URL。
+- **按协议拼 URL**（学 new-api fetchChannelUpstreamModelIDs）：`openai_chat`/`openai_responses`/`anthropic`→`{base}/models`；`gemini`→`{base}/v1beta/models`（name 去 `models/` 前缀）；`ollama`→`{base}/api/tags`。阿里/智谱/火山等专门路径**刻意不做**（用户：大部分没用）。
 
 ### 2. 差异检测 `gateway::diff_upstream_models`（新增）
 学 new-api `collectPendingUpstreamModelChangesFromModels`：
@@ -57,7 +57,11 @@ ignored = 被忽略规则命中的上游新模型（提示但不加入）
 - `diff_upstream_no_change_and_empty_rules`：完全一致无差异。
 - `diff_upstream_exact_rule_not_regex`：无 `regex:` 前缀走精确匹配。
 
+## 测试
+- `diff_upstream_add_remove_and_regex_ignored` / `diff_upstream_no_change_and_empty_rules` / `diff_upstream_exact_rule_not_regex`：差异检测。
+- `upstream_models_url_by_protocol`：三组 URL 拼接（openai/anthropic→`/models`、gemini→`/v1beta/models`、ollama→`/api/tags`）。
+- `strip_model_prefix_by_protocol`：gemini 去 `models/` 前缀，ollama/openai 不动。
+
 ## 待办（后续可选）
-- 按 `ChannelModel.protocol` 拼嗅探 URL（anthropic `/v1/models`、gemini `/v1beta/models`、ollama `/api/tags`）。
 - 持久化忽略规则到 Provider（当前对话框内输入，纯会话）。
-- 前端 e2e 补 detect/apply 流程（当前 226 Rust 测试 + 前端 typecheck 过，e2e 未含此新流程）。
+- 前端 e2e 补 detect/apply 流程（当前 228 Rust 测试 + 前端 typecheck 过，e2e 未含此新流程）。

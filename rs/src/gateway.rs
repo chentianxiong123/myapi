@@ -2178,9 +2178,29 @@ pub fn list_models(config: &GatewayConfig) -> Vec<serde_json::Value> {
 /// 不花 token，只探通道上游可达性。返回每通道 live/dead + 延迟 + HTTP status。
 /// 拉取上游模型列表（学 new-api FetchUpstreamModels）：GET base_url/models，解析 OpenAI 格式
 /// 返回模型 id 列表（供面板自动填充，避免手填写错）
-pub async fn fetch_upstream_models(base_url: &str, api_key: &str, headers: &[(String, String)]) -> Result<Vec<String>, String> {
-    let base = base_url.trim_end_matches('/');
-    let url = format!("{}/models", base);
+/// 按协议拼上游模型列表 URL（学 new-api fetchChannelUpstreamModelIDs）。
+/// 只支持最通用的几个：openai_chat/openai_responses/anthropic→{base}/models（OpenAI 形），
+/// gemini→{base}/v1beta/models，ollama→{base}/api/tags。其余（阿里/智谱等专门路径）不做。
+pub fn upstream_models_url(base: &str, protocol: &str) -> String {
+    let base = base.trim_end_matches('/');
+    match protocol {
+        "gemini" => format!("{}/v1beta/models", base),
+        "ollama" => format!("{}/api/tags", base),
+        _ => format!("{}/models", base),
+    }
+}
+
+/// 按协议剥离模型名前缀（学 new-api TrimPrefix）：gemini 的 name 带 `models/` 前缀，剥掉。
+pub fn strip_model_prefix(id: &str, protocol: &str) -> String {
+    if protocol == "gemini" {
+        id.strip_prefix("models/").unwrap_or(id).to_string()
+    } else {
+        id.to_string()
+    }
+}
+
+pub async fn fetch_upstream_models(base_url: &str, api_key: &str, headers: &[(String, String)], protocol: &str) -> Result<Vec<String>, String> {
+    let url = upstream_models_url(base_url, protocol);
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(10))
@@ -2196,7 +2216,7 @@ pub async fn fetch_upstream_models(base_url: &str, api_key: &str, headers: &[(St
         return Err(format!("上游返回 {}", status.as_u16()));
     }
     let body: serde_json::Value = resp.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
-    // OpenAI 格式 {data: [{id: "gpt-4", ...}, ...]}；兼容 {models: [...]} / 裸数组
+    // OpenAI 格式 {data: [{id: "gpt-4", ...}, ...]}；兼容 {models: [...]}（gemini/ollama）/ 裸数组
     let ids: Vec<String> = if let Some(data) = body.get("data").and_then(|v| v.as_array()) {
         data.iter().filter_map(|m| m.get("id").and_then(|x| x.as_str()).map(|s| s.to_string())).collect()
     } else if let Some(models) = body.get("models").and_then(|v| v.as_array()) {
@@ -2208,7 +2228,7 @@ pub async fn fetch_upstream_models(base_url: &str, api_key: &str, headers: &[(St
     } else {
         vec![]
     };
-    Ok(ids)
+    Ok(ids.into_iter().map(|id| strip_model_prefix(&id, protocol)).collect())
 }
 
 /// 上游模型差异检测（学 new-api collectPendingUpstreamModelChangesFromModels）。
@@ -3467,5 +3487,23 @@ mod tests {
         let (add, _, ignored) = diff_upstream_models(&upstream, &["m1".into()], &["m3".into()]);
         assert_eq!(add, vec!["m2".to_string()], "无 regex: 前缀应精确匹配");
         assert_eq!(ignored, vec!["m3".to_string()]);
+    }
+
+    // ---- 按协议拼嗅探 URL + 前缀剥离（学 new-api fetchChannelUpstreamModelIDs）----
+    #[test]
+    fn upstream_models_url_by_protocol() {
+        assert_eq!(upstream_models_url("http://x:1/", "openai_chat"), "http://x:1/models");
+        assert_eq!(upstream_models_url("http://x:1", "openai_responses"), "http://x:1/models");
+        assert_eq!(upstream_models_url("http://x:1", "anthropic"), "http://x:1/models");
+        assert_eq!(upstream_models_url("http://x:1", "gemini"), "http://x:1/v1beta/models");
+        assert_eq!(upstream_models_url("http://x:1", "ollama"), "http://x:1/api/tags");
+    }
+
+    #[test]
+    fn strip_model_prefix_by_protocol() {
+        assert_eq!(strip_model_prefix("models/gemini-2.0-flash", "gemini"), "gemini-2.0-flash");
+        assert_eq!(strip_model_prefix("gemini-2.0-flash", "gemini"), "gemini-2.0-flash");
+        assert_eq!(strip_model_prefix("llama3:latest", "ollama"), "llama3:latest");
+        assert_eq!(strip_model_prefix("gpt-4o", "openai_chat"), "gpt-4o");
     }
 }

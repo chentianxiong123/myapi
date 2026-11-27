@@ -660,7 +660,7 @@ async fn fetch_upstream_models_handler(
         return (axum::http::StatusCode::BAD_REQUEST,
             axum::Json(serde_json::json!({"ok": false, "error": "缺少 base_url"}))).into_response();
     }
-    match gateway::fetch_upstream_models(base_url, api_key, &headers).await {
+    match gateway::fetch_upstream_models(base_url, api_key, &headers, "openai_chat").await {
         Ok(models) => axum::Json(serde_json::json!({"ok": true, "models": models})).into_response(),
         Err(e) => (axum::http::StatusCode::BAD_GATEWAY,
             axum::Json(serde_json::json!({"ok": false, "error": e}))).into_response(),
@@ -698,7 +698,9 @@ async fn detect_upstream_models_handler(
     let base = p.base_url.trim_end_matches('/').to_string();
     let api_key = gateway::resolve_key(p, c).unwrap_or_default();
     let headers: Vec<(String, String)> = p.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    let upstream = match gateway::fetch_upstream_models(&base, &api_key, &headers).await {
+    // 按协议拼嗅探 URL（学 new-api fetchChannelUpstreamModelIDs）：取通道第一个非空协议，默认 openai
+    let protocol = c.models.iter().find_map(|m| m.protocol.clone()).unwrap_or_else(|| "openai_chat".to_string());
+    let upstream = match gateway::fetch_upstream_models(&base, &api_key, &headers, &protocol).await {
         Ok(m) => m,
         Err(e) => return (axum::http::StatusCode::BAD_GATEWAY,
             axum::Json(serde_json::json!({"ok": false, "error": e}))).into_response(),
