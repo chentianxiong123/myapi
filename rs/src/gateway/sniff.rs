@@ -1,6 +1,13 @@
-//! 上游模型嗅探（从 forward.rs 拆出，纯手动 detect/apply）
+//! sniff（从 gateway.rs 精确拆分）
 use super::*;
 
+/// 主动健康探测（学 LiteLLM /health 主动 ping deployment）：轻量 GET {base_url}/models
+/// 不花 token，只探通道上游可达性。返回每通道 live/dead + 延迟 + HTTP status。
+/// 拉取上游模型列表（学 new-api FetchUpstreamModels）：GET base_url/models，解析 OpenAI 格式
+/// 返回模型 id 列表（供面板自动填充，避免手填写错）
+/// 按协议拼上游模型列表 URL（学 new-api fetchChannelUpstreamModelIDs）。
+/// 只支持最通用的几个：openai_chat/openai_responses/anthropic→{base}/models（OpenAI 形），
+/// gemini→{base}/v1beta/models，ollama→{base}/api/tags。其余（阿里/智谱等专门路径）不做。
 pub fn upstream_models_url(base: &str, protocol: &str) -> String {
     let base = base.trim_end_matches('/');
     match protocol {
@@ -10,6 +17,7 @@ pub fn upstream_models_url(base: &str, protocol: &str) -> String {
     }
 }
 
+/// 按协议剥离模型名前缀（学 new-api TrimPrefix）：gemini 的 name 带 `models/` 前缀，剥掉。
 pub fn strip_model_prefix(id: &str, protocol: &str) -> String {
     if protocol == "gemini" {
         id.strip_prefix("models/").unwrap_or(id).to_string()
@@ -50,6 +58,11 @@ pub async fn fetch_upstream_models(base_url: &str, api_key: &str, headers: &[(St
     Ok(ids.into_iter().map(|id| strip_model_prefix(&id, protocol)).collect())
 }
 
+/// 上游模型差异检测（学 new-api collectPendingUpstreamModelChangesFromModels）。
+/// 纯手动：只算差异不写库，由调用方决定加/删。
+/// - add    = upstream − local − ignored（ignored 支持 `regex:` 前缀正则）
+/// - remove = local − upstream（本地有、上游已消失）
+/// - ignored= 被忽略规则命中的上游新模型（提示但不加入）
 pub fn diff_upstream_models(upstream: &[String], local: &[String], ignored: &[String])
     -> (Vec<String>, Vec<String>, Vec<String>) {
     use regex::Regex;
@@ -94,6 +107,9 @@ pub fn diff_upstream_models(upstream: &[String], local: &[String], ignored: &[St
     (add, remove, ignored_hit)
 }
 
+/// 应用上游模型变更到 gateway.yaml（纯手动：只写调用方勾选的 add/remove）。
+/// add 是完整 ChannelModel JSON（[{name, alias?, protocol?}, ...]），remove 是模型名。
+/// 返回更新后的 providers 段。
 pub fn apply_upstream_models(
     root: &std::path::Path,
     provider: &str,

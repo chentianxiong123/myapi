@@ -1,7 +1,8 @@
-//! 熔断/健康度（从 gateway.rs 拆出）
+//! circuit（从 gateway.rs 精确拆分）
 use super::*;
 
-fn avg_ttft_with_buffer(h: &ChannelHealth) -> f64 {
+/// 平均 TTFT * buffer 系数（延迟感知打分，越低越好）
+pub(crate) fn avg_ttft_with_buffer(h: &ChannelHealth) -> f64 {
     if h.ttft_window.is_empty() {
         return NEUTRAL_LATENCY_SCORE;
     }
@@ -10,7 +11,9 @@ fn avg_ttft_with_buffer(h: &ChannelHealth) -> f64 {
     avg * (1.0 + LATENCY_BUFFER_RATIO)
 }
 
-fn apply_strategy(
+/// 按路由策略从可用候选里选一个（返回 candidates 的索引）。
+/// 先熔断过滤，全不可用则 KeepAll 兑底（index 0）。
+pub(crate) fn apply_strategy(
     candidates: &[(&Provider, &Channel, &ChannelModel)],
     hs: Option<&HashMap<String, ChannelHealth>>,
     cb: &CircuitBreakerConfig,
@@ -76,7 +79,8 @@ fn apply_strategy(
     }
 }
 
-fn rand_range(max: u32) -> u32 {
+/// 轻量随机数（避免引入 rand 依赖：系统时间纳秒 + 计数器混合）
+pub(crate) fn rand_range(max: u32) -> u32 {
     if max <= 1 { return 0; }
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -93,6 +97,8 @@ fn rand_range(max: u32) -> u32 {
     (x % max as u64) as u32
 }
 
+/// 通道健康度（被动统计 + 三态熔断，学 cc-switch 状态机 + LiteLLM 失败率）
+#[derive(Debug, Clone, Default)]
 pub struct ChannelHealth {
     pub total_requests: u64,
     pub failed_requests: u64,
@@ -108,6 +114,8 @@ pub struct ChannelHealth {
     pub ttft_window: Vec<u64>,
 }
 
+/// 熔断三态（closed/open/half_open，学 cc-switch）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CircuitState {
     #[default]
     Closed,
@@ -115,13 +123,19 @@ pub enum CircuitState {
     HalfOpen,
 }
 
-fn now_secs() -> u64 {
+/// 健康度表：channel_id → health（全局共享，Arc<RwLock>）
+pub type HealthMap = Arc<RwLock<HashMap<String, ChannelHealth>>>;
+
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
 
+/// 三态熔断状态机（学 cc-switch closed→open→half_open→closed）
+/// 判定融合 LiteLLM：连续失败达阈值 OR 错误率>阈值（请求数≥min）→ open
+/// 唯一可用通道不熔断（LiteLLM single_deployment 保护，避免一熔全瘫）
 pub async fn record_outcome(
     health: &HealthMap,
     channel_id: &str,
@@ -192,6 +206,14 @@ pub async fn record_outcome(
             }
         }
     }
+}
+
+/// 关键词熔断：错误响应体含配置关键词（欠费/封号等"重试也没用"的错误）→ true。
+/// 学 new-api AutomaticDisableKeywords。只在失败时调，body 文本小写化后匹配。
+pub(crate) fn hit_disable_keyword(body: &[u8], keywords: &[String]) -> Option<String> {
+    if keywords.is_empty() { return None; }
+    let text = String::from_utf8_lossy(body).to_lowercase();
+    keywords.iter().find(|k| !k.is_empty() && text.contains(&k.to_lowercase())).cloned()
 }
 
 pub fn is_available(h: &ChannelHealth, cb: &CircuitBreakerConfig) -> bool {

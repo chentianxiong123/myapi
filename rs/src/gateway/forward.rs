@@ -1,9 +1,5 @@
-//! 转发核心（从 gateway.rs 拆出）
+//! forward（从 gateway.rs 精确拆分）
 use super::*;
-mod sniff;
-pub use sniff::*;
-mod nginx;
-pub use nginx::*;
 
 pub async fn forward_generic(
     root: &std::path::Path,
@@ -236,7 +232,9 @@ pub async fn forward_generic(
     error_response(502, &format!("所有通道失败（试了 {} 条）: {}", max_retries.max(1), last_err))
 }
 
-enum ForwardError {
+/// 转发失败分类（学 LiteLLM AttemptError）：区分可重试/不可重试
+#[derive(Debug, Clone)]
+pub(crate) enum ForwardError {
     /// 可重试：连接失败 / 408 409 429 / 5xx。重试退避后可试其他通道。
     Retryable { status: Option<u16>, retry_after: Option<std::time::Duration>, msg: String },
     /// 不可重试：其他 4xx（鉴权/参数/找不到）。重试也没用，直接透传。
@@ -246,38 +244,71 @@ enum ForwardError {
 }
 
 impl ForwardError {
-    fn is_retryable(&self) -> bool {
+    pub(crate) fn is_retryable(&self) -> bool {
         matches!(self, ForwardError::Retryable { .. })
     }
-    fn is_context(&self) -> bool {
+    pub(crate) fn is_context(&self) -> bool {
         matches!(self, ForwardError::Context { .. })
     }
-    fn status(&self) -> Option<u16> {
+    pub(crate) fn status(&self) -> Option<u16> {
         match self {
             ForwardError::Retryable { status, .. } | ForwardError::Fatal { status, .. } | ForwardError::Context { status, .. } => *status,
         }
     }
-    fn retry_after(&self) -> Option<std::time::Duration> {
+    pub(crate) fn retry_after(&self) -> Option<std::time::Duration> {
         match self {
             ForwardError::Retryable { retry_after, .. } => *retry_after,
             _ => None,
         }
     }
-    fn message(&self) -> String {
+    pub(crate) fn message(&self) -> String {
         match self {
             ForwardError::Retryable { msg, .. } | ForwardError::Fatal { msg, .. } | ForwardError::Context { msg, .. } => msg.clone(),
         }
     }
 }
 
-fn parse_retry_after(resp: &reqwest::Response) -> Option<std::time::Duration> {
+/// 粗估 input token（不引 tokenizer SDK：4 字符≈1 token，个人网关够用）
+pub fn estimate_input_tokens(payload: &serde_json::Value) -> i64 {
+    let mut total: i64 = 0;
+    if let Some(msgs) = payload.get("messages").and_then(|v| v.as_array()) {
+        for m in msgs {
+            if let Some(c) = m.get("content").and_then(|v| v.as_str()) {
+                total += (c.len() as i64) / 4 + 1;
+            }
+        }
+    }
+    total
+}
+
+/// 合并全局重试策略 + 通道级覆盖（通道只配想改的字段，其余继承全局）
+pub(crate) fn resolve_retry_policy<'a>(global: &'a RetryConfig, channel_override: Option<&'a RetryOverride>) -> RetryConfig {
+    let mut policy = global.clone();
+    if let Some(o) = channel_override {
+        if let Some(v) = o.max_retries { policy.max_retries = v; }
+        if let Some(ref v) = o.retry_on_status { policy.retry_on_status = v.clone(); }
+        if let Some(ref v) = o.fatal_status { policy.fatal_status = v.clone(); }
+        if let Some(v) = o.backoff_initial_ms { policy.backoff_initial_ms = v; }
+        if let Some(v) = o.backoff_max_ms { policy.backoff_max_ms = v; }
+        if let Some(v) = o.jitter { policy.jitter = v; }
+        if let Some(v) = o.respect_retry_after { policy.respect_retry_after = v; }
+    }
+    policy
+}
+
+/// 从上游响应头读 retry-after（秒），仅尊重 ≤ 60s 的（学 LiteLLM MAX_HONOURED_RETRY_AFTER）
+pub(crate) fn parse_retry_after(resp: &reqwest::Response) -> Option<std::time::Duration> {
     let v = resp.headers().get("retry-after")?.to_str().ok()?;
     let secs: u64 = v.trim().parse().ok()?;
     let d = std::time::Duration::from_secs(secs);
     if d <= std::time::Duration::from_secs(60) { Some(d) } else { None }
 }
 
-fn retry_delay(policy: &RetryConfig, attempted: u32, retry_after: Option<std::time::Duration>) -> std::time::Duration {
+/// 重试退避延迟（学 LiteLLM Backoff）：0.5s 起，指数 ×2 到 8s 封顶，加 0.75 jitter 防雪崩。
+/// 优先尊重上游 retry-after。attempted=已重试次数。
+/// 重试退避延迟（学 LiteLLM Backoff）：initial 起 ×2 到 max 封顶，加 jitter 防雪崩。
+/// 尊重上游 retry-after（若 policy 允许）。attempted=已重试次数。
+pub(crate) fn retry_delay(policy: &RetryConfig, attempted: u32, retry_after: Option<std::time::Duration>) -> std::time::Duration {
     let initial = policy.backoff_initial_ms as f64 / 1000.0;
     let max = policy.backoff_max_ms as f64 / 1000.0;
     let jitter = policy.jitter;
@@ -292,12 +323,16 @@ fn retry_delay(policy: &RetryConfig, attempted: u32, retry_after: Option<std::ti
     std::time::Duration::from_secs_f64(secs + jitter * pseudo_rand())
 }
 
-fn pseudo_rand() -> f64 {
+/// 轻量伪随机 [0,1)，从纳秒时间戳取，避免引 rand 依赖（jitter 防雪崩够用）
+pub(crate) fn pseudo_rand() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
     (nanos % 1000) as f64 / 1000.0
 }
 
+/// 转发到单个通道（Auto 和普通路由共用）：失败返回 ForwardError（区分可重试），成功返回响应
+/// 通道测试（学 new-api TestChannel）：真发一个 chat 请求验证通道"真能出 token"
+/// 用配置的默认模型（空=通道第一个模型）+ 测试对话。返回 {ok, status, latency_ms, content/error}
 pub async fn test_channel(
     root: &std::path::Path,
     provider_name: &str,
@@ -367,7 +402,7 @@ pub async fn test_channel(
     }
 }
 
-async fn forward_one(
+pub(crate) async fn forward_one(
     root: &std::path::Path,
     config: &GatewayConfig,
     health: &HealthMap,
@@ -646,37 +681,6 @@ async fn forward_one(
     }
 }
 
-/// 从非流式响应解析 usage（OpenAI 格式 usage.input_tokens/output_tokens）
-
-/// 从 usage JSON 提取 (input, output, cache_read, cache_creation)
-/// 抄 LiteLLM/llms-types 字段名：OpenAI prompt_tokens_details.cached_tokens /
-/// cache_creation_tokens；Anthropic cache_read_input_tokens / cache_creation_input_tokens
-pub(crate) fn parse_usage_json(v: &serde_json::Value) -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
-    // usage 位置因协议而异：
-    //   OpenAI/Anthropic: usage 字段
-    //   Gemini: 顶层 usageMetadata（promptTokenCount/candidatesTokenCount）
-    let u = if let Some(u) = v.get("usage") {
-        if !u.is_null() { u } else { return (None, None, None, None) }
-    } else if let Some(g) = v.get("usageMetadata") {
-        if !g.is_null() { g } else { return (None, None, None, None) }
-    } else {
-        return (None, None, None, None);
-    };
-    let get = |k: &str| u.get(k).and_then(|x| x.as_i64());
-    // input: OpenAI prompt_tokens / Anthropic input_tokens / Gemini promptTokenCount
-    let input = get("input_tokens").or_else(|| get("prompt_tokens")).or_else(|| get("promptTokenCount"));
-    // output: OpenAI completion_tokens / Anthropic output_tokens / Gemini candidatesTokenCount
-    let output = get("output_tokens").or_else(|| get("completion_tokens")).or_else(|| get("candidatesTokenCount"));
-    // cache read: OpenAI prompt_tokens_details.cached_tokens；Anthropic cache_read_input_tokens；Gemini cachedContentTokenCount
-    let cache_read = get("cache_read_input_tokens")
-        .or_else(|| get("cachedContentTokenCount"))
-        .or_else(|| u.get("prompt_tokens_details").and_then(|d| d.get("cached_tokens")).and_then(|x| x.as_i64()));
-    // cache creation: Anthropic cache_creation_input_tokens；OpenAI cache_creation_tokens
-    let cache_creation = get("cache_creation_input_tokens")
-        .or_else(|| u.get("prompt_tokens_details").and_then(|d| d.get("cache_creation_tokens")).and_then(|x| x.as_i64()));
-    (input, output, cache_read, cache_creation)
-}
-
 /// SSE 流式 usage 捕获：包装字节流，逐 chunk 透传客户端的同时累积缓冲，
 /// 扫描 `data:` 行里的 usage token（OpenAI 最后 chunk / Anthropic message_delta）。
 /// 流结束后把 (input_tokens, output_tokens) 通过 oneshot channel 发给后台任务补记日志。
@@ -704,7 +708,7 @@ impl futures_core::Stream for ModelRewriteStream {
 }
 
 /// 把 chunk 内所有 `"model":"..."` / `"model": "..."` 的值改成档位名。
-fn rewrite_chunk_model(chunk: &[u8], model: &str) -> Vec<u8> {
+pub(crate) fn rewrite_chunk_model(chunk: &[u8], model: &str) -> Vec<u8> {
     let s = String::from_utf8_lossy(chunk);
     if !s.contains("\"model\":") { return chunk.to_vec(); }
     let mut out = s.to_string();
@@ -765,16 +769,6 @@ impl futures_core::Stream for SseUsageTap {
     }
 }
 
-/// 合并两个 usage 元组：逐字段取非 None（后者优先）。用于流式跨 chunk 累积——
-/// Anthropic 把 usage 拆两处（message_start 带 input，message_delta 带 output），
-/// 必须合并而非"取最后一个"，否则丢 input。
-
-/// 扫描 SSE 缓冲里所有 `data:` 行，累积合并各 chunk 的 usage token。
-/// 覆盖三种协议的流式格式：
-///   OpenAI：最后 chunk 的 usage.prompt_tokens/completion_tokens
-///   Anthropic：message_start.usage.input_tokens + message_delta.usage.output_tokens（分片）
-///   Gemini：chunk 顶层 usageMetadata.promptTokenCount/candidatesTokenCount
-
 /// chat 端点包装（forward_generic + /chat/completions）
 pub async fn forward_chat(
     root: &std::path::Path,
@@ -806,106 +800,9 @@ pub async fn forward_embeddings(
     forward_generic(root, health, pins, rates, auth_header, p, "/embeddings", cache).await
 }
 
-
-fn error_response(code: u16, msg: &str) -> axum::response::Response {
+pub(crate) fn error_response(code: u16, msg: &str) -> axum::response::Response {
     (
         axum::http::StatusCode::from_u16(code).unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
         axum::Json(serde_json::json!({"error": {"message": msg, "type": "api_error"}})),
     ).into_response()
 }
-
-/// 列出所有对外可用模型名（/v1/models 用）：聚合所有通道的 alias/name
-pub fn list_models(config: &GatewayConfig) -> Vec<serde_json::Value> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for p in &config.providers {
-        if p.disabled { continue; }
-        for c in &p.channels {
-            for m in &c.models {
-                let external = m.alias.clone().unwrap_or_else(|| m.name.clone());
-                if seen.insert(external.clone()) {
-                    out.push(serde_json::json!({
-                        "id": external,
-                        "object": "model",
-                        "owned_by": p.name,
-                    }));
-                }
-            }
-        }
-    }
-    out
-}
-
-/// 主动健康探测（学 LiteLLM /health 主动 ping deployment）：轻量 GET {base_url}/models
-/// 不花 token，只探通道上游可达性。返回每通道 live/dead + 延迟 + HTTP status。
-/// 拉取上游模型列表（学 new-api FetchUpstreamModels）：GET base_url/models，解析 OpenAI 格式
-/// 返回模型 id 列表（供面板自动填充，避免手填写错）
-/// 按协议拼上游模型列表 URL（学 new-api fetchChannelUpstreamModelIDs）。
-/// 只支持最通用的几个：openai_chat/openai_responses/anthropic→{base}/models（OpenAI 形），
-/// gemini→{base}/v1beta/models，ollama→{base}/api/tags。其余（阿里/智谱等专门路径）不做。
-
-/// 按协议剥离模型名前缀（学 new-api TrimPrefix）：gemini 的 name 带 `models/` 前缀，剥掉。
-
-
-/// 上游模型差异检测（学 new-api collectPendingUpstreamModelChangesFromModels）。
-/// 纯手动：只算差异不写库，由调用方决定加/删。
-/// - add    = upstream − local − ignored（ignored 支持 `regex:` 前缀正则）
-/// - remove = local − upstream（本地有、上游已消失）
-/// - ignored= 被忽略规则命中的上游新模型（提示但不加入）
-
-/// 应用上游模型变更到 gateway.yaml（纯手动：只写调用方勾选的 add/remove）。
-/// add 是完整 ChannelModel JSON（[{name, alias?, protocol?}, ...]），remove 是模型名。
-/// 返回更新后的 providers 段。
-
-pub async fn probe_upstream(root: &std::path::Path) -> Vec<serde_json::Value> {
-    let config = load_config(root);
-    let client = match reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return vec![],
-    };
-    let mut out = Vec::new();
-    for p in &config.providers {
-        if p.disabled {
-            continue;
-        }
-        let base = p.base_url.trim_end_matches('/');
-        let url = format!("{}/models", base);
-        for c in &p.channels {
-            let api_key = resolve_key(p, c).unwrap_or_default();
-            let start = std::time::Instant::now();
-            let mut req = client.get(&url).header("Authorization", format!("Bearer {}", api_key));
-            for (k, v) in &p.headers {
-                req = req.header(k.as_str(), v.as_str());
-            }
-            let (live, status_code, err) = match req.send().await {
-                Ok(r) => {
-                    let sc = r.status().as_u16();
-                    // 401/403 说明上游活着（只是 key 问题）；2xx/429 都算可达
-                    let ok = sc < 500;
-                    (ok, sc, String::new())
-                }
-                Err(e) => (false, 0, e.to_string()),
-            };
-            let latency = start.elapsed().as_millis() as u64;
-            out.push(serde_json::json!({
-                "provider": p.name,
-                "channel": c.name,
-                "channel_id": c.id,
-                "live": live,
-                "status": if live { "healthy" } else { "unreachable" },
-                "status_code": status_code,
-                "latency_ms": latency,
-                "error": err,
-            }));
-        }
-    }
-    out
-}
-/// 生成 Nginx 高可用配置（学 new-api 多机部署）：从 deploy 配置生成完整 nginx.conf
-/// 客户端 → Nginx 固定入口 → upstream 主/备 → 网关节点。故障切换靠 proxy_next_upstream。
-/// SSE 流式：proxy_buffering off + 长 read timeout。
-

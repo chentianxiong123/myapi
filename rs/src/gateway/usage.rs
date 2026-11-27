@@ -1,8 +1,8 @@
-//! usage token 解析/合并（纯函数，从 gateway.rs 拆出）
-/// usage 四元组（input/output/cache_read/cache_creation）
-pub type Usage = (Option<i64>, Option<i64>, Option<i64>, Option<i64>);
+//! usage（从 gateway.rs 精确拆分）
+use super::*;
 
-fn parse_usage(body: &[u8]) -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
+/// 从非流式响应解析 usage（OpenAI 格式 usage.input_tokens/output_tokens）
+pub(crate) fn parse_usage(body: &[u8]) -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
     let v: serde_json::Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(_) => return (None, None, None, None),
@@ -10,7 +10,39 @@ fn parse_usage(body: &[u8]) -> (Option<i64>, Option<i64>, Option<i64>, Option<i6
     parse_usage_json(&v)
 }
 
-fn merge_usage(
+/// 从 usage JSON 提取 (input, output, cache_read, cache_creation)
+/// 抄 LiteLLM/llms-types 字段名：OpenAI prompt_tokens_details.cached_tokens /
+/// cache_creation_tokens；Anthropic cache_read_input_tokens / cache_creation_input_tokens
+pub(crate) fn parse_usage_json(v: &serde_json::Value) -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
+    // usage 位置因协议而异：
+    //   OpenAI/Anthropic: usage 字段
+    //   Gemini: 顶层 usageMetadata（promptTokenCount/candidatesTokenCount）
+    let u = if let Some(u) = v.get("usage") {
+        if !u.is_null() { u } else { return (None, None, None, None) }
+    } else if let Some(g) = v.get("usageMetadata") {
+        if !g.is_null() { g } else { return (None, None, None, None) }
+    } else {
+        return (None, None, None, None);
+    };
+    let get = |k: &str| u.get(k).and_then(|x| x.as_i64());
+    // input: OpenAI prompt_tokens / Anthropic input_tokens / Gemini promptTokenCount
+    let input = get("input_tokens").or_else(|| get("prompt_tokens")).or_else(|| get("promptTokenCount"));
+    // output: OpenAI completion_tokens / Anthropic output_tokens / Gemini candidatesTokenCount
+    let output = get("output_tokens").or_else(|| get("completion_tokens")).or_else(|| get("candidatesTokenCount"));
+    // cache read: OpenAI prompt_tokens_details.cached_tokens；Anthropic cache_read_input_tokens；Gemini cachedContentTokenCount
+    let cache_read = get("cache_read_input_tokens")
+        .or_else(|| get("cachedContentTokenCount"))
+        .or_else(|| u.get("prompt_tokens_details").and_then(|d| d.get("cached_tokens")).and_then(|x| x.as_i64()));
+    // cache creation: Anthropic cache_creation_input_tokens；OpenAI cache_creation_tokens
+    let cache_creation = get("cache_creation_input_tokens")
+        .or_else(|| u.get("prompt_tokens_details").and_then(|d| d.get("cache_creation_tokens")).and_then(|x| x.as_i64()));
+    (input, output, cache_read, cache_creation)
+}
+
+/// 合并两个 usage 元组：逐字段取非 None（后者优先）。用于流式跨 chunk 累积——
+/// Anthropic 把 usage 拆两处（message_start 带 input，message_delta 带 output），
+/// 必须合并而非"取最后一个"，否则丢 input。
+pub(crate) fn merge_usage(
     a: (Option<i64>, Option<i64>, Option<i64>, Option<i64>),
     b: (Option<i64>, Option<i64>, Option<i64>, Option<i64>),
 ) -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
@@ -22,7 +54,12 @@ fn merge_usage(
     )
 }
 
-fn sse_scan_usage(buf: &[u8]) -> Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> {
+/// 扫描 SSE 缓冲里所有 `data:` 行，累积合并各 chunk 的 usage token。
+/// 覆盖三种协议的流式格式：
+///   OpenAI：最后 chunk 的 usage.prompt_tokens/completion_tokens
+///   Anthropic：message_start.usage.input_tokens + message_delta.usage.output_tokens（分片）
+///   Gemini：chunk 顶层 usageMetadata.promptTokenCount/candidatesTokenCount
+pub(crate) fn sse_scan_usage(buf: &[u8]) -> Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> {
     let s = std::str::from_utf8(buf).ok()?;
     let mut usage: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = None;
     for line in s.lines() {

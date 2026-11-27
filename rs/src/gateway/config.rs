@@ -1,14 +1,16 @@
-//! 配置结构（从 gateway.rs 拆出：config 独立模块）
+//! config（从 gateway.rs 精确拆分）
 use super::*;
-use serde;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
-// 配置相关默认值/结构（Retry/Sticky/Timeout/Routing/Gateway/Auth/Cache/Circuit）
+/// 密钥池里的一条命名密钥
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedKey {
+    pub name: String,
+    #[serde(rename = "api-key", alias = "api_key")]
+    pub api_key: String,
+}
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+/// 重试策略（全局默认，每通道可用 retry 字段覆盖部分项）。学 LiteLLM retry/allowed_fails_policy
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryConfig {
     /// 最大重试次数（failover 尝试多少条通道）
     #[serde(default = "def_retry_max")]
@@ -41,21 +43,22 @@ pub struct RetryConfig {
     pub context_keywords: Vec<String>,
 }
 
-fn def_retry_max() -> usize { 3 }
+pub(crate) fn def_retry_max() -> usize { 3 }
 
-fn def_retry_on_status() -> Vec<u16> { vec![408, 409, 429, 500, 502, 503, 504] }
+pub(crate) fn def_retry_on_status() -> Vec<u16> { vec![408, 409, 429, 500, 502, 503, 504] }
 
-fn def_fatal_status() -> Vec<u16> { vec![400, 401, 403, 404] }
+pub(crate) fn def_fatal_status() -> Vec<u16> { vec![400, 401, 403, 404] }
 
-fn def_backoff_initial() -> u64 { 500 }
+pub(crate) fn def_backoff_initial() -> u64 { 500 }
 
-fn def_backoff_max() -> u64 { 8000 }
+pub(crate) fn def_backoff_max() -> u64 { 8000 }
 
-fn def_jitter() -> f64 { 0.75 }
+pub(crate) fn def_jitter() -> f64 { 0.75 }
 
-fn def_respect_retry_after() -> bool { true }
+pub(crate) fn def_respect_retry_after() -> bool { true }
 
-fn def_disable_keywords() -> Vec<String> {
+/// 关键词熔断默认词表（学 new-api，覆盖常见欠费/封号/配额耗尽表述）
+pub(crate) fn def_disable_keywords() -> Vec<String> {
     vec![
         "insufficient quota".into(),
         "insufficient_quota".into(),
@@ -69,7 +72,8 @@ fn def_disable_keywords() -> Vec<String> {
     ]
 }
 
-fn def_context_keywords() -> Vec<String> {
+/// 上下文不足默认词表（context_length_exceeded 等）：模型窗口装不下请求
+pub(crate) fn def_context_keywords() -> Vec<String> {
     vec![
         "context_length_exceeded".into(),
         "maximum context length".into(),
@@ -106,7 +110,107 @@ impl RetryConfig {
     }
 }
 
-    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// 通道级重试覆盖：只配想改的字段，None=继承全局 RetryConfig
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RetryOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_on_status: Option<Vec<u16>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fatal_status: Option<Vec<u16>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff_initial_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff_max_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub respect_retry_after: Option<bool>,
+}
+
+/// 通道：供应商内部一条具体接入方式（key × 路径 × 模型映射三件套绑死，学 LiteLLM Deployment）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Channel {
+    pub id: String,
+    pub name: String,
+    /// 网络路径描述（IPv4/IPv6）；空=直连/继承供应商代理
+    #[serde(default)]
+    pub path: Option<String>,
+    /// 引用密钥池的名字；空=用第一个「主」密钥
+    #[serde(default)]
+    pub key_name: Option<String>,
+    /// 该通道覆盖的模型映射：上游真实名 → 可选对外别名
+    #[serde(default)]
+    pub models: Vec<ChannelModel>,
+    /// 路由权重（默认 1）
+    #[serde(default = "default_weight")]
+    pub weight: u32,
+    /// 每分钟请求上限（RPM，空=不限）；超限当不可用跳过（防打爆上游）
+    #[serde(default)]
+    pub rpm: Option<u32>,
+    /// 通道级重试覆盖（空=继承全局 retry）；只配想改的字段
+    #[serde(default)]
+    pub retry: Option<RetryOverride>,
+    /// 该通道模型的最大输入 token（上下文窗口过滤：超长请求跳过装不下的通道）
+    #[serde(default)]
+    pub max_input_tokens: Option<i64>,
+}
+
+pub(crate) fn default_weight() -> u32 { 1 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChannelModel {
+    /// 上游真实模型名
+    pub name: String,
+    /// 对外别名（空=用 name）
+    #[serde(default)]
+    pub alias: Option<String>,
+    /// 硬能力（vision/pdf/audio，学 9router HARD_CAPS）；Auto 模式按请求需求匹配
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// 协议（openai_chat/openai_responses/anthropic/gemini/ollama，前端配置）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    /// 模型类型（chat/webSearch/webFetch/embedding/vision，前端配置）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// 模型级上下文窗口（token）：上下文错误反馈时跳过装不下的（配置时填，运行时零成本）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<i64>,
+    /// 档位标注（对标 Gemini pro/flash）：pro=质量型、flash=速度型；空=auto 专属
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+}
+
+/// 供应商：上游一个厂商（含密钥池 + 多条通道）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Provider {
+    pub name: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub disabled: bool,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    /// 密钥池（第一个默认「主」）
+    #[serde(default)]
+    pub keys: Vec<NamedKey>,
+    /// 通道列表（供应商的子层）
+    #[serde(default)]
+    pub channels: Vec<Channel>,
+    /// 渠道级代理（空=直连）
+    #[serde(default)]
+    pub proxy: String,
+    /// 代理池引用（学 9router proxyPools；空=不用池）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proxy_pool_id: String,
+    /// 代理池选择策略（round-robin/random/none）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proxy_strategy: String,
+}
+
+/// 网关配置（config/gateway.yaml）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GatewayConfig {
     #[serde(default = "def_listen")]
     pub listen: u16,
@@ -156,7 +260,8 @@ impl GatewayConfig {
     }
 }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+/// 通道测试配置（用户可编辑，放 gateway.yaml，学 new-api TestChannel 的可配置测试内容）
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestConfig {
     /// 测试用的默认模型（空=用通道第一个模型）
     #[serde(default)]
@@ -169,9 +274,9 @@ pub struct TestConfig {
     pub max_tokens: i64,
 }
 
-fn def_test_message() -> String { "ping".into() }
+pub(crate) fn def_test_message() -> String { "ping".into() }
 
-fn def_test_max_tokens() -> i64 { 16 }
+pub(crate) fn def_test_max_tokens() -> i64 { 16 }
 
 impl Default for TestConfig {
     fn default() -> Self {
@@ -179,7 +284,8 @@ impl Default for TestConfig {
     }
 }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+/// 响应缓存配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseCacheConfig {
     /// 是否启用
     #[serde(default)]
@@ -192,9 +298,9 @@ pub struct ResponseCacheConfig {
     pub max_entries: usize,
 }
 
-fn def_cache_ttl() -> u64 { 300 }
+pub(crate) fn def_cache_ttl() -> u64 { 300 }
 
-fn def_cache_max_entries() -> usize { 1000 }
+pub(crate) fn def_cache_max_entries() -> usize { 1000 }
 
 impl Default for ResponseCacheConfig {
     fn default() -> Self {
@@ -202,9 +308,33 @@ impl Default for ResponseCacheConfig {
     }
 }
 
-fn def_listen() -> u16 { 8380 }
+/// 模型级降级链配置
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelFallbackConfig {
+    /// 是否启用
+    #[serde(default)]
+    pub enabled: bool,
+    /// 降级链：主模型 → [备选模型...]（按序尝试）。键=对外请求的模型名
+    #[serde(default)]
+    pub chains: std::collections::HashMap<String, Vec<String>>,
+}
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) fn def_listen() -> u16 { 8380 }
+
+/// TTFT 滑动窗口大小（学 LiteLLM lowest_latency max_latency_list_size=10）
+/// 注：算法常量，未做成产品配置（record_outcome 有 26+ 调用点，参数化收益低风险高）。
+/// 前端 latency_window_seconds 为「秒」语义，与本处「条数」不一致，故该字段当前仅存档。
+pub(crate) const LATENCY_WINDOW_SIZE: usize = 10;
+
+/// 延迟 buffer 比例（学 lowest_latency_buffer，避免延迟接近时反复横跳）
+pub(crate) const LATENCY_BUFFER_RATIO: f64 = 0.2;
+
+/// 无延迟记录通道的中性分数（低于已知的差通道，但不抢最快的）
+/// 注：算法常量（非产品配置），60s 是经验值。
+pub(crate) const NEUTRAL_LATENCY_SCORE: f64 = 60_000.0;
+
+/// 熔断器配置（学 cc-switch 三态机 + LiteLLM 失败率判定）
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CircuitBreakerConfig {
     /// 连续失败多少次开熔断（建议 3-10）
     #[serde(default = "def_failure_threshold")]
@@ -223,15 +353,15 @@ pub struct CircuitBreakerConfig {
     pub recovery_success_threshold: u32,
 }
 
-fn def_failure_threshold() -> u32 { 5 }
+pub(crate) fn def_failure_threshold() -> u32 { 5 }
 
-fn def_error_rate() -> u64 { 50 }
+pub(crate) fn def_error_rate() -> u64 { 50 }
 
-fn def_min_requests() -> u64 { 5 }
+pub(crate) fn def_min_requests() -> u64 { 5 }
 
-fn def_recovery_timeout() -> u64 { 30 }
+pub(crate) fn def_recovery_timeout() -> u64 { 30 }
 
-fn def_recovery_success() -> u32 { 3 }
+pub(crate) fn def_recovery_success() -> u32 { 3 }
 
 impl Default for CircuitBreakerConfig {
     fn default() -> Self {
@@ -245,7 +375,8 @@ impl Default for CircuitBreakerConfig {
     }
 }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+/// 黏性路由配置（学 LiteLLM deployment affinity，为 prompt cache 省token）
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StickyConfig {
     #[serde(default = "def_sticky_enabled")]
     pub enabled: bool,
@@ -257,9 +388,9 @@ pub struct StickyConfig {
     pub granularity: Option<String>,
 }
 
-fn def_sticky_enabled() -> bool { true }
+pub(crate) fn def_sticky_enabled() -> bool { true }
 
-fn def_sticky_ttl() -> u64 { 300 }
+pub(crate) fn def_sticky_ttl() -> u64 { 300 }
 
 impl Default for StickyConfig {
     fn default() -> Self {
@@ -267,7 +398,22 @@ impl Default for StickyConfig {
     }
 }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+/// 路由策略（可配置，学 LiteLLM routing_strategy）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RoutingStrategy {
+    /// 延迟感知（平均 TTFT 最低优先，默认）
+    #[default]
+    LatencyBased,
+    /// 权重（按 Channel.weight 加权随机）
+    Weight,
+    /// 随机（简单洗牌）
+    SimpleShuffle,
+    /// 最闲（并发最低，暂用总请求数代理）
+    LeastBusy,
+}
+
+/// 路由策略配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingConfig {
     #[serde(default)]
     pub strategy: RoutingStrategy,
@@ -294,9 +440,9 @@ pub struct RoutingConfig {
     pub when_all_unhealthy: Option<String>,
 }
 
-fn def_max_retries() -> usize { 3 }
+pub(crate) fn def_max_retries() -> usize { 3 }
 
-fn def_auto_enabled() -> bool { true }
+pub(crate) fn def_auto_enabled() -> bool { true }
 
 impl Default for RoutingConfig {
     fn default() -> Self {
@@ -305,7 +451,8 @@ impl Default for RoutingConfig {
     }
 }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+/// 超时配置（学 cc-switch 流式/非流式分开）
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeoutConfig {
     /// 流式首字超时秒（TTFT 上限）
     #[serde(default = "def_stream_first_byte")]
@@ -318,11 +465,11 @@ pub struct TimeoutConfig {
     pub streaming_idle: u64,
 }
 
-fn def_stream_first_byte() -> u64 { 30 }
+pub(crate) fn def_stream_first_byte() -> u64 { 30 }
 
-fn def_non_streaming() -> u64 { 120 }
+pub(crate) fn def_non_streaming() -> u64 { 120 }
 
-fn def_streaming_idle() -> u64 { 60 }
+pub(crate) fn def_streaming_idle() -> u64 { 60 }
 
 impl Default for TimeoutConfig {
     fn default() -> Self {
@@ -334,7 +481,8 @@ impl Default for TimeoutConfig {
     }
 }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+/// 下游鉴权配置（agent 调网关时校验 Bearer key，防裸奍）
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     /// 允许的下游 key 列表（空=不鉴权，本机内网可用；配了=严格校验 Bearer）。
     /// 支持两种形态：字符串 `sk-xxx`（无设备名）或对象 `{name: "手机", key: "sk-xxx"}`（多设备身份区分）。
@@ -345,14 +493,22 @@ pub struct AuthConfig {
     pub daily_token_budget: Option<i64>,
 }
 
+/// 下游 key：裸字符串（无设备名）或带设备名对象。untagged 向后兼容 `api_keys: ["sk-1"]`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AuthKey {
+    Plain(String),
+    Named { name: String, key: String },
+}
+
 impl AuthKey {
-    fn key(&self) -> &str {
+    pub(crate) fn key(&self) -> &str {
         match self { AuthKey::Plain(k) => k, AuthKey::Named { key, .. } => key }
     }
-    fn device_name(&self) -> &str {
+    pub(crate) fn device_name(&self) -> &str {
         match self { AuthKey::Plain(k) => k, AuthKey::Named { name, .. } => name }
     }
-    fn matches(&self, token: &str) -> bool { self.key() == token }
+    pub(crate) fn matches(&self, token: &str) -> bool { self.key() == token }
 }
 
 impl Default for AuthConfig {
@@ -361,6 +517,8 @@ impl Default for AuthConfig {
     }
 }
 
+/// 校验下游 Bearer key（api_keys 空=不鉴权内网可用；配了=严格校验）。
+/// 返回设备名（多设备身份区分：Named 的 name；Plain 用 key 本身）；未配返回 None。
 pub fn validate_auth(auth: &AuthConfig, auth_header: Option<&str>) -> Result<Option<String>, String> {
     if auth.api_keys.is_empty() {
         return Ok(None); // 未配 key → 不鉴权（本机/内网）
@@ -379,6 +537,7 @@ pub fn validate_auth(auth: &AuthConfig, auth_header: Option<&str>) -> Result<Opt
     Err("无效的 API key".into())
 }
 
+/// 取下游设备名（多设备身份区分：Named→name；Plain→key 本身；未配→原始 key 兜底）
 pub(crate) fn downstream_key(auth: &AuthConfig, auth_header: Option<&str>) -> Option<String> {
     let token = auth_header.and_then(|h| h.strip_prefix("Bearer "))?;
     for k in &auth.api_keys {
@@ -387,4 +546,16 @@ pub(crate) fn downstream_key(auth: &AuthConfig, auth_header: Option<&str>) -> Op
         }
     }
     Some(token.to_string())
+}
+
+/// 选中的通道 + 解析出的上游真实模型名 + 用的 key
+pub struct SelectedChannel {
+    pub provider: Provider,
+    pub channel: Channel,
+    /// 上游真实模型名（把请求里的 alias 翻译回 name）
+    pub upstream_model: String,
+    /// 实际用的 API key（从密钥池解析）
+    pub api_key: String,
+    /// 上游协议（ChannelModel.protocol）：None/"chat"=OpenAI chat；"anthropic"=Claude 上游
+    pub protocol: Option<String>,
 }

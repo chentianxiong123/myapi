@@ -1,6 +1,58 @@
-//! 多机 HA Nginx 配置生成（从 forward.rs 拆出）
+//! nginx（从 gateway.rs 精确拆分）
 use super::*;
 
+pub async fn probe_upstream(root: &std::path::Path) -> Vec<serde_json::Value> {
+    let config = load_config(root);
+    let client = match reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let mut out = Vec::new();
+    for p in &config.providers {
+        if p.disabled {
+            continue;
+        }
+        let base = p.base_url.trim_end_matches('/');
+        let url = format!("{}/models", base);
+        for c in &p.channels {
+            let api_key = resolve_key(p, c).unwrap_or_default();
+            let start = std::time::Instant::now();
+            let mut req = client.get(&url).header("Authorization", format!("Bearer {}", api_key));
+            for (k, v) in &p.headers {
+                req = req.header(k.as_str(), v.as_str());
+            }
+            let (live, status_code, err) = match req.send().await {
+                Ok(r) => {
+                    let sc = r.status().as_u16();
+                    // 401/403 说明上游活着（只是 key 问题）；2xx/429 都算可达
+                    let ok = sc < 500;
+                    (ok, sc, String::new())
+                }
+                Err(e) => (false, 0, e.to_string()),
+            };
+            let latency = start.elapsed().as_millis() as u64;
+            out.push(serde_json::json!({
+                "provider": p.name,
+                "channel": c.name,
+                "channel_id": c.id,
+                "live": live,
+                "status": if live { "healthy" } else { "unreachable" },
+                "status_code": status_code,
+                "latency_ms": latency,
+                "error": err,
+            }));
+        }
+    }
+    out
+}
+
+/// 生成 Nginx 高可用配置（学 new-api 多机部署）：从 deploy 配置生成完整 nginx.conf
+/// 客户端 → Nginx 固定入口 → upstream 主/备 → 网关节点。故障切换靠 proxy_next_upstream。
+/// SSE 流式：proxy_buffering off + 长 read timeout。
 pub fn generate_nginx_conf(deploy: &serde_json::Value) -> String {
     let entry = deploy.get("entry").cloned().unwrap_or_else(|| serde_json::json!({}));
     let listen = entry.get("listen").and_then(|v| v.as_u64()).unwrap_or(8380);
