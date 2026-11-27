@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "myapi"
-version = "0.1.0"
+version = "1.3.0"
 dependencies = [
  "axum",
  "bytes",
@@ -820,6 +820,7 @@ dependencies = [
  "futures-util",
  "glob",
  "http-body-util",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",
