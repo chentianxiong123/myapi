@@ -105,8 +105,9 @@ class Harness:
         # 起网关（MYAPI_ROOT 隔离）
         env = dict(os.environ)
         env["MYAPI_ROOT"] = self.tmpdir
+        self._myapi_err = open(os.path.join(self.tmpdir, "myapi.err"), "w", encoding="utf-8")
         self.gateway_proc = subprocess.Popen(
-            [MYAPI_BIN], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            [MYAPI_BIN], env=env, stdout=subprocess.DEVNULL, stderr=self._myapi_err,
         )
         self._wait_ready(self.upstream_url + "/v1/models", is_upstream=True)
         self._wait_ready(self.base_url + "/api/config", is_upstream=False)

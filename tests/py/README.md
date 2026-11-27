@@ -6,14 +6,16 @@
 ## 运行
 
 ```bash
-# 1. 编译 myapi 二进制（本机实测例外，用户已允）
-cd rs && cargo build
+# 1. 编译 myapi 二进制（**win11 编译机**，本机绝不编译）
+ssh win11 'cd C:\Users\a1\myapi\rs && cargo build'
 
-# 2. 跑全部场景（10 个）
-cd tests/py && python3 run_all.py
+# 2. 跑全部场景（23 个，**win11**，本机已清 rust 产物不编译）
+ssh win11 'cmd /c "cd /d C:\Users\a1\myapi\tests\py && set MYAPI_BIN=C:\Users\a1\myapi\rs\target\debug\myapi.exe && python run_all.py"'
 
 # 3. 跑单个场景
-python3 run_all.py protocol_matrix
+ssh win11 'cmd /c "cd /d C:\Users\a1\myapi\tests\py && set MYAPI_BIN=C:\Users\a1\myapi\rs\target\debug\myapi.exe && python run_all.py protocol_matrix"'
+
+> MYAPI_BIN 环境变量指向 myapi 二进制（win11 用 myapi.exe，本机用 myapi）。
 ```
 
 ## 目录
@@ -84,4 +86,6 @@ python3 run_all.py protocol_matrix
 ## 与 Rust 测试的分工
 
 - **Rust 单测（win11，228）**：协议转换/调度/熔断等单元级 + wiremock 端点。
-- **Python 假测试（本机，10 场景）**：全流程真链路（真 myapi + 真 HTTP + 假上游）。
+- **Python 假测试（win11，23 场景）**：全流程真链路（真 myapi.exe + 真 HTTP + 假上游）。
+  - **本机不编译**（铁律）：本机已清 rs/target + cargo 缓存；假测试挪 win11（win11 编译机）。
+  - win11 myapi.exe 独立启动曾卡住（陈旧产物），重编译即愈；启动正常标准 = 2s 内监听 panel_port。
