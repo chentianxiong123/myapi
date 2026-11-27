@@ -126,6 +126,13 @@ def build_handler(fu):
                         self._json({"error": {"type": "insufficient_quota" if code in (402, 403) else "error",
                                               "message": f"{kw}（上游关键词命中）"}}, code)
                         return
+            if fu.cfg.get("bad_json"):
+                # 坏数据：非法 JSON（测网关容错不 panic）
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{bad json not parse")
+                return
             reply = fu.cfg.get("model_reply", "你好，这是假上游回复")
             usage = fu.cfg.get("usage", {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
             # 超长上下文 → 400 context（学 new-api / LiteLLM）

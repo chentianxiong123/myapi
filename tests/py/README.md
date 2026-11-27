@@ -39,6 +39,15 @@ python3 run_all.py protocol_matrix
 | `model_fallback_chain` | gpt-4 失败→降级 gpt-4o（需 `model_fallback.enabled: true`） |
 | `response_cache` | 相同请求第二次命中（上游只调 1 次；缓存只在 `forward_generic` 非档位路径） |
 
+### 更狠场景（长稳/大响应/坏数据/鉴权/流式多轮）
+| 场景 | 覆盖 |
+|------|------|
+| `long_run_stability` | 300 并发请求全过 + 日志 total=300 ok=300 |
+| `large_response` | 50KB 内容完整透传（不截断/不坏） |
+| `bad_upstream_data` | 上游非法 JSON → 网关容错 502（不透传坏数据，不 panic） |
+| `auth_matrix` | 多设备 key 都通过 + 错 key/无 key 401 |
+| `multi_turn_streaming` | 流式多轮（2 轮流式 + 日志对齐） |
+
 ### 基础场景（10 个）
 
 | 场景 | 覆盖 |

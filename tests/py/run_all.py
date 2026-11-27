@@ -414,6 +414,108 @@ def test_response_cache(upstream_port, panel_port):
         print("  ✓ 响应缓存（相同请求第二次命中，上游只调 1 次）")
 
 
+
+# ---------- 更狠场景（长稳/大响应/坏数据/鉴权/流式多轮） ----------
+def test_long_run_stability(upstream_port, panel_port):
+    """长稳：300 并发请求全过 + 日志不漏（total/success 对齐）。"""
+    import threading, time as _t
+    base = f"http://127.0.0.1:{upstream_port}"
+    prov = provider(base + "/v1", [
+        channel("ch1", models("m1", protocol="openai_chat")),
+        channel("ch2", models("m2", protocol="openai_chat")),
+    ])
+    with Harness(providers=[prov], upstream_port=upstream_port, panel_port=panel_port) as h:
+        results = []
+        def worker():
+            s, d = h.request("/v1/chat/completions", fc.chat_request("auto", stream=False))
+            results.append((s, d))
+        for round in range(3):
+            threads = [threading.Thread(target=worker) for _ in range(100)]
+            for t in threads: t.start()
+            for t in threads: t.join()
+            assert all(s == 200 for s, d in results[round*100:(round+1)*100]), f"第{round}轮有失败"
+        _t.sleep(0.8)
+        summary = h.query_summary()
+        assert summary.get("total", 0) >= 300, f"日志应 ≥300: {summary}"
+        assert summary.get("success", 0) >= 300, f"日志 success 应 ≥300: {summary}"
+        print(f"  ✓ 长稳（300 并发全过 + 日志 total={summary.get('total')} ok={summary.get('success')}）")
+
+
+def test_large_response(upstream_port, panel_port):
+    """大响应：50KB 内容完整透传（不截断/不坏）。"""
+    import json as _json
+    base = f"http://127.0.0.1:{upstream_port}"
+    big = "测" * 25000  # 50KB UTF-8
+    prov = provider(base + "/v1", [channel("ch1", models("m1", protocol="openai_chat"))])
+    with Harness(upstream_cfg={"model_reply": big}, providers=[prov],
+                 upstream_port=upstream_port, panel_port=panel_port) as h:
+        s, d = h.request("/v1/chat/completions", fc.chat_request("auto", stream=False))
+        assert s == 200, f"大响应应 200: {s}"
+        content = d["choices"][0]["message"]["content"]
+        assert len(content) == len(big), f"大响应应完整透传: {len(content)} vs {len(big)}"
+        assert content == big, "大响应内容应一致"
+        print(f"  ✓ 大响应（{len(big)} 字符完整透传）")
+
+
+def test_bad_upstream_data(upstream_port, panel_port):
+    """坏数据：上游返回非法 JSON → 网关容错 502（不 panic/不挂）。"""
+    base = f"http://127.0.0.1:{upstream_port}"
+    prov = provider(base + "/v1", [channel("ch1", models("m1", protocol="openai_chat"))])
+    with Harness(upstream_cfg={"bad_json": True}, providers=[prov],
+                 upstream_port=upstream_port, panel_port=panel_port) as h:
+        s, d = h.request("/v1/chat/completions", fc.chat_request("auto", stream=False))
+        assert s == 502, f"坏数据应容错 502（非 panic）: {s} {d}"
+        # 网关仍活着：下一个正常请求（换配置？bad_json 关不掉）——至少再发一次仍 502 不挂
+        s2, d2 = h.request("/v1/chat/completions", fc.chat_request("auto", stream=False))
+        assert s2 == 502, f"连续坏数据应仍 502: {s2}"
+        print("  ✓ 坏数据容错（非法 JSON→502，网关不挂）")
+
+
+def test_auth_matrix(upstream_port, panel_port):
+    """鉴权矩阵：多设备 key 都通过 + 错 key 401 + 无 key 401。"""
+    base = f"http://127.0.0.1:{upstream_port}"
+    prov = provider(base + "/v1", [channel("ch1", models("m1", protocol="openai_chat"))])
+    auth = {"auth": {"api_keys": [
+        {"name": "手机", "key": "phone-key"},
+        {"name": "电脑", "key": "pc-key"},
+    ]}}
+    with Harness(providers=[prov], gateway_cfg=auth, upstream_port=upstream_port, panel_port=panel_port) as h:
+        # 正确 key 通过
+        for k in ["phone-key", "pc-key"]:
+            s, d = h.request("/v1/chat/completions", fc.chat_request("auto", stream=False),
+                             headers={"Authorization": f"Bearer {k}"})
+            assert s == 200, f"{k} 应 200: {s} {d}"
+        # 错 key 401、无 key 401
+        s, _ = h.request("/v1/chat/completions", fc.chat_request("auto", stream=False),
+                         headers={"Authorization": "Bearer wrong-key"})
+        assert s == 401, f"错 key 应 401: {s}"
+        s, _ = h.request("/v1/chat/completions", fc.chat_request("auto", stream=False))
+        assert s == 401, f"无 key 应 401: {s}"
+        print("  ✓ 鉴权矩阵（手机/电脑 key 通过 + 错 key/无 key 401）")
+
+
+def test_multi_turn_streaming(upstream_port, panel_port):
+    """流式多轮：2 轮流式对话（带历史），内容完整 + 日志 2 条。"""
+    import requests as _req
+    import time as _t
+    base = f"http://127.0.0.1:{upstream_port}"
+    prov = provider(base + "/v1", [channel("ch1", models("m1", protocol="openai_chat"))])
+    with Harness(providers=[prov], upstream_port=upstream_port, panel_port=panel_port) as h:
+        # 第一轮流式
+        r1 = _req.post(h.base_url + "/v1/chat/completions", json=fc.chat_request("auto"), timeout=30)
+        assert "[DONE]" in r1.text, f"第一轮流式应 [DONE]: {r1.text[:100]}"
+        # 第二轮流式（带第一轮 assistant 历史）
+        body2 = fc.chat_request("auto")
+        body2["messages"].append({"role": "assistant", "content": "你好，这是假上游回复"})
+        body2["messages"].append({"role": "user", "content": "继续"})
+        r2 = _req.post(h.base_url + "/v1/chat/completions", json=body2, timeout=30)
+        assert "[DONE]" in r2.text, f"第二轮流式应 [DONE]: {r2.text[:100]}"
+        _t.sleep(0.5)
+        summary = h.query_summary()
+        assert summary.get("total", 0) == 2, f"日志应 2 条: {summary}"
+        print(f"  ✓ 流式多轮（2 轮流式 + 日志 total=2 ok={summary.get('success')}）")
+
+
 SCENARIOS = {
     "protocol_matrix": test_protocol_matrix,
     "tier_routing": test_tier_routing,
@@ -433,6 +535,11 @@ SCENARIOS = {
     "upstream_anthropic_forward": test_upstream_anthropic_forward,
     "model_fallback_chain": test_model_fallback_chain,
     "response_cache": test_response_cache,
+    "long_run_stability": test_long_run_stability,
+    "large_response": test_large_response,
+    "bad_upstream_data": test_bad_upstream_data,
+    "auth_matrix": test_auth_matrix,
+    "multi_turn_streaming": test_multi_turn_streaming,
 }
 
 

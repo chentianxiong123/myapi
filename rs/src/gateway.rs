@@ -1912,12 +1912,35 @@ async fn forward_one(
                 None => raw_bytes,
             }
         } else { raw_bytes };
+        // 坏数据容错：非流式 2xx 响应 body 应按 API 契约是 JSON（以 {/[ 开头）。
+        // 解析失败 → 不透传坏数据给客户端，记失败并触发 failover（全废 502）。
+        let looks_json = body_bytes.iter().copied()
+            .skip_while(|b| b.is_ascii_whitespace())
+            .next().map(|b| b == b'{' || b == b'[').unwrap_or(false);
+        if looks_json && serde_json::from_slice::<serde_json::Value>(&body_bytes).is_err() {
+            crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
+                model: selected.upstream_model.clone(),
+                provider: selected.provider.name.clone(),
+                channel: selected.channel.name.clone(),
+                status: status.as_u16(),
+                latency_ms: start.elapsed().as_millis() as u64,
+                ttft_ms: ttft,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                downstream_key: dkey.map(|s| s.to_string()),
+                error: Some("上游返回非法 JSON".to_string()),
+            }).await;
+            return Err(ForwardError::Retryable { status: Some(502), retry_after: None, msg: "上游返回非法 JSON".to_string() });
+        }
         // 档位请求：响应 model 字段回显档位名（客户端配的 model 名，对称）；
         // 客户端如 Claude Code 用它配的 model 名做内部判断（上下文窗口），真实模型名已记日志
         let body_bytes = if requested_model == "pro" || requested_model == "flash" || requested_model == "auto" {
-            let mut v: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
-            if v.is_object() { v["model"] = serde_json::json!(requested_model); }
-            serde_json::to_vec(&v).unwrap_or(body_bytes)
+            match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                Ok(mut v) => { if v.is_object() { v["model"] = serde_json::json!(requested_model); } serde_json::to_vec(&v).unwrap_or(body_bytes) }
+                Err(_) => body_bytes, // 已在上方容错 502，理论不可达
+            }
         } else { body_bytes };
         let (in_tok, out_tok, cache_read, cache_creation) = parse_usage(&body_bytes);
         crate::gateway_logs::log_request(root.to_path_buf(), crate::gateway_logs::LogEntry {
