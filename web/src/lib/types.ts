@@ -355,10 +355,10 @@ export type WhenAllUnhealthy = 'keep-all' | 'fail'
 // 路由策略配置（后端读取，前端可配）
 export interface RoutingConfig {
   strategy: RoutingStrategy
-  latency_window_seconds: number       // TTFT 滑动窗口
+  latency_window_seconds: number       // TTFT 滑动窗口（后端当前按最近 10 个样本统计，秒值暂仅存档）
   sticky: {
     enabled: boolean
-    granularity: StickyGranularity
+    granularity: StickyGranularity     // 黏性粒度：session/api-key/continuity（后端已生效）
     ttl_seconds: number                // 会话亲和 TTL
   }
   circuit_breaker: {
@@ -370,13 +370,13 @@ export interface RoutingConfig {
   }
   timeout: {
     streaming_first_byte: number       // 流式首字超时（秒）
-    streaming_idle: number             // 流式空闲超时（秒）
+    streaming_idle: number             // 流式空闲超时（秒）——已存储，后端空闲超时逻辑待实现
     non_streaming: number              // 非流式超时（秒）
   }
   when_all_unhealthy: WhenAllUnhealthy
   auto_mode: {
     enabled: boolean                   // 全自动 Auto 路由（未来）
-    capability_match: boolean          // capability 匹配（vision/pdf 优先）
+    capability_match: boolean          // capability 匹配（硬约束：带图/带思考必满足，不可关闭；字段保留兼容）
   }
 }
 

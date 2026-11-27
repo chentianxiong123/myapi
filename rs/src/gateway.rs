@@ -346,7 +346,8 @@ fn apply_strategy(
     hs: Option<&HashMap<String, ChannelHealth>>,
     cb: &CircuitBreakerConfig,
     strategy: &RoutingStrategy,
-) -> usize {
+    when_all: &str,
+) -> Option<usize> {
     // 收集可用候选索引 + 健康度
     let available: Vec<(usize, Option<&ChannelHealth>)> = candidates.iter().enumerate()
         .map(|(i, (_, ch, _))| {
@@ -356,7 +357,8 @@ fn apply_strategy(
         .filter(|(_, h)| h.map(|x| is_available(x, cb)).unwrap_or(true))
         .collect();
     if available.is_empty() {
-        return 0; // 全熔断 → KeepAll 兑底第一个
+        // 全熔断兜底（可配置 keep-all/fail）：keep-all 用第一个，fail 直接无候选
+        return if when_all == "fail" { None } else { Some(0) };
     }
     match strategy {
         RoutingStrategy::LatencyBased => {
@@ -367,8 +369,8 @@ fn apply_strategy(
                     let sb = b.1.map(avg_ttft_with_buffer).unwrap_or(NEUTRAL_LATENCY_SCORE);
                     sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
                 })
-                .map(|(i, _)| *i)
-                .unwrap_or(0)
+                .map(|(i, _)| Some(*i))
+                .unwrap_or(Some(0))
         }
         RoutingStrategy::Weight => {
             // 按权重加权随机（学 LiteLLM weights.rs）
@@ -376,20 +378,20 @@ fn apply_strategy(
                 .map(|(i, _)| candidates[*i].1.weight)
                 .sum();
             if total == 0 {
-                return available[0].0;
+                return Some(available[0].0);
             }
             let mut pick = rand_range(total);
             for (i, _) in &available {
                 let w = candidates[*i].1.weight;
-                if pick < w { return *i; }
+                if pick < w { return Some(*i); }
                 pick -= w;
             }
-            available[available.len() - 1].0
+            Some(available[available.len() - 1].0)
         }
         RoutingStrategy::SimpleShuffle => {
             // 简单随机
             let n = available.len();
-            available[rand_range(n as u32) as usize].0
+            Some(available[rand_range(n as u32) as usize].0)
         }
         RoutingStrategy::LeastBusy => {
             // 最闲：总请求数最低（并发代理，暂用 total_requests）
@@ -399,8 +401,8 @@ fn apply_strategy(
                     let rb = b.1.map(|h| h.total_requests).unwrap_or(0);
                     ra.cmp(&rb)
                 })
-                .map(|(i, _)| *i)
-                .unwrap_or(0)
+                .map(|(i, _)| Some(*i))
+                .unwrap_or(Some(0))
         }
     }
 }
@@ -624,12 +626,15 @@ pub struct StickyConfig {
     /// pin 保持秒数（TTL，过期重选）
     #[serde(default = "def_sticky_ttl")]
     pub ttl_seconds: u64,
+    /// 黏性粒度（session/api-key/continuity，前端可配）
+    #[serde(default)]
+    pub granularity: Option<String>,
 }
 fn def_sticky_enabled() -> bool { true }
 fn def_sticky_ttl() -> u64 { 300 }
 impl Default for StickyConfig {
     fn default() -> Self {
-        Self { enabled: def_sticky_enabled(), ttl_seconds: def_sticky_ttl() }
+        Self { enabled: def_sticky_enabled(), ttl_seconds: def_sticky_ttl(), granularity: None }
     }
 }
 
@@ -692,14 +697,19 @@ pub struct TimeoutConfig {
     /// 非流式总超时秒
     #[serde(default = "def_non_streaming")]
     pub non_streaming: u64,
+    /// 流式空闲超时秒（两个 chunk 间上限；前端可配，对齐前后端字段）
+    #[serde(default = "def_streaming_idle")]
+    pub streaming_idle: u64,
 }
 fn def_stream_first_byte() -> u64 { 30 }
 fn def_non_streaming() -> u64 { 120 }
+fn def_streaming_idle() -> u64 { 60 }
 impl Default for TimeoutConfig {
     fn default() -> Self {
         Self {
             streaming_first_byte: def_stream_first_byte(),
             non_streaming: def_non_streaming(),
+            streaming_idle: def_streaming_idle(),
         }
     }
 }
@@ -944,7 +954,8 @@ pub fn select_channel(
 
     // 熔断过滤 + 按策略选通道（可配置：延迟感知/权重/随机/最闲）
     let hs = health_snapshot.as_deref();
-    let idx = apply_strategy(&candidates, hs, cb, &config.routing.strategy);
+    let when_all = config.routing.when_all_unhealthy.as_deref().unwrap_or("keep-all");
+    let Some(idx) = apply_strategy(&candidates, hs, cb, &config.routing.strategy, when_all) else { return None; };
     let (provider, channel, m) = candidates[idx];
     let api_key = resolve_key(provider, channel).unwrap_or_default();
     Some(SelectedChannel {
@@ -1014,7 +1025,18 @@ pub fn is_rate_limited(store: &RateStore, channel_id: &str, rpm: u32) -> bool {
 
 /// 从请求提取 session 标识（pin key）。
 /// 优先级：X-Session-Id header > Authorization Bearer key hash（学 LiteLLM api-key affinity）
-pub fn session_key(payload: &serde_json::Value, auth_header: Option<&str>) -> Option<String> {
+pub fn session_key(payload: &serde_json::Value, auth_header: Option<&str>, granularity: &str) -> Option<String> {
+    // api-key 粒度：只用下游 key hash（不读 session_id）
+    if granularity == "api-key" {
+        return hash_bearer(auth_header);
+    }
+    // continuity 粒度：只用 previous_response_id（Responses API 多轮连续）
+    if granularity == "continuity" {
+        if let Some(prev) = payload.get("previous_response_id").and_then(|v| v.as_str()) {
+            if !prev.is_empty() { return Some(format!("cont:{}", prev)); }
+        }
+        return None;
+    }
     // 1. 显式 session id（agent 传 X-Session-Id）
     if let Some(sid) = payload.get("session_id").and_then(|v| v.as_str()) {
         if !sid.is_empty() {
@@ -1022,9 +1044,13 @@ pub fn session_key(payload: &serde_json::Value, auth_header: Option<&str>) -> Op
         }
     }
     // 2. 下游 API key（同一 key 的连续请求黏同一通道）
+    hash_bearer(auth_header)
+}
+
+/// Bearer token → hash（不存明文）；无则 None
+fn hash_bearer(auth_header: Option<&str>) -> Option<String> {
     if let Some(auth) = auth_header {
         if let Some(token) = auth.strip_prefix("Bearer ") {
-            // hash 一下不存明文
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
             let mut h = DefaultHasher::new();
@@ -1080,7 +1106,8 @@ pub fn ordered_candidates(
         if candidates.is_empty() { return Vec::new(); }
     }
 
-    let first = apply_strategy(&candidates, hs, cb, strategy);
+    let when_all = config.routing.when_all_unhealthy.as_deref().unwrap_or("keep-all");
+    let Some(first) = apply_strategy(&candidates, hs, cb, strategy, when_all) else { return Vec::new(); };
     // 构造 SelectedChannel 列表：首选在前，其余按原序在后
     let mut ordered: Vec<SelectedChannel> = Vec::new();
     let mut used = vec![false; candidates.len()];
@@ -1251,7 +1278,8 @@ pub async fn forward_generic(
     // 学 cc-switch：剥离 [1M]/[1m] 后缀（Claude Code 内置的 1M 上下文标记，大小写不敏感）
     // 客户端发 model=auto[1M]，网关剥离后识别档位 auto（黑盒调度），真实模型名由网关选
     let requested_model = strip_1m_suffix(&requested_model);
-    let pin_key = session_key(&payload, auth_header);
+    let granularity = config.sticky_cfg().granularity.as_deref().unwrap_or("session");
+    let pin_key = session_key(&payload, auth_header, granularity);
     let dkey = device_name.or_else(|| downstream_key(&config.auth, auth_header)); // 多设备身份：日志/记账按设备名
 
     // 档位（auto/pro/flash 是客户端配置的 model 名，保留字）：网关按档位过滤候选
@@ -2462,7 +2490,7 @@ mod tests {
     async fn sticky_multi_client_independent() {
         // 两个不同 session → 各自独立 pin（互不干扰）
         let mut cfg = GatewayConfig::default();
-        cfg.sticky = StickyConfig { enabled: true, ttl_seconds: 300 };
+        cfg.sticky = StickyConfig { enabled: true, ttl_seconds: 300, ..Default::default() };
         cfg.providers.push(Provider {
             name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
             headers: HashMap::new(),
@@ -2492,7 +2520,7 @@ mod tests {
     async fn sticky_ttl_expires_repins_fresh() {
         // TTL 过期 → pin 失效 → 重新选（不再强制黏旧通道）
         let mut cfg = GatewayConfig::default();
-        cfg.sticky = StickyConfig { enabled: true, ttl_seconds: 60 };
+        cfg.sticky = StickyConfig { enabled: true, ttl_seconds: 60, ..Default::default() };
         cfg.providers.push(Provider {
             name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
             headers: HashMap::new(),
@@ -2547,7 +2575,7 @@ mod tests {
     #[tokio::test]
     async fn sticky_reuses_same_channel() {
         let mut cfg = GatewayConfig::default();
-        cfg.sticky = StickyConfig { enabled: true, ttl_seconds: 300 };
+        cfg.sticky = StickyConfig { enabled: true, ttl_seconds: 300, ..Default::default() };
         // 两条通道都能服务 my-model
         cfg.providers.push(Provider {
             name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
@@ -2578,7 +2606,7 @@ mod tests {
     #[tokio::test]
     async fn sticky_repins_when_channel_unhealthy() {
         let mut cfg = GatewayConfig::default();
-        cfg.sticky = StickyConfig { enabled: true, ttl_seconds: 300 };
+        cfg.sticky = StickyConfig { enabled: true, ttl_seconds: 300, ..Default::default() };
         cfg.providers.push(Provider {
             name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
             headers: HashMap::new(),
@@ -2612,7 +2640,7 @@ mod tests {
     #[tokio::test]
     async fn sticky_disabled_always_fresh() {
         let mut cfg = GatewayConfig::default();
-        cfg.sticky = StickyConfig { enabled: false, ttl_seconds: 300 };
+        cfg.sticky = StickyConfig { enabled: false, ttl_seconds: 300, ..Default::default() };
         cfg.providers.push(Provider {
             name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
             headers: HashMap::new(),
@@ -2634,7 +2662,7 @@ mod tests {
     #[tokio::test]
     async fn sticky_ttl_expired_repins() {
         let mut cfg = GatewayConfig::default();
-        cfg.sticky = StickyConfig { enabled: true, ttl_seconds: 300 };
+        cfg.sticky = StickyConfig { enabled: true, ttl_seconds: 300, ..Default::default() };
         cfg.providers.push(Provider {
             name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
             headers: HashMap::new(),
@@ -2665,7 +2693,7 @@ mod tests {
     #[tokio::test]
     async fn latency_picks_lowest_ttft() {
         let mut cfg = GatewayConfig::default();
-        cfg.sticky = StickyConfig { enabled: false, ttl_seconds: 300 }; // 关黏性，纯测延迟
+        cfg.sticky = StickyConfig { enabled: false, ttl_seconds: 300, ..Default::default() }; // 关黏性，纯测延迟
         cfg.providers.push(Provider {
             name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
             headers: HashMap::new(),
@@ -2712,7 +2740,7 @@ mod tests {
     fn two_chan_cfg(strategy: RoutingStrategy) -> GatewayConfig {
         let mut cfg = GatewayConfig::default();
         cfg.routing = RoutingConfig { strategy, auto_mode_enabled: true, max_retries: 3, ..Default::default() };
-        cfg.sticky = StickyConfig { enabled: false, ttl_seconds: 300 };
+        cfg.sticky = StickyConfig { enabled: false, ttl_seconds: 300, ..Default::default() };
         cfg.providers.push(Provider {
             name: "p1".into(), base_url: "http://x/v1".into(), disabled: false,
             headers: HashMap::new(),
