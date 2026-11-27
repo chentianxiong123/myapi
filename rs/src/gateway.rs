@@ -2211,6 +2211,102 @@ pub async fn fetch_upstream_models(base_url: &str, api_key: &str, headers: &[(St
     Ok(ids)
 }
 
+/// 上游模型差异检测（学 new-api collectPendingUpstreamModelChangesFromModels）。
+/// 纯手动：只算差异不写库，由调用方决定加/删。
+/// - add    = upstream − local − ignored（ignored 支持 `regex:` 前缀正则）
+/// - remove = local − upstream（本地有、上游已消失）
+/// - ignored= 被忽略规则命中的上游新模型（提示但不加入）
+pub fn diff_upstream_models(upstream: &[String], local: &[String], ignored: &[String])
+    -> (Vec<String>, Vec<String>, Vec<String>) {
+    use regex::Regex;
+    use std::collections::HashSet;
+
+    let local_set: HashSet<&str> = local.iter().map(|s| s.as_str()).collect();
+    // 预编译忽略规则（`regex:` 前缀走正则，否则精确匹配）
+    let rules: Vec<(String, Option<Regex>)> = ignored
+        .iter()
+        .filter_map(|r| {
+            let r = r.trim().to_string();
+            if r.is_empty() { return None; }
+            if let Some(pat) = r.strip_prefix("regex:") {
+                let re = Regex::new(pat).ok();
+                Some((r, re))
+            } else {
+                Some((r, None))
+            }
+        })
+        .collect();
+
+    let mut ignored_hit = Vec::new();
+    let mut add = Vec::new();
+    for m in upstream {
+        if local_set.contains(m.as_str()) { continue; }
+        if rules.iter().any(|(r, re)| match re {
+            Some(rx) => rx.is_match(m),
+            None => r == m,
+        }) {
+            ignored_hit.push(m.clone());
+            continue;
+        }
+        add.push(m.clone());
+    }
+
+    let up_set: HashSet<&str> = upstream.iter().map(|s| s.as_str()).collect();
+    let remove: Vec<String> = local.iter()
+        .filter(|m| !up_set.contains(m.as_str()))
+        .cloned()
+        .collect();
+
+    (add, remove, ignored_hit)
+}
+
+/// 应用上游模型变更到 gateway.yaml（纯手动：只写调用方勾选的 add/remove）。
+/// add 是完整 ChannelModel JSON（[{name, alias?, protocol?}, ...]），remove 是模型名。
+/// 返回更新后的 providers 段。
+pub fn apply_upstream_models(
+    root: &std::path::Path,
+    provider: &str,
+    channel_id: &str,
+    add: &[serde_json::Value],
+    remove: &[String],
+) -> Result<serde_json::Value, String> {
+    use std::collections::HashSet;
+    let path = root.join("config").join("gateway.yaml");
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("读 gateway.yaml 失败: {}", e))?;
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&raw)
+        .map_err(|e| format!("解析 gateway.yaml 失败: {}", e))?;
+
+    let provs = doc.get_mut("providers").and_then(|v| v.as_sequence_mut())
+        .ok_or_else(|| "gateway.yaml 缺 providers 段".to_string())?;
+    let p = provs.iter_mut()
+        .find(|p| p.get("name").and_then(|v| v.as_str()) == Some(provider))
+        .ok_or_else(|| format!("供应商不存在: {}", provider))?;
+    let chs = p.get_mut("channels").and_then(|v| v.as_sequence_mut())
+        .ok_or_else(|| format!("供应商 {} 缺 channels 段", provider))?;
+    let c = chs.iter_mut()
+        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(channel_id))
+        .ok_or_else(|| format!("通道不存在: {}", channel_id))?;
+    let models = c.get_mut("models").and_then(|v| v.as_sequence_mut())
+        .ok_or_else(|| format!("通道 {} 缺 models 段", channel_id))?;
+
+    let to_remove: HashSet<&str> = remove.iter().map(|s| s.as_str()).collect();
+    let before = models.len();
+    models.retain(|m| !to_remove.contains(
+        m.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+    ));
+    let removed = before - models.len();
+    for m in add {
+        let yv = serde_yaml::to_value(m).map_err(|e| format!("模型项转 YAML 失败: {}", e))?;
+        models.push(yv);
+    }
+
+    std::fs::write(&path, serde_yaml::to_string(&doc).map_err(|e| format!("序列化失败: {}", e))?)
+        .map_err(|e| format!("写 gateway.yaml 失败: {}", e))?;
+
+    let provs_val = doc.get("providers").cloned().unwrap_or(serde_yaml::Value::Null);
+    serde_json::to_value(provs_val).map_err(|e| format!("转 JSON 失败: {}", e))
+}
+
 pub async fn probe_upstream(root: &std::path::Path) -> Vec<serde_json::Value> {
     let config = load_config(root);
     let client = match reqwest::Client::builder()
@@ -3345,5 +3441,31 @@ mod tests {
         assert_eq!(e.status(), Some(400));
         let r = ForwardError::Retryable { status: Some(429), retry_after: None, msg: "r".into() };
         assert!(!r.is_context(), "Retryable 不是 context");
+    }
+
+    // ---- 上游模型差异检测（纯手动 detect/apply 学 new-api）----
+    #[test]
+    fn diff_upstream_add_remove_and_regex_ignored() {
+        let upstream = vec!["gpt-4o".into(), "gpt-4o-mini".into(), "gpt-5-preview".into(), "new-model".into()];
+        let local = vec!["gpt-4o".into(), "gone-model".into()];
+        let (add, remove, ignored) = diff_upstream_models(&upstream, &local, &["regex:.*-preview".into()]);
+        assert_eq!(add, vec!["gpt-4o-mini".to_string(), "new-model".to_string()], "新增=上游有本地无且未被忽略");
+        assert_eq!(remove, vec!["gone-model".to_string()], "消失=本地有上游无");
+        assert_eq!(ignored, vec!["gpt-5-preview".to_string()], "regex: 规则命中应进 ignored 不进 add");
+    }
+
+    #[test]
+    fn diff_upstream_no_change_and_empty_rules() {
+        let models = vec!["m1".into(), "m2".into()];
+        let (add, remove, ignored) = diff_upstream_models(&models, &models, &[]);
+        assert!(add.is_empty() && remove.is_empty() && ignored.is_empty(), "完全一致应无差异");
+    }
+
+    #[test]
+    fn diff_upstream_exact_rule_not_regex() {
+        let upstream = vec!["m1".into(), "m2".into(), "m3".into()];
+        let (add, _, ignored) = diff_upstream_models(&upstream, &["m1".into()], &["m3".into()]);
+        assert_eq!(add, vec!["m2".to_string()], "无 regex: 前缀应精确匹配");
+        assert_eq!(ignored, vec!["m3".to_string()]);
     }
 }

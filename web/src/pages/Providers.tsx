@@ -17,6 +17,14 @@ export default function Providers() {
   const [testingKeys, setTestingKeys] = useState<Set<string>>(new Set())
   const [proxyPools, setProxyPools] = useState<ProxyPool[]>([])
   const [testResults, setTestResults] = useState<Map<string, 'ok' | 'fail'>>(new Map())
+  // 上游模型变更检测（纯手动，学 new-api detect/apply：只检测不自动改库，用户勾选后才写）
+  const [diffTarget, setDiffTarget] = useState<{ p: number; c: number } | null>(null)
+  const [diffResult, setDiffResult] = useState<{ add: string[]; remove: string[]; ignored: string[]; upstream_count: number; local_count: number } | null>(null)
+  const [diffBusy, setDiffBusy] = useState(false)
+  const [applyBusy, setApplyBusy] = useState(false)
+  const [ignoredInput, setIgnoredInput] = useState('')
+  const [checkedAdd, setCheckedAdd] = useState<Set<string>>(new Set())
+  const [checkedRemove, setCheckedRemove] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     loadProviders()
@@ -215,6 +223,64 @@ export default function Providers() {
     }
   }
 
+  // 纯手动检测上游模型变更（学 new-api DetectChannelUpstreamModelUpdates）：
+  // 点按钮才打上游，返回 add（上游新增）/remove（本地已消失）/ignored（被规则忽略），只检测不写库。
+  async function detectUpstreamModels(pidx: number, cidx: number) {
+    const ch = providers[pidx].channels[cidx]
+    setDiffBusy(true)
+    setDiffTarget({ p: pidx, c: cidx })
+    setDiffResult(null)
+    try {
+      const ignored = ignoredInput.split(',').map(s => s.trim()).filter(Boolean)
+      const res = await postJSON<{ ok: boolean; add?: string[]; remove?: string[]; ignored?: string[]; upstream_count?: number; local_count?: number; error?: string }>(
+        '/api/providers/upstream-models',
+        { provider: providers[pidx].name, channel_id: ch.id, ignored },
+      )
+      if (!res.ok || !res.add) { toast(res.error || '检测失败'); return }
+      setDiffResult({
+        add: res.add || [],
+        remove: res.remove || [],
+        ignored: res.ignored || [],
+        upstream_count: res.upstream_count || 0,
+        local_count: res.local_count || 0,
+      })
+      // 默认：add 全选（安全：只加不删），remove 不选（删除需用户确认）
+      setCheckedAdd(new Set(res.add || []))
+      setCheckedRemove(new Set())
+    } catch (e: any) {
+      toast(e?.message || '检测失败')
+    } finally {
+      setDiffBusy(false)
+    }
+  }
+
+  // 应用上游模型变更（纯手动，学 new-api ApplyChannelUpstreamModelUpdates）：只写用户勾选的
+  async function applyUpstreamModels() {
+    if (!diffTarget || !diffResult) return
+    const { p, c } = diffTarget
+    setApplyBusy(true)
+    try {
+      const add = [...checkedAdd].map(name => ({ name, alias: '', protocol: 'openai_chat' }))
+      const remove = [...checkedRemove]
+      const res = await postJSON<{ ok: boolean; providers?: Provider[]; error?: string }>(
+        '/api/providers/apply-upstream-models',
+        { provider: providers[p].name, channel_id: providers[p].channels[c].id, add, remove },
+      )
+      if (!res.ok) { toast(res.error || '应用失败'); return }
+      if (res.providers) setProviders(res.providers)
+      toast(`已应用：+${add.length} / −${remove.length}`)
+      closeDiff()
+    } catch (e: any) {
+      toast(e?.message || '应用失败')
+    } finally {
+      setApplyBusy(false)
+    }
+  }
+
+  function closeDiff() { setDiffTarget(null); setDiffResult(null); setCheckedAdd(new Set()); setCheckedRemove(new Set()) }
+  function toggleAdd(name: string) { setCheckedAdd(prev => { const n = new Set(prev); n.has(name) ? n.delete(name) : n.add(name); return n }) }
+  function toggleRemove(name: string) { setCheckedRemove(prev => { const n = new Set(prev); n.has(name) ? n.delete(name) : n.add(name); return n }) }
+
   // 通道测试（学 new-api TestChannel）：真发一个 chat 请求验证通道，显示能否出 token
   const [testingCh, setTestingCh] = useState<string | null>(null)
   const [testResult, setTestResult] = useState<Record<string, any>>({})
@@ -289,6 +355,64 @@ export default function Providers() {
 
   return (
     <div className="space-y-4">
+      {diffTarget && diffResult && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={closeDiff}>
+          <div className="w-full max-w-lg rounded-xl bg-white p-4 shadow-2xl dark:bg-gray-800" onClick={e => e.stopPropagation()}>
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="text-sm font-semibold">上游模型变更检测（纯手动）</h3>
+              <button onClick={closeDiff} className="text-gray-400 hover:text-gray-600">×</button>
+            </div>
+            <p className="mb-2 text-xs text-gray-500">
+              上游 {diffResult.upstream_count} 个 / 本地 {diffResult.local_count} 个 ·
+              勾选后才写入 gateway.yaml（apply 只写你勾的）
+            </p>
+            <div className="mb-2 flex items-center gap-2">
+              <label className="text-xs text-gray-500">忽略规则</label>
+              <input
+                value={ignoredInput}
+                onChange={e => setIgnoredInput(e.target.value)}
+                placeholder="逗号分隔，支持 regex: 前缀，如 regex:.*-preview"
+                className="flex-1 rounded border border-gray-300 px-2 py-1 font-mono text-xs dark:border-gray-600 dark:bg-gray-700"
+              />
+            </div>
+            <div className="max-h-56 space-y-2 overflow-y-auto">
+              <div>
+                <p className="mb-1 text-xs font-medium text-emerald-600">上游新增（{diffResult.add.length}，勾选加入）</p>
+                {diffResult.add.length === 0 && <p className="text-xs text-gray-400">无新增</p>}
+                {diffResult.add.map(m => (
+                  <label key={m} className="flex cursor-pointer items-center gap-2 text-xs">
+                    <input type="checkbox" checked={checkedAdd.has(m)} onChange={() => toggleAdd(m)} />
+                    <span className="font-mono">{m}</span>
+                  </label>
+                ))}
+              </div>
+              <div>
+                <p className="mb-1 text-xs font-medium text-red-500">上游已消失（{diffResult.remove.length}，勾选删除）</p>
+                {diffResult.remove.length === 0 && <p className="text-xs text-gray-400">无消失</p>}
+                {diffResult.remove.map(m => (
+                  <label key={m} className="flex cursor-pointer items-center gap-2 text-xs">
+                    <input type="checkbox" checked={checkedRemove.has(m)} onChange={() => toggleRemove(m)} />
+                    <span className="font-mono">{m}</span>
+                  </label>
+                ))}
+              </div>
+              {diffResult.ignored.length > 0 && (
+                <p className="text-xs text-gray-400">被忽略规则命中：{diffResult.ignored.join(', ')}</p>
+              )}
+            </div>
+            <div className="mt-3 flex justify-end gap-2">
+              <button onClick={closeDiff} className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs dark:border-gray-600">取消</button>
+              <button
+                onClick={applyUpstreamModels}
+                disabled={applyBusy || (checkedAdd.size === 0 && checkedRemove.size === 0)}
+                className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                {applyBusy ? '应用中…' : `应用（+${checkedAdd.size} / −${checkedRemove.size}）`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-lg font-semibold">Providers</h2>
@@ -547,6 +671,16 @@ export default function Providers() {
                               )}
                               {fetchMsg && fetchingIdx?.p === idx && fetchingIdx?.c === cidx && (
                                 <span className="text-xs text-gray-400">{fetchMsg}</span>
+                              )}
+                              {p.base_url && (
+                                <button
+                                  onClick={() => detectUpstreamModels(idx, cidx)}
+                                  disabled={diffBusy}
+                                  className="text-xs text-violet-600 hover:text-violet-700 disabled:opacity-50"
+                                  title="纯手动检测上游模型变更（返回新增/已消失，勾选后才写）"
+                                >
+                                  {diffBusy ? '检测中…' : '🔍 检测变更'}
+                                </button>
                               )}
                               <button onClick={() => addChannelModel(idx, cidx, 'openai_chat')} className="text-xs text-blue-600 hover:text-blue-700">+ 添加</button>
                             </div>

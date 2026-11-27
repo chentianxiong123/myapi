@@ -667,6 +667,79 @@ async fn fetch_upstream_models_handler(
     }
 }
 
+/// POST /api/providers/upstream-models：纯手动嗅探上游模型 + 差异检测（学 new-api DetectChannelUpstreamModelUpdates）
+/// 入参 {provider, channel_id, ignored?} → 读 gateway.yaml 拿 base_url/key/headers/local 模型
+/// → GET {base}/models → diff（add=上游新、remove=本地消失、ignored=被规则忽略）
+/// 返回 {ok, add, remove, ignored, upstream_count, local_count}（只检测不写库）
+async fn detect_upstream_models_handler(
+    State(s): State<S>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let provider = body.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+    let channel_id = body.get("channel_id").and_then(|v| v.as_str()).unwrap_or("");
+    if provider.is_empty() || channel_id.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"ok": false, "error": "缺少 provider 或 channel_id"}))).into_response();
+    }
+    let ignored: Vec<String> = body.get("ignored").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    let config = gateway::load_config(&s.root);
+    let p = match config.providers.iter().find(|p| p.name == provider) {
+        Some(p) => p,
+        None => return (axum::http::StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({"ok": false, "error": format!("供应商不存在: {}", provider)}))).into_response(),
+    };
+    let c = match p.channels.iter().find(|c| c.id == channel_id) {
+        Some(c) => c,
+        None => return (axum::http::StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({"ok": false, "error": format!("通道不存在: {}", channel_id)}))).into_response(),
+    };
+    let base = p.base_url.trim_end_matches('/').to_string();
+    let api_key = gateway::resolve_key(p, c).unwrap_or_default();
+    let headers: Vec<(String, String)> = p.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let upstream = match gateway::fetch_upstream_models(&base, &api_key, &headers).await {
+        Ok(m) => m,
+        Err(e) => return (axum::http::StatusCode::BAD_GATEWAY,
+            axum::Json(serde_json::json!({"ok": false, "error": e}))).into_response(),
+    };
+    let local: Vec<String> = c.models.iter().map(|m| m.name.clone()).collect();
+    let (add, remove, ignored_hit) = gateway::diff_upstream_models(&upstream, &local, &ignored);
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "add": add,
+        "remove": remove,
+        "ignored": ignored_hit,
+        "upstream_count": upstream.len(),
+        "local_count": local.len(),
+    })).into_response()
+}
+
+/// POST /api/providers/apply-upstream-models：纯手动应用上游模型变更（学 new-api ApplyChannelUpstreamModelUpdates）
+/// 入参 {provider, channel_id, add: [{name, alias?, protocol?}, ...], remove: [model_name, ...]}
+/// → 只写勾选的（前端 diff 对话框里用户勾选后传）→ 写回 gateway.yaml（热加载即时生效）
+/// 返回 {ok, providers}
+async fn apply_upstream_models_handler(
+    State(s): State<S>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let provider = body.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+    let channel_id = body.get("channel_id").and_then(|v| v.as_str()).unwrap_or("");
+    if provider.is_empty() || channel_id.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"ok": false, "error": "缺少 provider 或 channel_id"}))).into_response();
+    }
+    let add = body.get("add").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let remove: Vec<String> = body.get("remove").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    match gateway::apply_upstream_models(&s.root, provider, channel_id, &add, &remove) {
+        Ok(providers) => axum::Json(serde_json::json!({"ok": true, "providers": providers})).into_response(),
+        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({"ok": false, "error": e}))).into_response(),
+    }
+}
+
 /// POST /api/channels/test：通道测试（学 new-api TestChannel）真发一个 chat 请求验证
 /// 入参 {provider, channel_id} → 用 gateway.yaml 的 test 配置（默认模型+测试对话）→ 返回 {ok, status, latency_ms, content/error}
 async fn test_channel_handler(
@@ -691,6 +764,8 @@ pub fn build_router(state: S) -> Router {
         // ---- 网关配置：读写 gateway.yaml（热加载即时生效）----
         .route("/api/providers", get(get_providers).post(post_providers))
         .route("/api/providers/fetch-models", post(fetch_upstream_models_handler))
+        .route("/api/providers/upstream-models", post(detect_upstream_models_handler))
+        .route("/api/providers/apply-upstream-models", post(apply_upstream_models_handler))
         .route("/api/channels/test", post(test_channel_handler))
         .route("/api/routing", get(get_routing).post(post_routing))
         .route("/api/proxypools", get(get_proxypools).post(post_proxypools))
