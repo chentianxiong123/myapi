@@ -48,7 +48,11 @@ impl S {
     }
 }
 
-fn root() -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")) }
+fn root() -> PathBuf {
+    // MYAPI_ROOT 环境变量可覆盖（Python 假测试框架用：隔离到临时目录，不污染真实 rs/config/）
+    std::env::var("MYAPI_ROOT").map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
 
 /// gateway.yaml 路径（网关配置，热加载：网关每请求重读）
 fn gateway_yaml(root: &Path) -> PathBuf { root.join("config").join("gateway.yaml") }

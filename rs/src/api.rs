@@ -4,7 +4,11 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-pub fn root() -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")) }
+pub fn root() -> PathBuf {
+    // MYAPI_ROOT 环境变量可覆盖（Python 假测试框架用：隔离到临时目录，不污染真实配置）
+    std::env::var("MYAPI_ROOT").map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
 pub fn config_path() -> PathBuf { root().join("config").join("myapi-config.yaml") }
 
 #[derive(Debug, Clone)]
