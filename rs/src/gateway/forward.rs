@@ -1,5 +1,9 @@
 //! 转发核心（从 gateway.rs 拆出）
 use super::*;
+mod sniff;
+pub use sniff::*;
+mod nginx;
+pub use nginx::*;
 
 pub async fn forward_generic(
     root: &std::path::Path,
@@ -839,151 +843,19 @@ pub fn list_models(config: &GatewayConfig) -> Vec<serde_json::Value> {
 /// 按协议拼上游模型列表 URL（学 new-api fetchChannelUpstreamModelIDs）。
 /// 只支持最通用的几个：openai_chat/openai_responses/anthropic→{base}/models（OpenAI 形），
 /// gemini→{base}/v1beta/models，ollama→{base}/api/tags。其余（阿里/智谱等专门路径）不做。
-pub fn upstream_models_url(base: &str, protocol: &str) -> String {
-    let base = base.trim_end_matches('/');
-    match protocol {
-        "gemini" => format!("{}/v1beta/models", base),
-        "ollama" => format!("{}/api/tags", base),
-        _ => format!("{}/models", base),
-    }
-}
 
 /// 按协议剥离模型名前缀（学 new-api TrimPrefix）：gemini 的 name 带 `models/` 前缀，剥掉。
-pub fn strip_model_prefix(id: &str, protocol: &str) -> String {
-    if protocol == "gemini" {
-        id.strip_prefix("models/").unwrap_or(id).to_string()
-    } else {
-        id.to_string()
-    }
-}
 
-pub async fn fetch_upstream_models(base_url: &str, api_key: &str, headers: &[(String, String)], protocol: &str) -> Result<Vec<String>, String> {
-    let url = upstream_models_url(base_url, protocol);
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("client 构造失败: {}", e))?;
-    let mut req = client.get(&url).header("Authorization", format!("Bearer {}", api_key));
-    for (k, v) in headers {
-        req = req.header(k.as_str(), v.as_str());
-    }
-    let resp = req.send().await.map_err(|e| format!("请求上游失败: {}", e))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(format!("上游返回 {}", status.as_u16()));
-    }
-    let body: serde_json::Value = resp.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
-    // OpenAI 格式 {data: [{id: "gpt-4", ...}, ...]}；兼容 {models: [...]}（gemini/ollama）/ 裸数组
-    let ids: Vec<String> = if let Some(data) = body.get("data").and_then(|v| v.as_array()) {
-        data.iter().filter_map(|m| m.get("id").and_then(|x| x.as_str()).map(|s| s.to_string())).collect()
-    } else if let Some(models) = body.get("models").and_then(|v| v.as_array()) {
-        models.iter().filter_map(|m| {
-            m.get("id").or_else(|| m.get("name")).and_then(|x| x.as_str()).map(|s| s.to_string())
-        }).collect()
-    } else if let Some(arr) = body.as_array() {
-        arr.iter().filter_map(|m| m.get("id").and_then(|x| x.as_str()).map(|s| s.to_string())).collect()
-    } else {
-        vec![]
-    };
-    Ok(ids.into_iter().map(|id| strip_model_prefix(&id, protocol)).collect())
-}
 
 /// 上游模型差异检测（学 new-api collectPendingUpstreamModelChangesFromModels）。
 /// 纯手动：只算差异不写库，由调用方决定加/删。
 /// - add    = upstream − local − ignored（ignored 支持 `regex:` 前缀正则）
 /// - remove = local − upstream（本地有、上游已消失）
 /// - ignored= 被忽略规则命中的上游新模型（提示但不加入）
-pub fn diff_upstream_models(upstream: &[String], local: &[String], ignored: &[String])
-    -> (Vec<String>, Vec<String>, Vec<String>) {
-    use regex::Regex;
-    use std::collections::HashSet;
-
-    let local_set: HashSet<&str> = local.iter().map(|s| s.as_str()).collect();
-    // 预编译忽略规则（`regex:` 前缀走正则，否则精确匹配）
-    let rules: Vec<(String, Option<Regex>)> = ignored
-        .iter()
-        .filter_map(|r| {
-            let r = r.trim().to_string();
-            if r.is_empty() { return None; }
-            if let Some(pat) = r.strip_prefix("regex:") {
-                let re = Regex::new(pat).ok();
-                Some((r, re))
-            } else {
-                Some((r, None))
-            }
-        })
-        .collect();
-
-    let mut ignored_hit = Vec::new();
-    let mut add = Vec::new();
-    for m in upstream {
-        if local_set.contains(m.as_str()) { continue; }
-        if rules.iter().any(|(r, re)| match re {
-            Some(rx) => rx.is_match(m),
-            None => r == m,
-        }) {
-            ignored_hit.push(m.clone());
-            continue;
-        }
-        add.push(m.clone());
-    }
-
-    let up_set: HashSet<&str> = upstream.iter().map(|s| s.as_str()).collect();
-    let remove: Vec<String> = local.iter()
-        .filter(|m| !up_set.contains(m.as_str()))
-        .cloned()
-        .collect();
-
-    (add, remove, ignored_hit)
-}
 
 /// 应用上游模型变更到 gateway.yaml（纯手动：只写调用方勾选的 add/remove）。
 /// add 是完整 ChannelModel JSON（[{name, alias?, protocol?}, ...]），remove 是模型名。
 /// 返回更新后的 providers 段。
-pub fn apply_upstream_models(
-    root: &std::path::Path,
-    provider: &str,
-    channel_id: &str,
-    add: &[serde_json::Value],
-    remove: &[String],
-) -> Result<serde_json::Value, String> {
-    use std::collections::HashSet;
-    let path = root.join("config").join("gateway.yaml");
-    let raw = std::fs::read_to_string(&path).map_err(|e| format!("读 gateway.yaml 失败: {}", e))?;
-    let mut doc: serde_yaml::Value = serde_yaml::from_str(&raw)
-        .map_err(|e| format!("解析 gateway.yaml 失败: {}", e))?;
-
-    let provs = doc.get_mut("providers").and_then(|v| v.as_sequence_mut())
-        .ok_or_else(|| "gateway.yaml 缺 providers 段".to_string())?;
-    let p = provs.iter_mut()
-        .find(|p| p.get("name").and_then(|v| v.as_str()) == Some(provider))
-        .ok_or_else(|| format!("供应商不存在: {}", provider))?;
-    let chs = p.get_mut("channels").and_then(|v| v.as_sequence_mut())
-        .ok_or_else(|| format!("供应商 {} 缺 channels 段", provider))?;
-    let c = chs.iter_mut()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(channel_id))
-        .ok_or_else(|| format!("通道不存在: {}", channel_id))?;
-    let models = c.get_mut("models").and_then(|v| v.as_sequence_mut())
-        .ok_or_else(|| format!("通道 {} 缺 models 段", channel_id))?;
-
-    let to_remove: HashSet<&str> = remove.iter().map(|s| s.as_str()).collect();
-    let before = models.len();
-    models.retain(|m| !to_remove.contains(
-        m.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-    ));
-    let removed = before - models.len();
-    for m in add {
-        let yv = serde_yaml::to_value(m).map_err(|e| format!("模型项转 YAML 失败: {}", e))?;
-        models.push(yv);
-    }
-
-    std::fs::write(&path, serde_yaml::to_string(&doc).map_err(|e| format!("序列化失败: {}", e))?)
-        .map_err(|e| format!("写 gateway.yaml 失败: {}", e))?;
-
-    let provs_val = doc.get("providers").cloned().unwrap_or(serde_yaml::Value::Null);
-    serde_json::to_value(provs_val).map_err(|e| format!("转 JSON 失败: {}", e))
-}
 
 pub async fn probe_upstream(root: &std::path::Path) -> Vec<serde_json::Value> {
     let config = load_config(root);
@@ -1036,78 +908,4 @@ pub async fn probe_upstream(root: &std::path::Path) -> Vec<serde_json::Value> {
 /// 生成 Nginx 高可用配置（学 new-api 多机部署）：从 deploy 配置生成完整 nginx.conf
 /// 客户端 → Nginx 固定入口 → upstream 主/备 → 网关节点。故障切换靠 proxy_next_upstream。
 /// SSE 流式：proxy_buffering off + 长 read timeout。
-pub fn generate_nginx_conf(deploy: &serde_json::Value) -> String {
-    let entry = deploy.get("entry").cloned().unwrap_or_else(|| serde_json::json!({}));
-    let listen = entry.get("listen").and_then(|v| v.as_u64()).unwrap_or(8380);
-    let read_timeout = entry.get("readTimeout").and_then(|v| v.as_u64()).unwrap_or(120);
-    let next_upstream = entry.get("nextUpstream").and_then(|v| v.as_str()).unwrap_or("error timeout http_502 http_503 http_504");
-    let instances = deploy.get("instances").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-
-    // upstream 块：master 在前，backup 标记 backup（只有主挂了才用备）
-    let mut servers = String::new();
-    for inst in &instances {
-        let addr = inst.get("address").and_then(|v| v.as_str()).unwrap_or("");
-        if addr.is_empty() { continue; }
-        let role = inst.get("role").and_then(|v| v.as_str()).unwrap_or("backup");
-        let max_fails = inst.get("heartbeatMs").and_then(|v| v.as_u64()).unwrap_or(5000) / 1000;
-        if role == "master" {
-            servers.push_str(&format!("        server {} max_fails={} fail_timeout={}s;\n", addr, max_fails.max(2), max_fails.max(5)));
-        } else {
-            servers.push_str(&format!("        server {} backup max_fails={} fail_timeout={}s;\n", addr, max_fails.max(2), max_fails.max(5)));
-        }
-    }
-    if servers.is_empty() {
-        servers.push_str("        # 无实例，请在面板添加网关节点\n");
-    }
-
-    format!(
-        r#"# myapi 高可用 Nginx 配置（由面板生成）
-# 部署：放到 Nginx 常驻机（不要装在 meilan 手机，保持手机省电）
-# 客户端认固定入口 :{listen}，主节点挂了 proxy_next_upstream 自动切备用
-
-worker_processes auto;
-events {{ worker_connections 1024; }}
-
-http {{
-    # SSE 流式透传（网关的 /v1/chat/completions 是 SSE，必须关缓冲）
-    proxy_buffering off;
-    proxy_cache off;
-    proxy_http_version 1.1;
-    proxy_set_header Connection "";
-
-    upstream myapi {{
-{servers}    }}
-
-    server {{
-        listen {listen};
-        # 客户端只认这个入口，无感知主备切换
-
-        location / {{
-            proxy_pass http://myapi;
-            proxy_next_upstream {next_upstream};
-            proxy_next_upstream_tries 3;
-            proxy_next_upstream_timeout 30s;
-
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_read_timeout {read_timeout}s;
-            proxy_send_timeout {read_timeout}s;
-            proxy_connect_timeout 5s;
-        }}
-
-        # 健康检查（Nginx 主动探活，摘除死节点）
-        location = /health {{
-            proxy_pass http://myapi;
-            proxy_next_upstream error timeout;
-        }}
-    }}
-}}
-"#,
-        listen = listen,
-        servers = servers,
-        next_upstream = next_upstream,
-        read_timeout = read_timeout,
-    )
-}
 
