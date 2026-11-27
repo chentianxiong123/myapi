@@ -686,8 +686,8 @@ pub(crate) async fn forward_one(
 /// 流结束后把 (input_tokens, output_tokens) 通过 oneshot channel 发给后台任务补记日志。
 /// 流式 SSE 的 model 字段改写为档位名（客户端配的 model 名，对齐非流式回显）。
 struct ModelRewriteStream {
-    inner: std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send>>,
-    model: String,
+    pub(crate) inner: std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send>>,
+    pub(crate) model: String,
 }
 
 impl futures_core::Stream for ModelRewriteStream {
@@ -728,10 +728,10 @@ pub(crate) fn rewrite_chunk_model(chunk: &[u8], model: &str) -> Vec<u8> {
 }
 
 struct SseUsageTap {
-    inner: std::pin::Pin<Box<dyn futures_core::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
-    buf: Vec<u8>,
-    usage: (Option<i64>, Option<i64>, Option<i64>, Option<i64>),
-    usage_tx: Option<tokio::sync::oneshot::Sender<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>>,
+    pub(crate) inner: std::pin::Pin<Box<dyn futures_core::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
+    pub(crate) buf: Vec<u8>,
+    pub(crate) usage: (Option<i64>, Option<i64>, Option<i64>, Option<i64>),
+    pub(crate) usage_tx: Option<tokio::sync::oneshot::Sender<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>>,
 }
 
 impl futures_core::Stream for SseUsageTap {
